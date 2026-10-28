@@ -203,6 +203,10 @@ fun ExtractorScreen(
             }
         }
 
+        val availableDocxFiles = remember {
+            runCatching { com.example.docx.DocxGenerator.getOrCreateAvailableDocxFiles(context) }.getOrDefault(emptyList())
+        }
+
         // Upload Source File Action Card
         Card(
             shape = RoundedCornerShape(14.dp),
@@ -220,7 +224,7 @@ fun ExtractorScreen(
                 )
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    text = "يدعم التطبيق استخراج النصوص والجداول مباشرة من مستندات Word (.docx) وملفات النصوص (.txt):",
+                    text = "تُحفظ الجذاذات المصدّرة تلقائياً في مجلد «التنزيلات / Downloads» على هاتفك. يمكنك اختيار ملف من الهاتف أو الضغط على أحد ملفات Word الجاهزة أسفله:",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -254,9 +258,64 @@ fun ExtractorScreen(
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = "رفع ملف الجذاذة (Word .docx أو Text)",
+                        text = "استعراض ملفات الهاتف (التنزيلات / المستندات)",
                         fontWeight = FontWeight.Bold
                     )
+                }
+
+                if (availableDocxFiles.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text(
+                        text = "ملفات Word (.docx) متوفرة في الهاتف/التطبيق (اضغط للرفع الفوري):",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        availableDocxFiles.forEach { docxFile ->
+                            OutlinedButton(
+                                onClick = {
+                                    runCatching {
+                                        val extracted = java.io.FileInputStream(docxFile).use { stream ->
+                                            DocumentFileReader.extractTextFromDocx(stream)
+                                        }
+                                        uploadedFileName = docxFile.name
+                                        uploadedFileSize = docxFile.length()
+                                        rawInputText = extracted
+                                        val cleanBase = docxFile.name.substringBeforeLast(".")
+                                            .replace("جذاذة_", "")
+                                            .replace("_", " ")
+                                            .trim()
+                                        if (cleanBase.isNotBlank()) {
+                                            topicName = cleanBase
+                                        }
+                                        previewPlan = JadhadhaParser.parseRawText(
+                                            raw = extracted,
+                                            fallbackTopic = topicName.ifBlank { "درس جديد" },
+                                            forcedComponent = selectedComponentFilter
+                                        )
+                                        Toast.makeText(
+                                            context,
+                                            "تم رفع وتفريغ ملف ${docxFile.name} بنجاح!",
+                                            Toast.LENGTH_SHORT
+                                        ).show()
+                                    }
+                                }
+                            ) {
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Filled.InsertDriveFile,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(docxFile.name, style = MaterialTheme.typography.labelMedium)
+                            }
+                        }
+                    }
                 }
 
                 // If file is currently uploaded, show badge

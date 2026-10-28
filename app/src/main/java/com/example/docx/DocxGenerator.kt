@@ -1,10 +1,17 @@
 package com.example.docx
 
+import android.content.ContentValues
 import android.content.Context
+import android.net.Uri
+import android.os.Build
+import android.os.Environment
+import android.provider.MediaStore
 import com.example.model.JadhadhaPlan
 import com.example.model.PedagogicalComponent
+import com.example.model.SamplePlans
 import com.example.model.StageCatalog
 import java.io.File
+import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.nio.charset.StandardCharsets
 import java.util.zip.ZipEntry
@@ -18,11 +25,13 @@ object DocxGenerator {
     private const val HEADER_BG_HEX = "E2E8F0"
     private const val STAGE_BG_HEX = "F1F5F9"
     private const val ACCENT_BG_HEX = "D1FAE5"
+    const val DOCX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
-    fun generateDocx(context: Context, plan: JadhadhaPlan): File {
+    fun generateDocx(context: Context, plan: JadhadhaPlan, saveToDownloads: Boolean = true): File {
         val safeTitle = plan.topic.replace(Regex("[^\\w\\p{L}]+"), "_").take(50).ifEmpty { "jadhadha" }
+        val fileName = "جذاذة_${safeTitle}.docx"
         val outDir = File(context.cacheDir, "generated_plans").apply { mkdirs() }
-        val outFile = File(outDir, "جذاذة_${safeTitle}.docx")
+        val outFile = File(outDir, fileName)
 
         ZipOutputStream(FileOutputStream(outFile)).use { zip ->
             addZipEntry(zip, "[Content_Types].xml", buildContentTypesXml())
@@ -34,7 +43,98 @@ object DocxGenerator {
             addZipEntry(zip, "word/document.xml", buildDocumentXml(plan))
         }
 
+        // Also copy to app's external documents folder if available
+        runCatching {
+            context.getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS)?.let { extDocs ->
+                val targetDir = File(extDocs, "Jadhadhat").apply { mkdirs() }
+                outFile.copyTo(File(targetDir, fileName), overwrite = true)
+            }
+        }
+
+        // Automatically save a copy to the phone's public Downloads (التنزيلات) folder
+        if (saveToDownloads) {
+            saveToPublicDownloads(context, outFile)
+        }
+
         return outFile
+    }
+
+    /**
+     * Copies a generated .docx file into the phone's public Downloads (التنزيلات) folder
+     * so the user can find it immediately in their phone's Files / Downloads app.
+     */
+    fun saveToPublicDownloads(context: Context, file: File): Uri? {
+        return runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val resolver = context.contentResolver
+                // Remove old entry with same display name if present
+                runCatching {
+                    resolver.delete(
+                        MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                        "${MediaStore.MediaColumns.DISPLAY_NAME} = ?",
+                        arrayOf(file.name)
+                    )
+                }
+                val contentValues = ContentValues().apply {
+                    put(MediaStore.MediaColumns.DISPLAY_NAME, file.name)
+                    put(MediaStore.MediaColumns.MIME_TYPE, DOCX_MIME_TYPE)
+                    put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+                    put(MediaStore.MediaColumns.IS_PENDING, 1)
+                }
+                val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, contentValues)
+                if (uri != null) {
+                    resolver.openOutputStream(uri)?.use { outStream ->
+                        FileInputStream(file).use { inStream ->
+                            inStream.copyTo(outStream)
+                        }
+                    }
+                    contentValues.clear()
+                    contentValues.put(MediaStore.MediaColumns.IS_PENDING, 0)
+                    resolver.update(uri, contentValues, null, null)
+                }
+                uri
+            } else {
+                @Suppress("DEPRECATION")
+                val downloadsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+                downloadsDir.mkdirs()
+                val dest = File(downloadsDir, file.name)
+                file.copyTo(dest, overwrite = true)
+                Uri.fromFile(dest)
+            }
+        }.getOrNull()
+    }
+
+    /**
+     * Saves the source file to any user-chosen URI from ActivityResultContracts.CreateDocument
+     */
+    fun saveFileToUri(context: Context, sourceFile: File, targetUri: Uri): Boolean {
+        return runCatching {
+            context.contentResolver.openOutputStream(targetUri)?.use { outStream ->
+                FileInputStream(sourceFile).use { inStream ->
+                    inStream.copyTo(outStream)
+                }
+            }
+            true
+        }.getOrDefault(false)
+    }
+
+    /**
+     * Ensures sample .docx files exist in generated_plans and returns all available .docx files
+     * so the user can always find and test uploading/opening .docx files on their phone.
+     */
+    fun getOrCreateAvailableDocxFiles(context: Context): List<File> {
+        val outDir = File(context.cacheDir, "generated_plans").apply { mkdirs() }
+        val existing = outDir.listFiles { f -> f.isFile && f.name.endsWith(".docx", ignoreCase = true) }
+            ?.toList()
+            .orEmpty()
+        if (existing.isEmpty()) {
+            SamplePlans.ALL_SAMPLES.forEach { sample ->
+                runCatching { generateDocx(context, sample, saveToDownloads = true) }
+            }
+        }
+        return outDir.listFiles { f -> f.isFile && f.name.endsWith(".docx", ignoreCase = true) }
+            ?.sortedByDescending { it.lastModified() }
+            .orEmpty()
     }
 
     private fun addZipEntry(zip: ZipOutputStream, path: String, content: String) {

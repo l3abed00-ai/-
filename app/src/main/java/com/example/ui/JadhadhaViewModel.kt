@@ -364,10 +364,10 @@ class JadhadhaViewModel(
     }
 
     fun exportToDocx(context: Context): File {
-        val file = DocxGenerator.generateDocx(context, _uiState.value.currentPlan)
+        val file = DocxGenerator.generateDocx(context, _uiState.value.currentPlan, saveToDownloads = true)
         _uiState.value = _uiState.value.copy(
             lastGeneratedFile = file,
-            successMessage = "تم إنشاء ملف Word (.docx) بنجاح: ${file.name}"
+            successMessage = "تم حفظ ملف Word في مجلد التنزيلات (Downloads) بالهاتف: ${file.name}"
         )
         return file
     }

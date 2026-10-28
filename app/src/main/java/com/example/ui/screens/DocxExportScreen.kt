@@ -2,7 +2,10 @@ package com.example.ui.screens
 
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -20,20 +23,21 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Download
-import androidx.compose.material.icons.automirrored.filled.OpenInNew
+import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Verified
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -48,6 +52,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
+import com.example.docx.DocxGenerator
 import com.example.model.JadhadhaPlan
 import java.io.File
 
@@ -59,8 +64,22 @@ fun DocxExportScreen(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
-    var currentFile by remember { mutableStateOf(lastExportedFile) }
+    var currentFile by remember(lastExportedFile) { mutableStateOf(lastExportedFile) }
     val scrollState = rememberScrollState()
+
+    val saveAsLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument(DocxGenerator.DOCX_MIME_TYPE)
+    ) { targetUri: Uri? ->
+        if (targetUri != null) {
+            val fileToSave = currentFile ?: onExportDocx(context).also { currentFile = it }
+            val ok = DocxGenerator.saveFileToUri(context, fileToSave, targetUri)
+            if (ok) {
+                Toast.makeText(context, "تم حفظ الجذاذة في المجلد المختار على هاتفك بنجاح!", Toast.LENGTH_LONG).show()
+            } else {
+                Toast.makeText(context, "تعذر حفظ الملف في المسار المختار.", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
 
     Column(
         modifier = modifier
@@ -98,13 +117,13 @@ fun DocxExportScreen(
 
                     Column {
                         Text(
-                            text = "تصدير بصيغة Microsoft Word (.docx)",
+                            text = "تصدير وحفظ ملف Word (.docx)",
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold,
                             color = MaterialTheme.colorScheme.onPrimaryContainer
                         )
                         Text(
-                            text = "مطابق بنسبة 100% للمعيار المعتمد لدى المفتشين التربويين",
+                            text = "يُحفظ تلقائياً في مجلد التنزيلات (Downloads) بهاتفك",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.primary
                         )
@@ -138,17 +157,20 @@ fun DocxExportScreen(
                     com.example.model.PedagogicalComponent.LANGUAGE -> "مراحل الدرس اللغوي الخمس مع الجداول التحليلية"
                     com.example.model.PedagogicalComponent.EXPRESSION -> "الحصص الأربع (الاكتساب، التطبيق، الإنتاج، التصحيح)"
                 })
-                DetailItem("نوع الخط والتنسيق:", "Sakkal Majalla / نمط رسمي عريض (OOXML)")
-                DetailItem("هوامش الصفحة:", "0.5 بوصة (Inches) للملاءمة الطباعية")
+                DetailItem("مكان الحفظ بالهاتف:", "مجلد التنزيلات (Downloads / التنزيلات)")
             }
         }
 
-        // Primary Action: Generate / Export DOCX
+        // Primary Action: Generate / Export DOCX to Downloads
         Button(
             onClick = {
                 val file = onExportDocx(context)
                 currentFile = file
-                Toast.makeText(context, "تم إنشاء ملف Word بنجاح!", Toast.LENGTH_SHORT).show()
+                Toast.makeText(
+                    context,
+                    "تم حفظ الجذاذة في مجلد التنزيلات (Downloads): ${file.name}",
+                    Toast.LENGTH_LONG
+                ).show()
             },
             modifier = Modifier
                 .fillMaxWidth()
@@ -161,9 +183,28 @@ fun DocxExportScreen(
             Icon(imageVector = Icons.Default.Download, contentDescription = null)
             Spacer(modifier = Modifier.width(8.dp))
             Text(
-                "إنشاء وتصدير ملف Word (.docx)",
+                "حفظ في مجلد التنزيلات (Downloads) بصيغة Word",
                 fontWeight = FontWeight.Bold,
                 style = MaterialTheme.typography.bodyLarge
+            )
+        }
+
+        // Secondary Action: Save As (Choose Folder on Phone)
+        FilledTonalButton(
+            onClick = {
+                val file = currentFile ?: onExportDocx(context).also { currentFile = it }
+                saveAsLauncher.launch(file.name)
+            },
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(48.dp)
+                .testTag("save_as_docx_button")
+        ) {
+            Icon(imageVector = Icons.Default.Folder, contentDescription = null)
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(
+                "حفظ في الهاتف باسم... (اختيار مجلد آخر)",
+                fontWeight = FontWeight.Bold
             )
         }
 
@@ -184,11 +225,18 @@ fun DocxExportScreen(
                             tint = MaterialTheme.colorScheme.primary
                         )
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = "الملف جاهز: ${file.name}",
-                            style = MaterialTheme.typography.titleSmall,
-                            fontWeight = FontWeight.Bold
-                        )
+                        Column {
+                            Text(
+                                text = "الملف جاهز: ${file.name}",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = "تجدها على هاتفك في: تطبيق الملفات ← التنزيلات (Downloads)",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
                     }
 
                     Spacer(modifier = Modifier.height(12.dp))
@@ -236,15 +284,15 @@ fun DocxExportScreen(
         ) {
             Column(modifier = Modifier.padding(14.dp)) {
                 Text(
-                    text = "مميزات الملف الناتج:",
+                    text = "أين تجد الجذاذات على هاتفك؟",
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.Bold
                 )
                 Spacer(modifier = Modifier.height(8.dp))
-                FeatureCheckItem("جدول الترويسة المغربي الرسمي بجميع خاناته المعتمدة.")
-                FeatureCheckItem("الجدول الرباعي للمراحل والأنشطة الديداكتيكية الست.")
-                FeatureCheckItem("فاصل صفحات تلقائي يفصل الحصة 1 عن الحصة 2.")
-                FeatureCheckItem("تصدير سليم بصيغة OOXML لا يظهر أي رسائل خطأ في Word أو Google Docs.")
+                FeatureCheckItem("تُحفظ ملفات Word تلقائياً في مجلد «التنزيلات / Downloads» على هاتفك.")
+                FeatureCheckItem("يمكنك اختيار أي مجلد آخر في هاتفك عبر زر «حفظ في الهاتف باسم...».")
+                FeatureCheckItem("يمكنك إرسال الجذاذة عبر واتساب أو تيليجرام أو Google Drive عبر زر «مشاركة».")
+                FeatureCheckItem("في قسم «تفريغ الجذاذات» ستجد قائمة مباشرة بجميع الجذاذات المحفوظة لرفعها بضغطة واحدة.")
             }
         }
     }
@@ -296,7 +344,7 @@ private fun FeatureCheckItem(text: String) {
     }
 }
 
-private fun openDocxFile(context: Context, file: File) {
+fun openDocxFile(context: Context, file: File) {
     try {
         val uri = FileProvider.getUriForFile(
             context,
@@ -304,7 +352,7 @@ private fun openDocxFile(context: Context, file: File) {
             file
         )
         val intent = Intent(Intent.ACTION_VIEW).apply {
-            setDataAndType(uri, "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+            setDataAndType(uri, DocxGenerator.DOCX_MIME_TYPE)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
@@ -314,7 +362,7 @@ private fun openDocxFile(context: Context, file: File) {
     }
 }
 
-private fun shareDocxFile(context: Context, file: File) {
+fun shareDocxFile(context: Context, file: File) {
     try {
         val uri = FileProvider.getUriForFile(
             context,
@@ -322,7 +370,7 @@ private fun shareDocxFile(context: Context, file: File) {
             file
         )
         val intent = Intent(Intent.ACTION_SEND).apply {
-            type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            type = DocxGenerator.DOCX_MIME_TYPE
             putExtra(Intent.EXTRA_STREAM, uri)
             putExtra(Intent.EXTRA_SUBJECT, "جذاذة ${file.name}")
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)

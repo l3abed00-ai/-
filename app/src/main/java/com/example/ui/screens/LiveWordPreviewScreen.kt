@@ -80,6 +80,21 @@ fun LiveWordPreviewScreen(
     val context = LocalContext.current
     var isFullWidthMode by remember { mutableStateOf(false) }
     var selectedDocFont by remember { mutableStateOf(PreviewDocFont.AMIRI) }
+    var exportedFile by remember { mutableStateOf<java.io.File?>(null) }
+
+    val saveAsLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+        contract = androidx.activity.result.contract.ActivityResultContracts.CreateDocument(com.example.docx.DocxGenerator.DOCX_MIME_TYPE)
+    ) { targetUri ->
+        if (targetUri != null) {
+            val fileToSave = exportedFile ?: com.example.docx.DocxGenerator.generateDocx(context, plan, saveToDownloads = true).also {
+                exportedFile = it
+            }
+            val ok = com.example.docx.DocxGenerator.saveFileToUri(context, fileToSave, targetUri)
+            if (ok) {
+                android.widget.Toast.makeText(context, "تم حفظ الجذاذة في المجلد المختار على هاتفك بنجاح!", android.widget.Toast.LENGTH_LONG).show()
+            }
+        }
+    }
 
     Column(
         modifier = modifier
@@ -116,9 +131,9 @@ fun LiveWordPreviewScreen(
                             color = MaterialTheme.colorScheme.onSurface
                         )
                         Text(
-                            text = "جذاذة ديداكتيكية طبق معايير وزارة التربية الوطنية",
+                            text = "تُحفظ تلقائياً في: ملفات الهاتف ← التنزيلات (Downloads)",
                             style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            color = MaterialTheme.colorScheme.primary,
                             fontSize = 11.sp
                         )
                     }
@@ -140,7 +155,10 @@ fun LiveWordPreviewScreen(
 
                 // Wide Independent Export Button - Never squished on any screen size!
                 Button(
-                    onClick = { onExportDocx(context) },
+                    onClick = {
+                        onExportDocx(context)
+                        exportedFile = com.example.docx.DocxGenerator.generateDocx(context, plan, saveToDownloads = true)
+                    },
                     colors = ButtonDefaults.buttonColors(
                         containerColor = MaterialTheme.colorScheme.primary,
                         contentColor = MaterialTheme.colorScheme.onPrimary
@@ -158,14 +176,63 @@ fun LiveWordPreviewScreen(
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = "تصدير وثيقة Word الرسمية (.docx)",
+                        text = "حفظ وثيقة Word في الهاتف (التنزيلات .docx)",
                         style = MaterialTheme.typography.labelLarge,
                         fontWeight = FontWeight.Bold,
                         fontSize = 14.sp
                     )
                 }
 
-                Spacer(modifier = Modifier.height(12.dp))
+                Spacer(modifier = Modifier.height(8.dp))
+
+                // Quick Save As / Open / Share Row
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = {
+                            val file = exportedFile ?: com.example.docx.DocxGenerator.generateDocx(context, plan, saveToDownloads = true).also {
+                                exportedFile = it
+                            }
+                            saveAsLauncher.launch(file.name)
+                        },
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Text("حفظ باسم...", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                    }
+
+                    OutlinedButton(
+                        onClick = {
+                            val file = exportedFile ?: com.example.docx.DocxGenerator.generateDocx(context, plan, saveToDownloads = true).also {
+                                exportedFile = it
+                            }
+                            openDocxFile(context, file)
+                        },
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Text("فتح في Word", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                    }
+
+                    OutlinedButton(
+                        onClick = {
+                            val file = exportedFile ?: com.example.docx.DocxGenerator.generateDocx(context, plan, saveToDownloads = true).also {
+                                exportedFile = it
+                            }
+                            shareDocxFile(context, file)
+                        },
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Icon(imageVector = Icons.Default.Share, contentDescription = null, modifier = Modifier.size(14.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("مشاركة", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(10.dp))
 
                 // Arabic Font Switcher Bar
                 Row(
