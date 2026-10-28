@@ -1,0 +1,6 @@
+{
+  "name": "الجذاذة النموذجية",
+  "description": "تطبيق لتفريغ جذاذات اللغة العربية (النصوص القرائية، الدرس اللغوي، التعبير والإنشاء) ونقلها إلى جذاذات نموذجية رسمية وتصديرها بصيغة Word docx مع دعم بايثون والذكاء الاصطناعي",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
