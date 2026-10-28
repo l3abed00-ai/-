@@ -92,7 +92,7 @@ fun QuickToolsModalSheet(
 
                 QuickToolItemCard(
                     title = "الذكاء الاصطناعي",
-                    subtitle = "توليد جذاذة فورية بـ Gemini",
+                    subtitle = "توليد واقتراح بـ Gemini 3.8 Flash",
                     icon = Icons.Default.AutoAwesome,
                     iconColor = MaterialTheme.colorScheme.tertiary,
                     modifier = Modifier.weight(1f),

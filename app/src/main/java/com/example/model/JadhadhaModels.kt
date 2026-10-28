@@ -222,11 +222,39 @@ object StageCatalog {
     fun getByKey(key: String): StageMetadata? = ALL_STAGES.firstOrNull { it.key == key }
 }
 
+object JadhadhaCategories {
+    const val READING = "نصوص قرائية"
+    const val LANGUAGE = "درس لغوي"
+    const val EXPRESSION = "تعبير وإنشاء"
+
+    val ALL = listOf(READING, LANGUAGE, EXPRESSION)
+
+    fun forComponent(comp: PedagogicalComponent): String = when (comp) {
+        PedagogicalComponent.READING -> READING
+        PedagogicalComponent.LANGUAGE -> LANGUAGE
+        PedagogicalComponent.EXPRESSION -> EXPRESSION
+    }
+}
+
 data class JadhadhaPlan(
     val id: String = UUID.randomUUID().toString(),
     val topic: String,
     val componentType: PedagogicalComponent = PedagogicalComponent.READING,
+    val category: String = JadhadhaCategories.forComponent(componentType),
     val info: JadhadhaInfo = JadhadhaInfo(),
     val stages: Map<String, StageData> = emptyMap(),
     val createdAt: Long = System.currentTimeMillis()
 )
+
+data class SuggestedObjectives(
+    val topic: String,
+    val component: PedagogicalComponent,
+    val communicativeComp: String,
+    val methodologicalComp: String,
+    val culturalComp: String,
+    val cognitiveObjectives: List<String> = emptyList(),
+    val skillObjectives: List<String> = emptyList(),
+    val affectiveObjectives: List<String> = emptyList(),
+    val stageAbilities: Map<String, List<String>> = emptyMap()
+)
+

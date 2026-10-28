@@ -67,6 +67,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider
+import com.example.data.AppDatabase
+import com.example.data.JadhadhaRepository
 import com.example.ui.AppTab
 import com.example.ui.JadhadhaViewModel
 import com.example.ui.components.FloatingQuickBar
@@ -85,7 +89,16 @@ import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
 
-    private val viewModel: JadhadhaViewModel by viewModels()
+    private val viewModel: JadhadhaViewModel by viewModels {
+        object : ViewModelProvider.Factory {
+            @Suppress("UNCHECKED_CAST")
+            override fun <T : ViewModel> create(modelClass: Class<T>): T {
+                val db = AppDatabase.getDatabase(applicationContext)
+                val repository = JadhadhaRepository(db.jadhadhaDao())
+                return JadhadhaViewModel(application, repository) as T
+            }
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -370,10 +383,19 @@ fun JadhadhaMainApp(viewModel: JadhadhaViewModel) {
                     AppTab.MODEL_EDITOR -> ModelEditorScreen(
                         plan = uiState.currentPlan,
                         onUpdateTopic = { viewModel.updateTopic(it) },
+                        onUpdateCategory = { viewModel.updateCategory(it) },
                         onUpdateInfo = { viewModel.updateInfo(it) },
                         onAddItem = { k, f, t -> viewModel.addStageItem(k, f, t) },
                         onRemoveItem = { k, f, idx -> viewModel.removeStageItem(k, f, idx) },
-                        onNavigateToTab = { viewModel.selectTab(it) }
+                        onNavigateToTab = { viewModel.selectTab(it) },
+                        onSavePlan = { viewModel.saveCurrentPlan() },
+                        isSuggestingObjectives = uiState.isSuggestingContent,
+                        suggestedObjectives = uiState.suggestedObjectives,
+                        onSuggestObjectives = { topic -> viewModel.suggestObjectives(topic) },
+                        onApplySuggestedObjectives = { suggestions, applyToStages ->
+                            viewModel.applySuggestedObjectives(suggestions, applyToStages)
+                        },
+                        onDismissSuggestedObjectives = { viewModel.dismissSuggestedObjectives() }
                     )
 
                     AppTab.WORD_PREVIEW -> LiveWordPreviewScreen(
@@ -411,7 +433,8 @@ fun JadhadhaMainApp(viewModel: JadhadhaViewModel) {
 
                     AppTab.SAMPLES -> SamplesScreen(
                         savedPlans = uiState.savedPlans,
-                        onSelectPlan = { viewModel.loadPlan(it) }
+                        onSelectPlan = { viewModel.loadPlan(it) },
+                        onDeletePlan = { viewModel.deleteSavedPlan(it) }
                     )
                 }
             }
@@ -422,6 +445,7 @@ fun JadhadhaMainApp(viewModel: JadhadhaViewModel) {
                 visible = uiState.selectedTab == AppTab.MODEL_EDITOR || uiState.selectedTab == AppTab.WORD_PREVIEW,
                 onExportDocx = { ctx -> viewModel.exportToDocx(ctx) },
                 onPreviewDoc = { viewModel.selectTab(AppTab.WORD_PREVIEW) },
+                onSavePlan = { viewModel.saveCurrentPlan() },
                 onShowToast = { msg ->
                     scope.launch { snackbarHostState.showSnackbar(msg) }
                 },

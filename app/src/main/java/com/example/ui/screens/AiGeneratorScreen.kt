@@ -122,7 +122,7 @@ fun AiGeneratorScreen(
                 }
                 Spacer(modifier = Modifier.height(6.dp))
                 Text(
-                    text = "توليد جذاذة تربوية كاملة ومفصلة بواسطة Gemini وفق التوجيهات الرسمية لوزارة التربية الوطنية المغربية لمكونات النصوص القرائية، الدرس اللغوي، أو التعبير والإنشاء.",
+                    text = "توليد جذاذة تربوية كاملة ومفصلة بواسطة أحدث نموذج ذكاء اصطناعي (Gemini 3.8 Flash) وفق التوجيهات الرسمية لوزارة التربية الوطنية المغربية لمكونات النصوص القرائية، الدرس اللغوي، والتعبير والإنشاء.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.85f)
                 )
@@ -302,12 +302,12 @@ fun AiGeneratorScreen(
                     strokeWidth = 2.dp
                 )
                 Spacer(modifier = Modifier.width(10.dp))
-                Text("جارٍ توليد جذاذة (${selectedComponent.shortName}) بالذكاء الاصطناعي...")
+                Text("جارٍ التوليد بنموذج Gemini 3.8 Flash...")
             } else {
                 Icon(imageVector = Icons.Default.AutoAwesome, contentDescription = null)
                 Spacer(modifier = Modifier.width(8.dp))
                 Text(
-                    "توليد جذاذة (${selectedComponent.shortName}) بالذكاء الاصطناعي",
+                    "توليد جذاذة (${selectedComponent.shortName}) بـ Gemini 3.8 Flash",
                     fontWeight = FontWeight.Bold,
                     style = MaterialTheme.typography.bodyLarge
                 )

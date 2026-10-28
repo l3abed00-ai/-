@@ -6,6 +6,7 @@ import com.example.model.JadhadhaPlan
 import com.example.model.PedagogicalComponent
 import com.example.model.StageCatalog
 import com.example.model.StageData
+import com.example.model.SuggestedObjectives
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -24,7 +25,8 @@ object GeminiAiService {
         .build()
 
     private const val API_BASE = "https://generativelanguage.googleapis.com/v1beta"
-    private val MODELS = listOf("gemini-2.5-flash", "gemini-1.5-flash")
+    // gemini-3.8-flash is the primary upgraded model
+    private val MODELS = listOf("gemini-3.8-flash", "gemini-2.5-flash", "gemini-1.5-flash")
 
     fun getEffectiveApiKey(customKey: String?): String {
         val trimmedCustom = customKey?.trim().orEmpty()
@@ -63,8 +65,70 @@ object GeminiAiService {
             }
         }
 
-        Result.failure(lastException ?: RuntimeException("فشل استدعاء نموذج الذكاء الاصطناعي."))
+        Result.failure(lastException ?: RuntimeException("فشل استدعاء نموذج الذكاء الاصطناعي (Gemini 3.8 Flash)."))
     }
+
+    suspend fun suggestObjectivesForTopic(
+        topic: String,
+        component: PedagogicalComponent = PedagogicalComponent.READING,
+        level: String = "الثالثة ثانوي إعدادي",
+        customKey: String? = null
+    ): Result<SuggestedObjectives> = withContext(Dispatchers.IO) {
+        val apiKey = getEffectiveApiKey(customKey)
+        if (apiKey.isBlank()) {
+            return@withContext Result.failure(
+                IllegalStateException("لم يتم توفير مفتاح Gemini API. يرجى إدخال مفتاح Gemini في إعدادات التطبيق لاقتراح الأهداف بالذكاء الاصطناعي.")
+            )
+        }
+
+        val prompt = buildObjectivesPrompt(topic, component, level)
+        var lastException: Exception? = null
+
+        for (model in MODELS) {
+            try {
+                val suggestions = callModelForObjectives(model, apiKey, prompt, topic, component)
+                return@withContext Result.success(suggestions)
+            } catch (e: Exception) {
+                lastException = e
+            }
+        }
+
+        Result.failure(lastException ?: RuntimeException("فشل استدعاء نموذج الذكاء الاصطناعي (Gemini 3.8 Flash) لاقتراح الأهداف."))
+    }
+
+    private fun buildObjectivesPrompt(topic: String, component: PedagogicalComponent, level: String): String {
+        val stages = StageCatalog.getStagesForComponent(component).map { it.key to it.title }
+        val stagesTemplate = stages.joinToString(",\n") { (k, t) -> "    \"$k\": [\"القدرة على... ($t)\"]" }
+        return """
+أنت مفتش تربوي وموجه بيداغوجي خبير في تدريس مادة اللغة العربية بالتعليم الثانوي الإعدادي والتأهيلي بالمغرب.
+المطلوب: توليد واقتراح الأهداف التعليمية والكفايات والقدرات الديداكتيكية الدقيقة للدرس: «$topic» في مكوّن: «${component.title}» للمستوى: «$level».
+وفق منهاج اللغة العربية والتوجيهات التربوية الرسمية لوزارة التربية الوطنية المغربية، وباعتماد المقاربة بالكفايات وصياغة الأهداف الإجرائية الدقيقة.
+
+أرجع النتيجة بصيغة JSON حصرا دون أي كلام أو نصوص أو وسوم markdown إضافية، بالهيكل التالي:
+{
+  "topic": "$topic",
+  "communicative": "صياغة الكفاية التواصلية الخاصة بالدرس (أن يوظف/يتواصل/يعبر المتعلم... في سياق تواصلي سليم)",
+  "methodological": "صياغة الكفاية المنهجية (أن يكتسب المتعلم مهارات الملاحظة والتحليل والاستنتاج/التركيب)",
+  "cultural": "صياغة الكفاية الثقافية والمعرفية (استيعاب القيم والمفاهيم الوطنية والإنسانية)",
+  "cognitive_objectives": [
+    "أن يتعرف المتعلم على...",
+    "أن يكتشف..."
+  ],
+  "skill_objectives": [
+    "أن يحلل المتعلم...",
+    "أن يطبق ويوظف..."
+  ],
+  "affective_objectives": [
+    "أن يستشعر المتعلم قيمة...",
+    "أن يقدر..."
+  ],
+  "stage_abilities": {
+$stagesTemplate
+  }
+}
+""".trimIndent()
+    }
+
 
     private fun buildPrompt(topic: String, text: String, component: PedagogicalComponent): String {
         val sb = StringBuilder()
@@ -195,6 +259,105 @@ $stagesGuide
         val json = JSONObject(cleanedJson)
         return parsePlanFromJson(json, originalTopic, component)
     }
+
+    private fun callModelForObjectives(
+        model: String,
+        apiKey: String,
+        prompt: String,
+        originalTopic: String,
+        component: PedagogicalComponent
+    ): SuggestedObjectives {
+        val url = "$API_BASE/models/$model:generateContent?key=$apiKey"
+
+        val bodyJson = JSONObject().apply {
+            put("contents", JSONArray().apply {
+                put(JSONObject().apply {
+                    put("role", "user")
+                    put("parts", JSONArray().apply {
+                        put(JSONObject().apply { put("text", prompt) })
+                    })
+                })
+            })
+            put("generationConfig", JSONObject().apply {
+                put("responseMimeType", "application/json")
+                put("temperature", 0.3)
+            })
+        }
+
+        val request = Request.Builder()
+            .url(url)
+            .post(bodyJson.toString().toRequestBody("application/json".toMediaType()))
+            .build()
+
+        val response = client.newCall(request).execute()
+        val responseBody = response.body?.string().orEmpty()
+
+        if (!response.isSuccessful) {
+            val errMsg = runCatching {
+                JSONObject(responseBody).getJSONObject("error").getString("message")
+            }.getOrDefault(response.message)
+            throw RuntimeException("خطأ في الخادم ($model): $errMsg")
+        }
+
+        val respJson = JSONObject(responseBody)
+        val candidates = respJson.optJSONArray("candidates")
+        if (candidates == null || candidates.length() == 0) {
+            throw RuntimeException("استجابة فارغة من النموذج ($model)")
+        }
+
+        val content = candidates.getJSONObject(0).getJSONObject("content")
+        val parts = content.getJSONArray("parts")
+        val rawText = parts.getJSONObject(0).getString("text")
+
+        val cleanedJson = rawText.trim()
+            .removePrefix("```json")
+            .removePrefix("```")
+            .removeSuffix("```")
+            .trim()
+
+        val json = JSONObject(cleanedJson)
+        val comm = json.optString("communicative", "أن يوظف المتعلم معارف درس «$originalTopic» في سياق تواصلي سليم.")
+        val meth = json.optString("methodological", "أن يكتسب المتعلم مهارات الملاحظة والتحليل والتركيب المرتبطة بـ «$originalTopic».")
+        val cult = json.optString("cultural", "أن يستوعب المتعلم القيم المعرفية والوجدانية لدرس «$originalTopic».")
+
+        val cogList = jsonArrayToList(json.optJSONArray("cognitive_objectives"))
+        val skillList = jsonArrayToList(json.optJSONArray("skill_objectives"))
+        val affList = jsonArrayToList(json.optJSONArray("affective_objectives"))
+
+        val stagesObj = json.optJSONObject("stage_abilities")
+        val stageAbilitiesMap = mutableMapOf<String, List<String>>()
+        if (stagesObj != null) {
+            val keys = stagesObj.keys()
+            while (keys.hasNext()) {
+                val k = keys.next()
+                val list = jsonArrayToList(stagesObj.optJSONArray(k))
+                if (list.isNotEmpty()) {
+                    stageAbilitiesMap[k] = list
+                }
+            }
+        }
+
+        return SuggestedObjectives(
+            topic = originalTopic,
+            component = component,
+            communicativeComp = comm,
+            methodologicalComp = meth,
+            culturalComp = cult,
+            cognitiveObjectives = if (cogList.isNotEmpty()) cogList else listOf(
+                "أن يتعرف المتعلم على مفهوم ومحددات درس «$originalTopic».",
+                "أن يكتشف القواعد والخصائص البنيوية المرتبطة بالموضوع."
+            ),
+            skillObjectives = if (skillList.isNotEmpty()) skillList else listOf(
+                "أن يحلل المتعلم الأمثلة والشواهد تحليلاً منهجياً دقيقاً.",
+                "أن يطبق المكتسبات في سياقات لغوية وتعبيرية سليمة."
+            ),
+            affectiveObjectives = if (affList.isNotEmpty()) affList else listOf(
+                "أن يقدر المتعلم دقة اللغة العربية وجماليتها وقيم التعبير الهادف."
+            ),
+            stageAbilities = stageAbilitiesMap
+        )
+    }
+
 
     private fun parsePlanFromJson(
         json: JSONObject,

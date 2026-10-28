@@ -22,6 +22,10 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.Bookmark
+import androidx.compose.material.icons.filled.Category
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Edit
@@ -29,13 +33,18 @@ import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.Layers
+import androidx.compose.material.icons.filled.Psychology
+import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.School
 import androidx.compose.material.icons.filled.TableChart
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.HorizontalDivider
@@ -48,6 +57,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -61,11 +71,13 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
+import com.example.model.JadhadhaCategories
 import com.example.model.JadhadhaInfo
 import com.example.model.JadhadhaPlan
 import com.example.model.PedagogicalComponent
 import com.example.model.StageCatalog
 import com.example.model.StageData
+import com.example.model.SuggestedObjectives
 import com.example.ui.AppTab
 import com.example.ui.components.SectionHeader
 
@@ -74,14 +86,23 @@ import com.example.ui.components.SectionHeader
 fun ModelEditorScreen(
     plan: JadhadhaPlan,
     onUpdateTopic: (String) -> Unit,
+    onUpdateCategory: (String) -> Unit = {},
     onUpdateInfo: (JadhadhaInfo) -> Unit,
     onAddItem: (stageKey: String, field: String, text: String) -> Unit,
     onRemoveItem: (stageKey: String, field: String, index: Int) -> Unit,
     onNavigateToTab: (AppTab) -> Unit,
+    onSavePlan: () -> Unit = {},
+    isSuggestingObjectives: Boolean = false,
+    suggestedObjectives: SuggestedObjectives? = null,
+    onSuggestObjectives: (String) -> Unit = {},
+    onApplySuggestedObjectives: (SuggestedObjectives, Boolean) -> Unit = { _, _ -> },
+    onDismissSuggestedObjectives: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     var showEditInfoDialog by remember { mutableStateOf(false) }
+    var showSuggestObjectivesDialog by remember { mutableStateOf(false) }
     var selectedSessionFilter by remember { mutableStateOf<Int?>(null) }
+
 
     LazyColumn(
         modifier = modifier
@@ -105,7 +126,10 @@ fun ModelEditorScreen(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
                                 Surface(
                                     color = MaterialTheme.colorScheme.primary,
                                     shape = RoundedCornerShape(6.dp)
@@ -118,13 +142,29 @@ fun ModelEditorScreen(
                                         modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
                                     )
                                 }
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Text(
-                                    text = "الجذاذة النموذجية الرسمية",
-                                    style = MaterialTheme.typography.labelMedium,
-                                    color = MaterialTheme.colorScheme.primary,
-                                    fontWeight = FontWeight.Bold
-                                )
+                                Surface(
+                                    color = MaterialTheme.colorScheme.secondaryContainer,
+                                    shape = RoundedCornerShape(6.dp)
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Category,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(13.dp),
+                                            tint = MaterialTheme.colorScheme.onSecondaryContainer
+                                        )
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text(
+                                            text = "تصنيف: ${plan.category}",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                }
                             }
                             Spacer(modifier = Modifier.height(4.dp))
                             Text(
@@ -133,6 +173,24 @@ fun ModelEditorScreen(
                                 color = MaterialTheme.colorScheme.onPrimaryContainer,
                                 fontWeight = FontWeight.ExtraBold
                             )
+                            Spacer(modifier = Modifier.height(6.dp))
+                            FilledTonalButton(
+                                onClick = { showSuggestObjectivesDialog = true },
+                                modifier = Modifier.testTag("btn_suggest_content_header")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.AutoAwesome,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp),
+                                    tint = MaterialTheme.colorScheme.primary
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "اقتراح محتوى (Gemini 3.8 Flash)",
+                                    fontWeight = FontWeight.Bold,
+                                    style = MaterialTheme.typography.labelMedium
+                                )
+                            }
                         }
 
                         IconButton(
@@ -166,31 +224,42 @@ fun ModelEditorScreen(
 
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
                         Button(
-                            onClick = { onNavigateToTab(AppTab.EXPORT_DOCX) },
+                            onClick = onSavePlan,
                             modifier = Modifier
-                                .weight(1.2f)
-                                .testTag("export_docx_button"),
+                                .weight(1.1f)
+                                .testTag("btn_save_plan_db"),
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = MaterialTheme.colorScheme.primary
                             )
                         ) {
-                            Icon(imageVector = Icons.Default.FileDownload, contentDescription = null)
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("تصدير Word (.docx)", fontWeight = FontWeight.Bold)
+                            Icon(imageVector = Icons.Default.Save, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("حفظ الجذاذة", fontWeight = FontWeight.Bold)
+                        }
+
+                        FilledTonalButton(
+                            onClick = { onNavigateToTab(AppTab.EXPORT_DOCX) },
+                            modifier = Modifier
+                                .weight(1.1f)
+                                .testTag("export_docx_button")
+                        ) {
+                            Icon(imageVector = Icons.Default.FileDownload, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("تصدير Word", fontWeight = FontWeight.Bold)
                         }
 
                         OutlinedButton(
                             onClick = { onNavigateToTab(AppTab.COMPONENTS_HUB) },
                             modifier = Modifier
-                                .weight(1f)
+                                .weight(0.9f)
                                 .testTag("change_component_button")
                         ) {
-                            Icon(imageVector = Icons.Default.Layers, contentDescription = null)
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("ركن المكونات")
+                            Icon(imageVector = Icons.Default.Layers, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("المكونات")
                         }
                     }
                 }
@@ -319,12 +388,38 @@ fun ModelEditorScreen(
     if (showEditInfoDialog) {
         EditInfoDialog(
             currentTopic = plan.topic,
+            currentCategory = plan.category,
             currentInfo = plan.info,
+            isSuggestingObjectives = isSuggestingObjectives,
+            suggestedObjectives = suggestedObjectives,
+            onSuggestObjectives = onSuggestObjectives,
             onDismiss = { showEditInfoDialog = false },
-            onConfirm = { newTopic, newInfo ->
+            onConfirm = { newTopic, newCategory, newInfo ->
                 onUpdateTopic(newTopic)
+                onUpdateCategory(newCategory)
                 onUpdateInfo(newInfo)
                 showEditInfoDialog = false
+            }
+        )
+    }
+
+    if (showSuggestObjectivesDialog) {
+        SuggestObjectivesDialog(
+            initialTopic = plan.topic,
+            component = plan.componentType,
+            level = plan.info.level,
+            isSuggesting = isSuggestingObjectives,
+            suggested = suggestedObjectives,
+            onDismiss = {
+                showSuggestObjectivesDialog = false
+                onDismissSuggestedObjectives()
+            },
+            onRequestSuggest = { topic ->
+                onSuggestObjectives(topic)
+            },
+            onApply = { suggestions, applyToStages ->
+                onApplySuggestedObjectives(suggestions, applyToStages)
+                showSuggestObjectivesDialog = false
             }
         )
     }
@@ -702,11 +797,16 @@ fun ItemRow(
 @Composable
 fun EditInfoDialog(
     currentTopic: String,
+    currentCategory: String = JadhadhaCategories.READING,
     currentInfo: JadhadhaInfo,
     onDismiss: () -> Unit,
-    onConfirm: (String, JadhadhaInfo) -> Unit
+    onConfirm: (String, String, JadhadhaInfo) -> Unit,
+    isSuggestingObjectives: Boolean = false,
+    suggestedObjectives: SuggestedObjectives? = null,
+    onSuggestObjectives: (String) -> Unit = {}
 ) {
     var topic by remember { mutableStateOf(currentTopic) }
+    var category by remember { mutableStateOf(currentCategory) }
     var level by remember { mutableStateOf(currentInfo.level) }
     var unit by remember { mutableStateOf(currentInfo.unit) }
     var domain by remember { mutableStateOf(currentInfo.domain) }
@@ -716,6 +816,15 @@ fun EditInfoDialog(
     var commComp by remember { mutableStateOf(currentInfo.communicativeComp) }
     var methComp by remember { mutableStateOf(currentInfo.methodologicalComp) }
     var cultComp by remember { mutableStateOf(currentInfo.culturalComp) }
+
+    // Auto-update competencies when suggestions arrive
+    LaunchedEffect(suggestedObjectives) {
+        suggestedObjectives?.let { suggestions ->
+            if (suggestions.communicativeComp.isNotBlank()) commComp = suggestions.communicativeComp
+            if (suggestions.methodologicalComp.isNotBlank()) methComp = suggestions.methodologicalComp
+            if (suggestions.culturalComp.isNotBlank()) cultComp = suggestions.culturalComp
+        }
+    }
 
     Dialog(onDismissRequest = onDismiss) {
         Card(
@@ -742,12 +851,119 @@ fun EditInfoDialog(
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     item {
-                        OutlinedTextField(
-                            value = topic,
-                            onValueChange = { topic = it },
-                            label = { Text("موضوع الدرس / المهارة") },
-                            modifier = Modifier.fillMaxWidth()
-                        )
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            OutlinedTextField(
+                                value = topic,
+                                onValueChange = { topic = it },
+                                label = { Text("موضوع الدرس / المهارة *") },
+                                placeholder = { Text("أدخل عنوان أو موضوع الدرس...") },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("dialog_topic_field")
+                            )
+
+                            // Dedicated "Suggest Content" button
+                            Button(
+                                onClick = { onSuggestObjectives(topic) },
+                                enabled = topic.isNotBlank() && !isSuggestingObjectives,
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = MaterialTheme.colorScheme.tertiary,
+                                    contentColor = MaterialTheme.colorScheme.onTertiary
+                                ),
+                                shape = RoundedCornerShape(10.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("dialog_btn_suggest_content")
+                            ) {
+                                if (isSuggestingObjectives) {
+                                    CircularProgressIndicator(
+                                        color = MaterialTheme.colorScheme.onTertiary,
+                                        modifier = Modifier.size(18.dp),
+                                        strokeWidth = 2.dp
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text(
+                                        "جارٍ توليد الأهداف عبر Gemini 3.8 Flash...",
+                                        style = MaterialTheme.typography.labelMedium
+                                    )
+                                } else {
+                                    Icon(
+                                        imageVector = Icons.Default.AutoAwesome,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text(
+                                        text = "اقتراح محتوى (توليد الأهداف بـ Gemini 3.8 Flash)",
+                                        fontWeight = FontWeight.Bold,
+                                        style = MaterialTheme.typography.labelMedium
+                                    )
+                                }
+                            }
+
+                            if (suggestedObjectives != null) {
+                                Surface(
+                                    color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.7f),
+                                    shape = RoundedCornerShape(8.dp),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Check,
+                                            contentDescription = null,
+                                            tint = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text(
+                                            text = "تم تحديث الكفايات والأهداف المقترحة بنجاح!",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.primary,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    item {
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text(
+                                text = "تصنيف الجذاذة في قاعدة البيانات (Category) *",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                JadhadhaCategories.ALL.forEach { catOption ->
+                                    FilterChip(
+                                        selected = category == catOption,
+                                        onClick = {
+                                            category = catOption
+                                            if (component.isBlank() || JadhadhaCategories.ALL.contains(component)) {
+                                                component = catOption
+                                            }
+                                        },
+                                        label = { Text(catOption, style = MaterialTheme.typography.labelSmall) }
+                                    )
+                                }
+                            }
+                            OutlinedTextField(
+                                value = category,
+                                onValueChange = { category = it },
+                                label = { Text("اسم التصنيف (تخصيص)") },
+                                placeholder = { Text("مثال: نصوص قرائية، درس لغوي، تعبير وإنشاء...") },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("dialog_category_field")
+                            )
+                        }
                     }
                     item {
                         OutlinedTextField(
@@ -849,7 +1065,8 @@ fun EditInfoDialog(
                                 methodologicalComp = methComp.trim(),
                                 culturalComp = cultComp.trim()
                             )
-                            onConfirm(topic.trim(), newInfo)
+                            val finalCat = category.trim().ifBlank { JadhadhaCategories.READING }
+                            onConfirm(topic.trim(), finalCat, newInfo)
                         }
                     ) {
                         Text("حفظ التعديلات")
@@ -859,3 +1076,340 @@ fun EditInfoDialog(
         }
     }
 }
+
+@Composable
+fun SuggestObjectivesDialog(
+    initialTopic: String,
+    component: PedagogicalComponent,
+    level: String,
+    isSuggesting: Boolean,
+    suggested: SuggestedObjectives?,
+    onDismiss: () -> Unit,
+    onRequestSuggest: (String) -> Unit,
+    onApply: (SuggestedObjectives, Boolean) -> Unit
+) {
+    var topicInput by remember { mutableStateOf(initialTopic) }
+    var applyToStages by remember { mutableStateOf(true) }
+
+    Dialog(onDismissRequest = onDismiss) {
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(6.dp),
+            shape = RoundedCornerShape(20.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+        ) {
+            Column(
+                modifier = Modifier
+                    .padding(16.dp)
+                    .fillMaxWidth()
+            ) {
+                // Header
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Default.AutoAwesome,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.tertiary,
+                            modifier = Modifier.size(24.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Column {
+                            Text(
+                                text = "اقتراح محتوى وأهداف تعليمية",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            Surface(
+                                color = MaterialTheme.colorScheme.tertiaryContainer,
+                                shape = RoundedCornerShape(4.dp)
+                            ) {
+                                Text(
+                                    text = "مدعوم بـ Gemini 3.8 Flash",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onTertiaryContainer,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                )
+                            }
+                        }
+                    }
+
+                    IconButton(onClick = onDismiss) {
+                        Icon(imageVector = Icons.Default.Close, contentDescription = "إغلاق")
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // Topic Input Field
+                OutlinedTextField(
+                    value = topicInput,
+                    onValueChange = { topicInput = it },
+                    label = { Text("موضوع الدرس / المهارة المستهدفة") },
+                    placeholder = { Text("مثال: اسم الفاعل وعمله، المنفى، مهارة الوصف...") },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("suggest_topic_input"),
+                    singleLine = true
+                )
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                // Action to Generate
+                Button(
+                    onClick = { onRequestSuggest(topicInput) },
+                    enabled = topicInput.isNotBlank() && !isSuggesting,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.tertiary,
+                        contentColor = MaterialTheme.colorScheme.onTertiary
+                    ),
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("btn_trigger_suggest_objectives")
+                ) {
+                    if (isSuggesting) {
+                        CircularProgressIndicator(
+                            color = MaterialTheme.colorScheme.onTertiary,
+                            modifier = Modifier.size(18.dp),
+                            strokeWidth = 2.dp
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("جارٍ توليد الأهداف عبر Gemini 3.8 Flash...")
+                    } else {
+                        Icon(imageVector = Icons.Default.AutoAwesome, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = if (suggested == null) "توليد واقتراح الأهداف الآن" else "إعادة اقتراح الأهداف بـ Gemini 3.8 Flash",
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // Content Area
+                LazyColumn(
+                    modifier = Modifier.weight(1f, fill = false),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    if (suggested == null && !isSuggesting) {
+                        item {
+                            Surface(
+                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                                shape = RoundedCornerShape(12.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(14.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Psychology,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.tertiary,
+                                        modifier = Modifier.size(36.dp)
+                                    )
+                                    Spacer(modifier = Modifier.height(6.dp))
+                                    Text(
+                                        text = "يقوم نموذج Gemini 3.8 Flash بدراسة عنوان وموضوع الدرس ويقترح:",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        textAlign = TextAlign.Center,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Text(
+                                        text = "• الكفايات الأساسية (تواصلية، منهجية، ثقافية)\n• الأهداف الإجرائية (معرفية، مهارية، وجدانية)\n• القدرات المرحلية الخاصة بكل مرحلة ديداكتيكية",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    if (suggested != null) {
+                        item {
+                            // Section: الكفايات المستهدفة
+                            Card(
+                                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f)),
+                                shape = RoundedCornerShape(12.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    Text(
+                                        text = "🎯 الكفايات المستهدفة الرسمية:",
+                                        style = MaterialTheme.typography.labelLarge,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                    ObjectiveItem(label = "الكفاية التواصلية", text = suggested.communicativeComp)
+                                    ObjectiveItem(label = "الكفاية المنهجية", text = suggested.methodologicalComp)
+                                    ObjectiveItem(label = "الكفاية الثقافية", text = suggested.culturalComp)
+                                }
+                            }
+                        }
+
+                        if (suggested.cognitiveObjectives.isNotEmpty() || suggested.skillObjectives.isNotEmpty() || suggested.affectiveObjectives.isNotEmpty()) {
+                            item {
+                                // Section: الأهداف التعليمية الإجرائية
+                                Card(
+                                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.35f)),
+                                    shape = RoundedCornerShape(12.dp),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                        Text(
+                                            text = "📋 الأهداف التعليمية الإجرائية المقترحة:",
+                                            style = MaterialTheme.typography.labelLarge,
+                                            fontWeight = FontWeight.Bold,
+                                            color = MaterialTheme.colorScheme.secondary
+                                        )
+                                        suggested.cognitiveObjectives.forEach {
+                                            BulletObjectiveItem(badge = "معرفي", text = it)
+                                        }
+                                        suggested.skillObjectives.forEach {
+                                            BulletObjectiveItem(badge = "مهاري", text = it)
+                                        }
+                                        suggested.affectiveObjectives.forEach {
+                                            BulletObjectiveItem(badge = "وجداني", text = it)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        if (suggested.stageAbilities.isNotEmpty()) {
+                            item {
+                                // Section: القدرات المرحلية
+                                Card(
+                                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.3f)),
+                                    shape = RoundedCornerShape(12.dp),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                        Text(
+                                            text = "⚡ القدرات المرحلية المقترحة (${suggested.stageAbilities.size} مراحل):",
+                                            style = MaterialTheme.typography.labelLarge,
+                                            fontWeight = FontWeight.Bold,
+                                            color = MaterialTheme.colorScheme.tertiary
+                                        )
+                                        suggested.stageAbilities.forEach { (stageKey, abilities) ->
+                                            val stageTitle = StageCatalog.getByKey(stageKey)?.title ?: stageKey
+                                            Text(
+                                                text = "• $stageTitle: ${abilities.joinToString(" / ")}",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        item {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Checkbox(
+                                    checked = applyToStages,
+                                    onCheckedChange = { applyToStages = it }
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(
+                                    text = "تضمين وتحديث القدرات المرحلية في بطاقات مراحل الجذاذة",
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                            }
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // Bottom Dialog Buttons
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = onDismiss,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("إلغاء")
+                    }
+
+                    Button(
+                        onClick = {
+                            suggested?.let {
+                                onApply(it, applyToStages)
+                            }
+                        },
+                        enabled = suggested != null,
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
+                        modifier = Modifier
+                            .weight(1.5f)
+                            .testTag("btn_apply_suggested_objectives")
+                    ) {
+                        Icon(imageVector = Icons.Default.Check, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("تطبيق على الجذاذة", fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ObjectiveItem(label: String, text: String) {
+    Column {
+        Text(
+            text = "$label:",
+            style = MaterialTheme.typography.labelSmall,
+            fontWeight = FontWeight.Bold,
+            color = MaterialTheme.colorScheme.primary
+        )
+        Text(
+            text = text,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurface
+        )
+    }
+}
+
+@Composable
+private fun BulletObjectiveItem(badge: String, text: String) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.Top,
+        horizontalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        Surface(
+            color = MaterialTheme.colorScheme.secondary.copy(alpha = 0.15f),
+            shape = RoundedCornerShape(4.dp)
+        ) {
+            Text(
+                text = badge,
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.secondary,
+                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+            )
+        }
+        Text(
+            text = text,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurface,
+            modifier = Modifier.weight(1f)
+        )
+    }
+}
+

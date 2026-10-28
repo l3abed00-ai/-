@@ -126,4 +126,42 @@ class ExampleUnitTest {
         assertTrue(plan.stages.containsKey("insha_production"))
         assertTrue(plan.stages.containsKey("insha_correction"))
     }
+
+    @Test
+    fun testSuggestedObjectivesApplication() {
+        val originalPlan = com.example.model.SamplePlans.MANFA_PLAN
+        val suggestions = com.example.model.SuggestedObjectives(
+            topic = "المنفى",
+            component = com.example.model.PedagogicalComponent.READING,
+            communicativeComp = "أن يقرأ المتعلم النص ويستوعب أبعاد النفي القسري والوفاء للوطن.",
+            methodologicalComp = "أن يكتسب المتعلم مهارة تفكيك الحقول الدلالية ومقاربة العتبات النصية.",
+            culturalComp = "أن يتشبع بقيم التضحية الوطنية واستحضار ملحمة الاستقلال.",
+            cognitiveObjectives = listOf("أن يتعرف المتعلم على سياق النفي.", "أن يحدد الأفكار الأساسية."),
+            skillObjectives = listOf("أن يحلل المعجم الدلالي.", "أن يركب خلاصة القراءة."),
+            affectiveObjectives = listOf("أن يستشعر قيمة الحرية والكرامة."),
+            stageAbilities = mapOf(
+                "diagnostic" to listOf("القدرة على استحضار السياق التاريخي للنفي."),
+                "observation" to listOf("القدرة على استنطاق مؤشرات العنوان والصورة.")
+            )
+        )
+
+        assertEquals("المنفى", suggestions.topic)
+        assertEquals(2, suggestions.cognitiveObjectives.size)
+        assertEquals(2, suggestions.skillObjectives.size)
+        assertEquals(1, suggestions.affectiveObjectives.size)
+        assertEquals(2, suggestions.stageAbilities.size)
+
+        // Verify applying to plan info
+        val updatedPlan = originalPlan.copy(
+            info = originalPlan.info.copy(
+                communicativeComp = suggestions.communicativeComp,
+                methodologicalComp = suggestions.methodologicalComp,
+                culturalComp = suggestions.culturalComp
+            )
+        )
+        assertEquals(suggestions.communicativeComp, updatedPlan.info.communicativeComp)
+        assertEquals(suggestions.methodologicalComp, updatedPlan.info.methodologicalComp)
+        assertEquals(suggestions.culturalComp, updatedPlan.info.culturalComp)
+    }
 }
+

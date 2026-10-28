@@ -17,6 +17,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.FileDownload
+import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -42,6 +43,7 @@ fun FloatingQuickBar(
     onExportDocx: (Context) -> Unit,
     onPreviewDoc: () -> Unit,
     onShowToast: (String) -> Unit,
+    onSavePlan: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
     visible: Boolean = true
 ) {
@@ -125,7 +127,31 @@ fun FloatingQuickBar(
                     )
                 }
 
-                Spacer(modifier = Modifier.width(8.dp))
+                Spacer(modifier = Modifier.width(6.dp))
+
+                if (onSavePlan != null) {
+                    FilledTonalButton(
+                        onClick = onSavePlan,
+                        modifier = Modifier
+                            .weight(0.9f)
+                            .testTag("quick_action_save"),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Save,
+                            contentDescription = "حفظ",
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = "حفظ",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            fontSize = 12.sp
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(6.dp))
+                }
 
                 // Tertiary Action: Copy Summary
                 ElevatedButton(
