@@ -151,5 +151,81 @@ class ExampleRobolectricTest {
         assertNotNull(vm)
         assertNotNull(vm.uiState.value.currentPlan)
     }
+
+    @Test
+    fun `test docx roundtrip extraction preserves all stage cells without displacement or empty fields`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val sourcePlans = listOf(
+            SamplePlans.MANFA_PLAN,
+            SamplePlans.ISM_FAIL_PLAN,
+            SamplePlans.INSHA_HIKAYA_PLAN
+        )
+
+        for (sourcePlan in sourcePlans) {
+            val docxFile = DocxGenerator.generateDocx(context, sourcePlan)
+            val extractedText = java.io.FileInputStream(docxFile).use { stream ->
+                com.example.extractor.DocumentFileReader.extractTextFromDocx(stream)
+            }
+            assertTrue("Extracted text should not be blank for ${sourcePlan.topic}", extractedText.isNotBlank())
+
+            val parsedPlan = com.example.extractor.JadhadhaParser.parseRawText(
+                raw = extractedText,
+                fallbackTopic = sourcePlan.topic,
+                forcedComponent = sourcePlan.componentType
+            )
+
+            assertEquals(sourcePlan.componentType, parsedPlan.componentType)
+            assertEquals(sourcePlan.stages.size, parsedPlan.stages.size)
+
+            for ((stageKey, sourceStage) in sourcePlan.stages) {
+                val parsedStage = parsedPlan.stages[stageKey]
+                assertNotNull("Stage $stageKey must exist", parsedStage)
+                assertTrue("abil in $stageKey must not be empty", parsedStage!!.abil.isNotEmpty())
+                assertTrue("teacher in $stageKey must not be empty", parsedStage.teacher.isNotEmpty())
+                assertTrue("content in $stageKey must not be empty", parsedStage.content.isNotEmpty())
+                assertTrue("eval in $stageKey must not be empty", parsedStage.eval.isNotEmpty())
+
+                // Verify that first item of each column stays in its designated column
+                val expectedAbilSample = sourceStage.abil.first().replace(Regex("</?u>"), "").trim()
+                val expectedTeacherSample = sourceStage.teacher.first().replace(Regex("</?u>"), "").trim()
+                val expectedEvalSample = sourceStage.eval.first().replace(Regex("</?u>"), "").trim()
+
+                assertTrue(
+                    "abil column in $stageKey should retain original abil text",
+                    parsedStage.abil.any { it.contains(expectedAbilSample.take(20)) }
+                )
+                assertTrue(
+                    "teacher column in $stageKey should retain original teacher text",
+                    parsedStage.teacher.any { it.contains(expectedTeacherSample.take(20)) }
+                )
+                assertTrue(
+                    "eval column in $stageKey should retain original eval text",
+                    parsedStage.eval.any { it.contains(expectedEvalSample.take(20)) }
+                )
+            }
+        }
+    }
+
+    @Test
+    fun `test GeminiAiService uses gemini-3_8-flash and succeeds with AQ token or custom topic`() = kotlinx.coroutines.runBlocking {
+        assertEquals("gemini-3.8-flash", com.example.ai.GeminiAiService.PRIMARY_MODEL)
+
+        val result = com.example.ai.GeminiAiService.generateJadhadha(
+            topic = "التضامن الاجتماعي",
+            lessonText = "إن التضامن الاجتماعي ركيزة أساسية في بناء المجتمعات المتماسكة.",
+            component = com.example.model.PedagogicalComponent.READING,
+            customKey = "AQ.Ab8RN6J1NZ6BMsz62m4AOkJ_Dr"
+        )
+        assertTrue(result.isSuccess)
+        val plan = result.getOrThrow()
+        assertEquals("التضامن الاجتماعي", plan.topic)
+        assertEquals(6, plan.stages.size)
+        for ((_, stage) in plan.stages) {
+            assertTrue(stage.abil.isNotEmpty())
+            assertTrue(stage.teacher.isNotEmpty())
+            assertTrue(stage.content.isNotEmpty())
+            assertTrue(stage.eval.isNotEmpty())
+        }
+    }
 }
 
