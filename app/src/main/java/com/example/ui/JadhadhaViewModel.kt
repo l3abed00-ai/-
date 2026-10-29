@@ -9,18 +9,23 @@ import com.example.data.AppDatabase
 import com.example.data.JadhadhaRepository
 import com.example.docx.DocxGenerator
 import com.example.extractor.JadhadhaParser
+import com.example.model.FieldSource
 import com.example.model.JadhadhaInfo
 import com.example.model.JadhadhaPlan
+import com.example.model.ParseReport
+import com.example.model.ParseResult
 import com.example.model.PedagogicalComponent
 import com.example.model.SamplePlans
 import com.example.model.StageCatalog
 import com.example.model.StageData
 import com.example.model.SuggestedObjectives
 import com.example.python.PythonToolkit
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 
 enum class AppTab(val title: String) {
@@ -40,6 +45,8 @@ data class JadhadhaUiState(
     val savedPlans: List<JadhadhaPlan> = SamplePlans.ALL_SAMPLES,
     val selectedTab: AppTab = AppTab.COMPONENTS_HUB,
     val isAiLoading: Boolean = false,
+    val isParsing: Boolean = false,
+    val lastParseReport: ParseReport? = null,
     val isSuggestingContent: Boolean = false,
     val suggestedObjectives: SuggestedObjectives? = null,
     val isDarkMode: Boolean = false,
@@ -199,7 +206,8 @@ class JadhadhaViewModel(
         val curr = _uiState.value.currentPlan
         val newStages = curr.stages.toMutableMap()
         newStages[stageKey] = data
-        _uiState.value = _uiState.value.copy(currentPlan = curr.copy(stages = newStages))
+        val updatedPlan = curr.copy(stages = newStages)
+        _uiState.value = _uiState.value.copy(currentPlan = updatedPlan)
     }
 
     fun addStageItem(stageKey: String, field: String, text: String) {
@@ -212,7 +220,21 @@ class JadhadhaViewModel(
             "teacher" -> stageData.copy(teacher = stageData.teacher + text.trim())
             "abil" -> stageData.copy(abil = stageData.abil + text.trim())
             else -> stageData
-        }
+        }.withFieldSource(field, FieldSource.USER)
+        updateStage(stageKey, updated)
+    }
+
+    fun editStageItem(stageKey: String, field: String, index: Int, newText: String) {
+        if (newText.isBlank()) return
+        val curr = _uiState.value.currentPlan
+        val stageData = curr.stages[stageKey] ?: return
+        val updated = when (field) {
+            "eval" -> stageData.copy(eval = stageData.eval.mapIndexed { i, old -> if (i == index) newText.trim() else old })
+            "content" -> stageData.copy(content = stageData.content.mapIndexed { i, old -> if (i == index) newText.trim() else old })
+            "teacher" -> stageData.copy(teacher = stageData.teacher.mapIndexed { i, old -> if (i == index) newText.trim() else old })
+            "abil" -> stageData.copy(abil = stageData.abil.mapIndexed { i, old -> if (i == index) newText.trim() else old })
+            else -> stageData
+        }.withFieldSource(field, FieldSource.USER)
         updateStage(stageKey, updated)
     }
 
@@ -225,26 +247,38 @@ class JadhadhaViewModel(
             "teacher" -> stageData.copy(teacher = stageData.teacher.filterIndexed { i, _ -> i != index })
             "abil" -> stageData.copy(abil = stageData.abil.filterIndexed { i, _ -> i != index })
             else -> stageData
-        }
+        }.withFieldSource(field, FieldSource.USER)
         updateStage(stageKey, updated)
     }
 
-    fun parseAndApplyText(rawText: String, topic: String, forcedComponent: PedagogicalComponent? = null) {
-        if (rawText.isBlank()) return
-        val parsed = JadhadhaParser.parseRawText(
-            raw = rawText,
-            fallbackTopic = topic.ifBlank { "درس جديد" },
-            forcedComponent = forcedComponent ?: _uiState.value.activeComponent
-        )
+    fun parseAndApplyText(
+        rawText: String,
+        topic: String,
+        forcedComponent: PedagogicalComponent? = null,
+        preParsedResult: ParseResult? = null
+    ) {
+        if (rawText.isBlank() && preParsedResult == null) return
+        _uiState.value = _uiState.value.copy(isParsing = true, errorMessage = null)
+
         viewModelScope.launch {
+            val parseResult = preParsedResult ?: withContext(Dispatchers.Default) {
+                JadhadhaParser.parseWithReport(
+                    raw = rawText,
+                    fallbackTopic = topic.ifBlank { "درس جديد" },
+                    forcedComponent = forcedComponent
+                )
+            }
+            val parsed = parseResult.plan
             repository.savePlan(parsed, isCustom = true)
+            _uiState.value = _uiState.value.copy(
+                currentPlan = parsed,
+                activeComponent = parsed.componentType,
+                isParsing = false,
+                lastParseReport = parseResult.report,
+                selectedTab = AppTab.MODEL_EDITOR,
+                successMessage = "تم تفريغ المحتوى (${parseResult.report.totalFileFields} خانة من الملف، ${parseResult.report.totalDefaultFields} افتراضية) وحفظه بنجاح!"
+            )
         }
-        _uiState.value = _uiState.value.copy(
-            currentPlan = parsed,
-            activeComponent = parsed.componentType,
-            selectedTab = AppTab.MODEL_EDITOR,
-            successMessage = "تم تفريغ المحتوى وحفظه في قاعدة البيانات (${parsed.componentType.title}) بنجاح!"
-        )
     }
 
     fun generateWithAi(topic: String, lessonText: String, component: PedagogicalComponent? = null) {
@@ -330,7 +364,7 @@ class JadhadhaViewModel(
             suggestions.stageAbilities.forEach { (stageKey, abilities) ->
                 val existing = updatedStages[stageKey] ?: StageData()
                 val newAbilList = (existing.abil + abilities).distinct()
-                updatedStages[stageKey] = existing.copy(abil = newAbilList)
+                updatedStages[stageKey] = existing.copy(abil = newAbilList).withFieldSource("abil", suggestions.source)
             }
         }
         val newPlan = curr.copy(

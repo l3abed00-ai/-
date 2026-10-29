@@ -227,5 +227,181 @@ class ExampleRobolectricTest {
             assertTrue(stage.eval.isNotEmpty())
         }
     }
+
+    @Test
+    fun `acceptance 1 - docx with single stage marks remaining stages as DEFAULT`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        // Create a plan where only 'diagnostic' has content and all other stages are omitted
+        val singleStagePlan = SamplePlans.MANFA_PLAN.copy(
+            topic = "درس بمرحلة واحدة",
+            stages = mapOf(
+                "diagnostic" to com.example.model.StageData(
+                    abil = listOf("القدرة على تشخيص المكتسبات السابقة."),
+                    teacher = listOf("يطرح أسئلة تشخيصية للتمهيد."),
+                    content = listOf("مراجعة الدرس السابق حول الهجرة."),
+                    eval = listOf("تقويم تشخيصي لقياس استعداد المتعلمين.")
+                )
+            )
+        )
+
+        // Generate a custom single-stage docx by writing a 1-stage raw text or docx
+        val rawSingleStage = """
+            المكون: النصوص القرائية
+            الموضوع: درس بمرحلة واحدة
+            [مرحلة: تشخيص المكتسبات]
+            القدرات المستهدفة:
+            - القدرة على تشخيص المكتسبات السابقة.
+            أنشطة المدرس:
+            - يطرح أسئلة تشخيصية للتمهيد.
+            المحتوى الديداكتيكي:
+            - مراجعة الدرس السابق حول الهجرة.
+            التقويم والدعم:
+            - تقويم تشخيصي لقياس استعداد المتعلمين.
+        """.trimIndent()
+
+        val parseResult = com.example.extractor.JadhadhaParser.parseWithReport(
+            raw = rawSingleStage,
+            fallbackTopic = singleStagePlan.topic,
+            forcedComponent = null
+        )
+
+        val parsedPlan = parseResult.plan
+        val report = parseResult.report
+
+        // Diagnostic stage was extracted from the file -> all 4 fields are FILE
+        val diagStage = parsedPlan.stages["diagnostic"]!!
+        assertEquals(com.example.model.FieldSource.FILE, diagStage.sourceFor("abil"))
+        assertEquals(com.example.model.FieldSource.FILE, diagStage.sourceFor("teacher"))
+        assertEquals(com.example.model.FieldSource.FILE, diagStage.sourceFor("content"))
+        assertEquals(com.example.model.FieldSource.FILE, diagStage.sourceFor("eval"))
+
+        // Remaining 5 stages were filled by ensureDefaults -> all 4 fields in each are DEFAULT
+        val remainingKeys = listOf("observation", "comprehension", "analysis", "synthesis", "investment")
+        for (stageKey in remainingKeys) {
+            val st = parsedPlan.stages[stageKey]!!
+            assertEquals("Stage $stageKey abil should be DEFAULT", com.example.model.FieldSource.DEFAULT, st.sourceFor("abil"))
+            assertEquals("Stage $stageKey teacher should be DEFAULT", com.example.model.FieldSource.DEFAULT, st.sourceFor("teacher"))
+            assertEquals("Stage $stageKey content should be DEFAULT", com.example.model.FieldSource.DEFAULT, st.sourceFor("content"))
+            assertEquals("Stage $stageKey eval should be DEFAULT", com.example.model.FieldSource.DEFAULT, st.sourceFor("eval"))
+        }
+
+        assertEquals(4, report.totalFileFields)
+        assertEquals(20, report.totalDefaultFields)
+    }
+
+    @Test
+    fun `acceptance 2 - unclassified line appears in report and becomes FILE after assignment`() {
+        val rawWithUnclassified = """
+            ملاحظة هامة خارج الجدول قبل بداية المراحل حول توزيع الفوج التربوي
+            [مرحلة: تشخيص المكتسبات]
+            المحتوى الديداكتيكي:
+            - سؤال تمهيدي حول النص القرائي.
+        """.trimIndent()
+
+        val initialResult = com.example.extractor.JadhadhaParser.parseWithReport(
+            raw = rawWithUnclassified,
+            fallbackTopic = "درس اختبار المراجعة",
+            forcedComponent = null
+        )
+
+        // Component was defaulted because no explicit component keywords were provided
+        assertTrue(initialResult.report.isComponentDefaulted)
+        // Unclassified line at line 1 should be captured
+        assertEquals(1, initialResult.report.unclassifiedLines.size)
+        val uLine = initialResult.report.unclassifiedLines.first()
+        assertEquals(1, uLine.lineNumber)
+        assertTrue(uLine.text.contains("ملاحظة هامة خارج الجدول"))
+
+        // Before assignment, observation.content is DEFAULT
+        assertEquals(
+            com.example.model.FieldSource.DEFAULT,
+            initialResult.plan.stages["observation"]?.sourceFor("content")
+        )
+
+        // Assign the unclassified line to observation -> content
+        val updatedResult = com.example.extractor.JadhadhaParser.assignUnclassifiedLine(
+            currentResult = initialResult,
+            line = uLine,
+            targetStageKey = "observation",
+            targetField = "content"
+        )
+
+        // Unclassified lines list is now empty, and observation.content is now FILE and contains the assigned text
+        assertEquals(0, updatedResult.report.unclassifiedLines.size)
+        val obsStage = updatedResult.plan.stages["observation"]!!
+        assertEquals(com.example.model.FieldSource.FILE, obsStage.sourceFor("content"))
+        assertTrue(obsStage.content.any { it.contains("ملاحظة هامة خارج الجدول") })
+    }
+
+    @Test
+    fun `acceptance 3 and 4 - FieldSource tags persist in Room and legacy plans without sources open cleanly`() = kotlinx.coroutines.runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val db = androidx.room.Room.inMemoryDatabaseBuilder(context, com.example.data.AppDatabase::class.java).build()
+        val dao = db.jadhadhaDao()
+        val repository = com.example.data.JadhadhaRepository(dao)
+
+        // Acceptance 3: Save a plan with FILE, DEFAULT, AI, and USER sources and verify persistence
+        val parsed = com.example.extractor.JadhadhaParser.parseWithReport(
+            raw = "[مرحلة: تشخيص المكتسبات]\nالمحتوى الديداكتيكي:\n- محتوى من الملف",
+            fallbackTopic = "درس حفظ المصادر",
+            forcedComponent = com.example.model.PedagogicalComponent.READING
+        ).plan
+
+        val diagWithUserEdit = parsed.stages["diagnostic"]!!
+            .withFieldSource("teacher", com.example.model.FieldSource.USER)
+            .withFieldSource("abil", com.example.model.FieldSource.AI)
+        val updatedStages = parsed.stages.toMutableMap()
+        updatedStages["diagnostic"] = diagWithUserEdit
+        val planToSave = parsed.copy(id = "persisted_sources_plan", stages = updatedStages)
+
+        repository.savePlan(planToSave, isCustom = true)
+
+        val loaded = repository.getPlanById("persisted_sources_plan")
+        assertNotNull(loaded)
+        val loadedDiag = loaded!!.stages["diagnostic"]!!
+        assertEquals(com.example.model.FieldSource.FILE, loadedDiag.sourceFor("content"))
+        assertEquals(com.example.model.FieldSource.USER, loadedDiag.sourceFor("teacher"))
+        assertEquals(com.example.model.FieldSource.AI, loadedDiag.sourceFor("abil"))
+        assertEquals(com.example.model.FieldSource.DEFAULT, loadedDiag.sourceFor("eval"))
+        assertEquals(com.example.model.FieldSource.DEFAULT, loaded.stages["observation"]!!.sourceFor("content"))
+
+        // Acceptance 4: Insert a legacy JadhadhaEntity whose stagesJson has NO "sources" key
+        val legacyStagesJson = """
+            {
+              "diagnostic": {
+                "eval": ["تقويم قديم"],
+                "content": ["محتوى قديم"],
+                "teacher": ["نشاط قديم"],
+                "abil": ["قدرة قديمة"]
+              }
+            }
+        """.trimIndent()
+        val legacyEntity = com.example.data.JadhadhaEntity(
+            id = "legacy_plan_no_sources",
+            topic = "جذاذة قديمة قبل التحديث",
+            componentType = "READING",
+            category = "نصوص قرائية",
+            infoLevel = "الثالثة ثانوي إعدادي",
+            infoUnit = "الأولى",
+            infoDomain = "المجال القيمي",
+            infoComponent = "النصوص القرائية",
+            infoDuration = "ساعتان",
+            infoMaterials = "الكتاب المدرسي",
+            communicativeComp = "كفاية تواصلية",
+            methodologicalComp = "كفاية منهجية",
+            culturalComp = "كفاية ثقافية",
+            stagesJson = legacyStagesJson,
+            isCustom = true
+        )
+        dao.insertOrUpdate(legacyEntity)
+
+        val loadedLegacy = repository.getPlanById("legacy_plan_no_sources")
+        assertNotNull(loadedLegacy)
+        assertEquals("جذاذة قديمة قبل التحديث", loadedLegacy!!.topic)
+        assertEquals(listOf("محتوى قديم"), loadedLegacy.stages["diagnostic"]?.content)
+        assertTrue(loadedLegacy.stages["diagnostic"]?.sources?.isEmpty() == true)
+
+        db.close()
+    }
 }
 

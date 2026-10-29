@@ -625,6 +625,12 @@ private fun DidacticMatrixTable(plan: JadhadhaPlan, fontFamily: FontFamily) {
             val isEven = index % 2 == 0
             val rowBg = if (isEven) Color(0xFFFFFFFF) else Color(0xFFF8FAFC)
 
+            val abilIsDefault = stageData?.sourceFor("abil") == com.example.model.FieldSource.DEFAULT
+            val teacherIsDefault = stageData?.sourceFor("teacher") == com.example.model.FieldSource.DEFAULT
+            val contentIsDefault = stageData?.sourceFor("content") == com.example.model.FieldSource.DEFAULT
+            val evalIsDefault = stageData?.sourceFor("eval") == com.example.model.FieldSource.DEFAULT
+            val stageAllDefault = abilIsDefault && teacherIsDefault && contentIsDefault && evalIsDefault
+
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -638,6 +644,7 @@ private fun DidacticMatrixTable(plan: JadhadhaPlan, fontFamily: FontFamily) {
                     title = stageMeta.title,
                     subtitle = stageMeta.sessionName,
                     isStageHeader = true,
+                    isDefaultSource = stageAllDefault,
                     fontFamily = fontFamily
                 )
 
@@ -645,6 +652,7 @@ private fun DidacticMatrixTable(plan: JadhadhaPlan, fontFamily: FontFamily) {
                 BodyCell(
                     width = 130.dp,
                     items = if (stageData?.abil.isNullOrEmpty()) listOf(stageMeta.description) else stageData!!.abil,
+                    isDefaultSource = abilIsDefault,
                     fontFamily = fontFamily
                 )
 
@@ -653,6 +661,7 @@ private fun DidacticMatrixTable(plan: JadhadhaPlan, fontFamily: FontFamily) {
                     width = 230.dp,
                     teacherActivities = stageData?.teacher ?: emptyList(),
                     fallbackActivities = listOf(stageMeta.description),
+                    isDefaultSource = teacherIsDefault,
                     fontFamily = fontFamily
                 )
 
@@ -660,6 +669,7 @@ private fun DidacticMatrixTable(plan: JadhadhaPlan, fontFamily: FontFamily) {
                 BodyCell(
                     width = 180.dp,
                     items = stageData?.content ?: emptyList(),
+                    isDefaultSource = contentIsDefault,
                     fontFamily = fontFamily
                 )
 
@@ -668,6 +678,7 @@ private fun DidacticMatrixTable(plan: JadhadhaPlan, fontFamily: FontFamily) {
                     width = 150.dp,
                     items = stageData?.eval ?: emptyList(),
                     isEval = true,
+                    isDefaultSource = evalIsDefault,
                     fontFamily = fontFamily
                 )
             }
@@ -692,6 +703,26 @@ private fun HeaderCell(text: String, width: androidx.compose.ui.unit.Dp, fontFam
 }
 
 @Composable
+private fun PreviewDefaultBadge() {
+    Surface(
+        color = Color(0xFFFEF3C7),
+        shape = RoundedCornerShape(4.dp),
+        modifier = Modifier
+            .padding(bottom = 3.dp)
+            .border(0.5.dp, Color(0xFFD97706), RoundedCornerShape(4.dp))
+    ) {
+        Text(
+            text = "افتراضي",
+            style = MaterialTheme.typography.labelSmall,
+            color = Color(0xFF92400E),
+            fontWeight = FontWeight.Bold,
+            fontSize = 9.sp,
+            modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp)
+        )
+    }
+}
+
+@Composable
 private fun BodyCell(
     width: androidx.compose.ui.unit.Dp,
     title: String? = null,
@@ -699,6 +730,7 @@ private fun BodyCell(
     items: List<String> = emptyList(),
     isStageHeader: Boolean = false,
     isEval: Boolean = false,
+    isDefaultSource: Boolean = false,
     fontFamily: FontFamily
 ) {
     Column(
@@ -706,6 +738,9 @@ private fun BodyCell(
             .width(width)
             .padding(6.dp)
     ) {
+        if (isDefaultSource) {
+            PreviewDefaultBadge()
+        }
         if (title != null) {
             Text(
                 text = title,
@@ -755,6 +790,7 @@ private fun BodyActivitiesCell(
     width: androidx.compose.ui.unit.Dp,
     teacherActivities: List<String>,
     fallbackActivities: List<String>,
+    isDefaultSource: Boolean = false,
     fontFamily: FontFamily
 ) {
     Column(
@@ -762,6 +798,9 @@ private fun BodyActivitiesCell(
             .width(width)
             .padding(6.dp)
     ) {
+        if (isDefaultSource) {
+            PreviewDefaultBadge()
+        }
         Text(
             text = "أنشطة المدرس والمتعلم:",
             style = MaterialTheme.typography.labelSmall,

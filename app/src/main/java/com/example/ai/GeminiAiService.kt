@@ -1,6 +1,7 @@
 package com.example.ai
 
 import com.example.BuildConfig
+import com.example.model.FieldSource
 import com.example.model.JadhadhaInfo
 import com.example.model.JadhadhaPlan
 import com.example.model.PedagogicalComponent
@@ -339,7 +340,8 @@ $stagesGuide
             cognitiveObjectives = if (cogList.isNotEmpty()) cogList else fallback.cognitiveObjectives,
             skillObjectives = if (skillList.isNotEmpty()) skillList else fallback.skillObjectives,
             affectiveObjectives = if (affList.isNotEmpty()) affList else fallback.affectiveObjectives,
-            stageAbilities = stageAbilitiesMap
+            stageAbilities = stageAbilitiesMap,
+            source = FieldSource.AI
         )
     }
 
@@ -383,11 +385,19 @@ $stagesGuide
             val teacherList = jsonArrayToList(stObj.optJSONArray("teacher"))
             val abilList = jsonArrayToList(stObj.optJSONArray("abil"))
 
+            val stageSources = mapOf(
+                "eval" to if (evalList.isNotEmpty()) FieldSource.AI else FieldSource.DEFAULT,
+                "content" to if (contentList.isNotEmpty()) FieldSource.AI else FieldSource.DEFAULT,
+                "teacher" to if (teacherList.isNotEmpty()) FieldSource.AI else FieldSource.DEFAULT,
+                "abil" to if (abilList.isNotEmpty()) FieldSource.AI else FieldSource.DEFAULT
+            )
+
             stagesMap[k] = StageData(
                 eval = if (evalList.isNotEmpty()) evalList else fallbackStage.eval,
                 content = if (contentList.isNotEmpty()) contentList else fallbackStage.content,
                 teacher = if (teacherList.isNotEmpty()) teacherList else fallbackStage.teacher,
-                abil = if (abilList.isNotEmpty()) abilList else fallbackStage.abil
+                abil = if (abilList.isNotEmpty()) abilList else fallbackStage.abil,
+                sources = stageSources
             )
         }
 
@@ -750,12 +760,20 @@ $stagesGuide
             )
         }
 
+        val defaultSources = mapOf(
+            "abil" to FieldSource.DEFAULT,
+            "teacher" to FieldSource.DEFAULT,
+            "content" to FieldSource.DEFAULT,
+            "eval" to FieldSource.DEFAULT
+        )
+        val taggedStages = stages.mapValues { (_, st) -> st.copy(sources = defaultSources) }
+
         return JadhadhaPlan(
             topic = cleanTopic,
             componentType = component,
             category = com.example.model.JadhadhaCategories.forComponent(component),
             info = info,
-            stages = stages
+            stages = taggedStages
         )
     }
 
@@ -821,7 +839,8 @@ $stagesGuide
             cognitiveObjectives = cognitive,
             skillObjectives = skill,
             affectiveObjectives = affective,
-            stageAbilities = stageAbilities
+            stageAbilities = stageAbilities,
+            source = FieldSource.DEFAULT
         )
     }
 

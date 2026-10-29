@@ -6,6 +6,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -20,25 +21,29 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.FormatAlignRight
+import androidx.compose.material.icons.automirrored.filled.FactCheck
 import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
+import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentPaste
-import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.UploadFile
+import androidx.compose.material.icons.filled.WarningAmber
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -47,14 +52,16 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.ClipboardManager
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
@@ -63,63 +70,92 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.extractor.DocumentFileReader
 import com.example.extractor.JadhadhaParser
-import com.example.model.JadhadhaPlan
+import com.example.model.ParseResult
 import com.example.model.PedagogicalComponent
+import com.example.model.StageCatalog
+import com.example.model.UnclassifiedLine
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun ExtractorScreen(
     initialComponent: PedagogicalComponent = PedagogicalComponent.READING,
-    onApplyExtractedPlan: (rawText: String, topic: String, forcedComponent: PedagogicalComponent?) -> Unit,
+    onApplyExtractedPlan: (rawText: String, topic: String, forcedComponent: PedagogicalComponent?, preParsedResult: ParseResult?) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
     val clipboardManager: ClipboardManager = LocalClipboardManager.current
+    val coroutineScope = rememberCoroutineScope()
 
-    var selectedComponentFilter by remember { mutableStateOf<PedagogicalComponent?>(initialComponent) }
+    // Default to null ("كشف تلقائي") so component keyword detection and defaulted-component alert work transparently
+    var selectedComponentFilter by remember { mutableStateOf<PedagogicalComponent?>(null) }
     var rawInputText by remember { mutableStateOf("") }
     var topicName by remember { mutableStateOf("") }
     var uploadedFileName by remember { mutableStateOf<String?>(null) }
     var uploadedFileSize by remember { mutableLongStateOf(0L) }
-    var previewPlan by remember { mutableStateOf<JadhadhaPlan?>(null) }
+    var parseResult by remember { mutableStateOf<ParseResult?>(null) }
+    var isParsing by remember { mutableStateOf(false) }
+
+    // Run parsing on Dispatchers.Default whenever input, topic, or component filter changes
+    LaunchedEffect(rawInputText, topicName, selectedComponentFilter) {
+        if (rawInputText.isBlank()) {
+            parseResult = null
+            isParsing = false
+        } else {
+            isParsing = true
+            val result = withContext(Dispatchers.Default) {
+                JadhadhaParser.parseWithReport(
+                    raw = rawInputText,
+                    fallbackTopic = topicName.ifBlank { "درس جديد" },
+                    forcedComponent = selectedComponentFilter
+                )
+            }
+            parseResult = result
+            isParsing = false
+        }
+    }
 
     // File picker launcher supporting Word .docx, text, json
     val filePickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri: Uri? ->
         if (uri != null) {
-            try {
-                val fileInfo = DocumentFileReader.readUploadedFile(context, uri)
-                uploadedFileName = fileInfo.name
-                uploadedFileSize = fileInfo.sizeBytes
-                rawInputText = fileInfo.textContent
-
-                if (topicName.isBlank()) {
-                    val base = fileInfo.name.substringBeforeLast(".")
-                        .replace("جذاذة_", "")
-                        .replace("جذاذة ", "")
-                        .replace("درس_", "")
-                        .replace("درس ", "")
-                        .replace("مهارة_", "")
-                        .replace("مهارة ", "")
-                        .trim()
-                    if (base.isNotBlank() && base.length in 2..50) {
-                        topicName = base
+            coroutineScope.launch {
+                try {
+                    isParsing = true
+                    val fileInfo = withContext(Dispatchers.Default) {
+                        DocumentFileReader.readUploadedFile(context, uri)
                     }
-                }
+                    uploadedFileName = fileInfo.name
+                    uploadedFileSize = fileInfo.sizeBytes
 
-                if (fileInfo.textContent.isNotBlank()) {
-                    previewPlan = JadhadhaParser.parseRawText(
-                        raw = fileInfo.textContent,
-                        fallbackTopic = topicName.ifBlank { "درس جديد" },
-                        forcedComponent = selectedComponentFilter
-                    )
-                    Toast.makeText(context, "تم رفع واستخراج محتوى الملف بنجاح!", Toast.LENGTH_SHORT).show()
-                } else {
-                    Toast.makeText(context, "الملف المرفوع فارغ أو تعذر استخراج النص منه.", Toast.LENGTH_LONG).show()
+                    if (topicName.isBlank()) {
+                        val base = fileInfo.name.substringBeforeLast(".")
+                            .replace("جذاذة_", "")
+                            .replace("جذاذة ", "")
+                            .replace("درس_", "")
+                            .replace("درس ", "")
+                            .replace("مهارة_", "")
+                            .replace("مهارة ", "")
+                            .trim()
+                        if (base.isNotBlank() && base.length in 2..50) {
+                            topicName = base
+                        }
+                    }
+
+                    rawInputText = fileInfo.textContent
+                    if (fileInfo.textContent.isNotBlank()) {
+                        Toast.makeText(context, "تم رفع واستخراج محتوى الملف بنجاح!", Toast.LENGTH_SHORT).show()
+                    } else {
+                        isParsing = false
+                        Toast.makeText(context, "الملف المرفوع فارغ أو تعذر استخراج النص منه.", Toast.LENGTH_LONG).show()
+                    }
+                } catch (e: Exception) {
+                    isParsing = false
+                    Toast.makeText(context, "حدث خطأ أثناء قراءة الملف: ${e.message}", Toast.LENGTH_LONG).show()
                 }
-            } catch (e: Exception) {
-                Toast.makeText(context, "حدث خطأ أثناء قراءة الملف: ${e.message}", Toast.LENGTH_LONG).show()
             }
         }
     }
@@ -159,7 +195,7 @@ fun ExtractorScreen(
                 }
                 Spacer(modifier = Modifier.height(6.dp))
                 Text(
-                    text = "ارفع ملف الجذاذة المصدر (بصيغة Word .docx أو ملف نصي) أو الصق مسودتها، وسيقوم المحرك الذكي بقراءتها وتفريغها وتوزيع عناصرها في الجذاذة النموذجية الرسمية للمكون المختار.",
+                    text = "ارفع ملف الجذاذة المصدر (بصيغة Word .docx أو ملف نصي) أو الصق مسودتها، وسيقوم المحرك الذكي بقراءتها وعرض تقرير مراجعة شفاف للخانات المستخرجة والافتراضية والأسطر غير المصنّفة قبل التطبيق.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.85f)
                 )
@@ -180,24 +216,16 @@ fun ExtractorScreen(
             ) {
                 FilterChip(
                     selected = selectedComponentFilter == null,
-                    onClick = {
-                        selectedComponentFilter = null
-                        if (rawInputText.isNotBlank()) {
-                            previewPlan = JadhadhaParser.parseRawText(rawInputText, topicName.ifBlank { "درس جديد" }, null)
-                        }
-                    },
-                    label = { Text("كشف تلقائي") }
+                    onClick = { selectedComponentFilter = null },
+                    label = { Text("كشف تلقائي") },
+                    modifier = Modifier.testTag("chip_component_auto")
                 )
                 PedagogicalComponent.entries.forEach { comp ->
                     FilterChip(
                         selected = selectedComponentFilter == comp,
-                        onClick = {
-                            selectedComponentFilter = comp
-                            if (rawInputText.isNotBlank()) {
-                                previewPlan = JadhadhaParser.parseRawText(rawInputText, topicName.ifBlank { "درس جديد" }, comp)
-                            }
-                        },
-                        label = { Text(comp.title) }
+                        onClick = { selectedComponentFilter = comp },
+                        label = { Text(comp.title) },
+                        modifier = Modifier.testTag("chip_component_${comp.name.lowercase()}")
                     )
                 }
             }
@@ -279,30 +307,32 @@ fun ExtractorScreen(
                         availableDocxFiles.forEach { docxFile ->
                             OutlinedButton(
                                 onClick = {
-                                    runCatching {
-                                        val extracted = java.io.FileInputStream(docxFile).use { stream ->
-                                            DocumentFileReader.extractTextFromDocx(stream)
+                                    coroutineScope.launch {
+                                        runCatching {
+                                            isParsing = true
+                                            val extracted = withContext(Dispatchers.Default) {
+                                                java.io.FileInputStream(docxFile).use { stream ->
+                                                    DocumentFileReader.extractTextFromDocx(stream)
+                                                }
+                                            }
+                                            uploadedFileName = docxFile.name
+                                            uploadedFileSize = docxFile.length()
+                                            val cleanBase = docxFile.name.substringBeforeLast(".")
+                                                .replace("جذاذة_", "")
+                                                .replace("_", " ")
+                                                .trim()
+                                            if (cleanBase.isNotBlank()) {
+                                                topicName = cleanBase
+                                            }
+                                            rawInputText = extracted
+                                            Toast.makeText(
+                                                context,
+                                                "تم رفع وتفريغ ملف ${docxFile.name} بنجاح!",
+                                                Toast.LENGTH_SHORT
+                                            ).show()
+                                        }.onFailure {
+                                            isParsing = false
                                         }
-                                        uploadedFileName = docxFile.name
-                                        uploadedFileSize = docxFile.length()
-                                        rawInputText = extracted
-                                        val cleanBase = docxFile.name.substringBeforeLast(".")
-                                            .replace("جذاذة_", "")
-                                            .replace("_", " ")
-                                            .trim()
-                                        if (cleanBase.isNotBlank()) {
-                                            topicName = cleanBase
-                                        }
-                                        previewPlan = JadhadhaParser.parseRawText(
-                                            raw = extracted,
-                                            fallbackTopic = topicName.ifBlank { "درس جديد" },
-                                            forcedComponent = selectedComponentFilter
-                                        )
-                                        Toast.makeText(
-                                            context,
-                                            "تم رفع وتفريغ ملف ${docxFile.name} بنجاح!",
-                                            Toast.LENGTH_SHORT
-                                        ).show()
                                     }
                                 }
                             ) {
@@ -366,7 +396,7 @@ fun ExtractorScreen(
                                         uploadedFileName = null
                                         uploadedFileSize = 0L
                                         rawInputText = ""
-                                        previewPlan = null
+                                        parseResult = null
                                     },
                                     modifier = Modifier.size(28.dp)
                                 ) {
@@ -401,7 +431,6 @@ fun ExtractorScreen(
                         val clip = clipboardManager.getText()?.text
                         if (!clip.isNullOrBlank()) {
                             rawInputText = clip
-                            previewPlan = JadhadhaParser.parseRawText(clip, topicName.ifBlank { "درس جديد" }, selectedComponentFilter)
                             uploadedFileName = null
                             Toast.makeText(context, "تم لصق المحتوى من الحافظة", Toast.LENGTH_SHORT).show()
                         }
@@ -418,7 +447,6 @@ fun ExtractorScreen(
                         selectedComponentFilter = PedagogicalComponent.READING
                         topicName = "أنا والمدينة"
                         rawInputText = SAMPLE_READING_TEXT
-                        previewPlan = JadhadhaParser.parseRawText(SAMPLE_READING_TEXT, "أنا والمدينة", PedagogicalComponent.READING)
                         uploadedFileName = null
                     }
                 ) {
@@ -430,7 +458,6 @@ fun ExtractorScreen(
                         selectedComponentFilter = PedagogicalComponent.LANGUAGE
                         topicName = "أسلوب الاختصاص"
                         rawInputText = SAMPLE_LANGUAGE_TEXT
-                        previewPlan = JadhadhaParser.parseRawText(SAMPLE_LANGUAGE_TEXT, "أسلوب الاختصاص", PedagogicalComponent.LANGUAGE)
                         uploadedFileName = null
                     }
                 ) {
@@ -442,7 +469,6 @@ fun ExtractorScreen(
                         selectedComponentFilter = PedagogicalComponent.EXPRESSION
                         topicName = "كتابة حكاية عجيبة"
                         rawInputText = SAMPLE_EXPRESSION_TEXT
-                        previewPlan = JadhadhaParser.parseRawText(SAMPLE_EXPRESSION_TEXT, "كتابة حكاية عجيبة", PedagogicalComponent.EXPRESSION)
                         uploadedFileName = null
                     }
                 ) {
@@ -454,12 +480,7 @@ fun ExtractorScreen(
         // Inputs
         OutlinedTextField(
             value = topicName,
-            onValueChange = {
-                topicName = it
-                if (rawInputText.isNotBlank()) {
-                    previewPlan = JadhadhaParser.parseRawText(rawInputText, it.ifBlank { "درس جديد" }, selectedComponentFilter)
-                }
-            },
+            onValueChange = { topicName = it },
             label = { Text("عنوان الدرس / المهارة (اختياري، يمكن استخراجه آليا)") },
             placeholder = { Text("مثال: اسم الفاعل / أنا والمدينة / كتابة حكاية عجيبة...") },
             modifier = Modifier
@@ -470,14 +491,7 @@ fun ExtractorScreen(
 
         OutlinedTextField(
             value = rawInputText,
-            onValueChange = {
-                rawInputText = it
-                if (it.isNotBlank()) {
-                    previewPlan = JadhadhaParser.parseRawText(it, topicName.ifBlank { "درس جديد" }, selectedComponentFilter)
-                } else {
-                    previewPlan = null
-                }
-            },
+            onValueChange = { rawInputText = it },
             label = { Text("محتوى الجذاذة المستخرج أو الملصق") },
             placeholder = {
                 Text(
@@ -486,21 +500,76 @@ fun ExtractorScreen(
             },
             modifier = Modifier
                 .fillMaxWidth()
-                .height(200.dp)
+                .height(190.dp)
                 .testTag("raw_text_input")
         )
+
+        // Loading indicator when parsing in Dispatchers.Default
+        if (isParsing) {
+            Surface(
+                color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.6f),
+                shape = RoundedCornerShape(10.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("extractor_loading_indicator")
+            ) {
+                Row(
+                    modifier = Modifier.padding(12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.Center
+                ) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(20.dp),
+                        strokeWidth = 2.5.dp,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Text(
+                        text = "جارٍ تحليل الجذاذة وتصنيف الخانات...",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+        }
+
+        // Extraction Review Card («مراجعة التفريغ») BEFORE applying
+        parseResult?.let { currentResult ->
+            ExtractionReviewCard(
+                parseResult = currentResult,
+                onChangeComponentAndReparse = { newComp ->
+                    selectedComponentFilter = newComp
+                },
+                onAssignUnclassifiedLine = { line, stageKey, field ->
+                    parseResult = JadhadhaParser.assignUnclassifiedLine(
+                        currentResult = currentResult,
+                        line = line,
+                        targetStageKey = stageKey,
+                        targetField = field
+                    )
+                    Toast.makeText(
+                        context,
+                        "تم إسناد السطر (${line.lineNumber}) إلى الخانة المختارة بنجاح (المصدر: من الملف ✓)",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                },
+                onIgnoreUnclassifiedLine = { line ->
+                    parseResult = JadhadhaParser.ignoreUnclassifiedLine(currentResult, line)
+                }
+            )
+        }
 
         // Action Button
         Button(
             onClick = {
                 if (rawInputText.isNotBlank()) {
-                    onApplyExtractedPlan(rawInputText, topicName, selectedComponentFilter)
+                    onApplyExtractedPlan(rawInputText, topicName, selectedComponentFilter, parseResult)
                 }
             },
-            enabled = rawInputText.isNotBlank(),
+            enabled = rawInputText.isNotBlank() && !isParsing,
             modifier = Modifier
                 .fillMaxWidth()
-                .height(50.dp)
+                .height(52.dp)
                 .testTag("execute_extract_button"),
             colors = ButtonDefaults.buttonColors(
                 containerColor = MaterialTheme.colorScheme.primary
@@ -514,92 +583,387 @@ fun ExtractorScreen(
                 style = MaterialTheme.typography.bodyLarge
             )
         }
+    }
+}
 
-        // Live Extraction Preview
-        previewPlan?.let { plan ->
-            Card(
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+fun ExtractionReviewCard(
+    parseResult: ParseResult,
+    onChangeComponentAndReparse: (PedagogicalComponent) -> Unit,
+    onAssignUnclassifiedLine: (UnclassifiedLine, stageKey: String, field: String) -> Unit,
+    onIgnoreUnclassifiedLine: (UnclassifiedLine) -> Unit
+) {
+    val plan = parseResult.plan
+    val report = parseResult.report
+    val stages = StageCatalog.getStagesForComponent(plan.componentType)
+
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("extraction_review_card"),
+        shape = RoundedCornerShape(14.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surface
+        ),
+        elevation = CardDefaults.cardElevation(defaultElevation = 3.dp)
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            // Header
+            Row(
                 modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(12.dp),
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surface
-                ),
-                elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(
-                                imageVector = Icons.Default.CheckCircle,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.primary
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                text = "معاينة التفريغ والتحويل:",
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-
-                        Surface(
-                            color = MaterialTheme.colorScheme.primaryContainer,
-                            shape = RoundedCornerShape(6.dp)
-                        ) {
-                            Text(
-                                text = plan.componentType.title,
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onPrimaryContainer,
-                                fontWeight = FontWeight.Bold,
-                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
-                            )
-                        }
-                    }
-
-                    Spacer(modifier = Modifier.height(10.dp))
-
-                    Text(
-                        text = "• العنوان: «${plan.topic}»",
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = FontWeight.SemiBold
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.FactCheck,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary
                     )
+                    Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = "• المستوى والوحدة: ${plan.info.level} — ${plan.info.unit}",
+                        text = "مراجعة التفريغ قبل التطبيق",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+
+                Surface(
+                    color = MaterialTheme.colorScheme.primaryContainer,
+                    shape = RoundedCornerShape(6.dp)
+                ) {
+                    Text(
+                        text = report.detectedComponent.title,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                    )
+                }
+            }
+
+            // 1. Summary Banner: «س خانة من ملفك، ص خانة افتراضية، ع سطرًا غير مصنّف»
+            Surface(
+                color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f),
+                shape = RoundedCornerShape(10.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("review_summary_banner")
+            ) {
+                Column(modifier = Modifier.padding(12.dp)) {
+                    Text(
+                        text = "«${report.totalFileFields} خانة من ملفك، ${report.totalDefaultFields} خانة افتراضية، ${report.unclassifiedLines.size} سطرًا غير مصنّف»",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "العنوان: «${plan.topic}» • المستوى: ${plan.info.level} — ${plan.info.unit}",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                }
+            }
 
-                    Spacer(modifier = Modifier.height(8.dp))
-
-                    val totalContentItems = plan.stages.values.sumOf { it.content.size }
-                    val totalTeacherItems = plan.stages.values.sumOf { it.teacher.size }
-                    val totalAbilItems = plan.stages.values.sumOf { it.abil.size }
-                    val totalEvalItems = plan.stages.values.sumOf { it.eval.size }
-
-                    Surface(
-                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
-                        shape = RoundedCornerShape(8.dp),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Column(modifier = Modifier.padding(10.dp)) {
-                            Text(
-                                text = "العناصر المصنفة في المراحل الرسمية (${plan.stages.size} مراحل):",
-                                style = MaterialTheme.typography.labelMedium,
-                                fontWeight = FontWeight.Bold
+            // 2. Prominent Alert if Component was Defaulted (no keywords found)
+            if (report.isComponentDefaulted) {
+                Surface(
+                    color = Color(0xFFFEF3C7),
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .border(1.dp, Color(0xFFD97706), RoundedCornerShape(10.dp))
+                        .testTag("defaulted_component_warning")
+                ) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = Icons.Default.WarningAmber,
+                                contentDescription = null,
+                                tint = Color(0xFFB45309),
+                                modifier = Modifier.size(20.dp)
                             )
-                            Spacer(modifier = Modifier.height(4.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
                             Text(
-                                text = "• المحتوى والأنشطة التعلمية: $totalContentItems عنصرا\n" +
-                                        "• أنشطة المدرس: $totalTeacherItems إجراء\n" +
-                                        "• القدرات المستهدفة: $totalAbilItems هدفا\n" +
-                                        "• مؤشرات التقويم والدعم: $totalEvalItems مؤشرا",
-                                style = MaterialTheme.typography.bodySmall
+                                text = "تنبيه: تم افتراض مكون «النصوص القرائية» تلقائياً",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFF92400E)
                             )
                         }
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "لم يُعثر على كلمات مفتاحية صريحة للمكوّن في النص. يمكنك تغيير المكوّن وإعادة التفريغ فوراً:",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color(0xFF78350F)
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            PedagogicalComponent.entries.forEach { comp ->
+                                OutlinedButton(
+                                    onClick = { onChangeComponentAndReparse(comp) },
+                                    modifier = Modifier.testTag("reparse_as_${comp.name.lowercase()}")
+                                ) {
+                                    Text(
+                                        text = "إعادة التفريغ كـ: ${comp.title}",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color(0xFF92400E)
+                                    )
+                                }
+                            }
+                        }
                     }
+                }
+            }
+
+            // 3. Per-Stage Source Breakdown (FILE vs DEFAULT per stage)
+            Surface(
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                shape = RoundedCornerShape(10.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(
+                    modifier = Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Text(
+                        text = "توزيع مصادر الخانات حسب المراحل (${stages.size} مراحل × 4 خانات):",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                    stages.forEach { stageMeta ->
+                        val count = report.stageSourceCounts[stageMeta.key]
+                        val fileCount = count?.fileCount ?: 0
+                        val defCount = count?.defaultCount ?: 0
+                        val isAllDefault = fileCount == 0 && defCount > 0
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "• ${stageMeta.title}",
+                                style = MaterialTheme.typography.bodySmall,
+                                fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier.weight(1f)
+                            )
+                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                if (fileCount > 0) {
+                                    Surface(
+                                        color = Color(0xFFD1FAE5),
+                                        shape = RoundedCornerShape(6.dp)
+                                    ) {
+                                        Text(
+                                            text = "$fileCount من الملف",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = Color(0xFF065F46),
+                                            fontWeight = FontWeight.Bold,
+                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                        )
+                                    }
+                                }
+                                if (defCount > 0) {
+                                    Surface(
+                                        color = Color(0xFFFEF3C7),
+                                        shape = RoundedCornerShape(6.dp)
+                                    ) {
+                                        Text(
+                                            text = if (isAllDefault) "افتراضي بالكامل ($defCount)" else "$defCount افتراضي",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = Color(0xFF92400E),
+                                            fontWeight = FontWeight.Bold,
+                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 4. Unclassified Lines List with Dropdown to Assign Stage + Field or Ignore
+            if (report.unclassifiedLines.isNotEmpty()) {
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                Text(
+                    text = "أسطر غير مصنّفة (${report.unclassifiedLines.size}) — اختر المرحلة والخانة لإضافتها أو تجاهلها:",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.error
+                )
+
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.testTag("unclassified_lines_list")
+                ) {
+                    report.unclassifiedLines.forEach { uLine ->
+                        UnclassifiedLineRow(
+                            line = uLine,
+                            stages = stages,
+                            onAssign = { stageKey, field ->
+                                onAssignUnclassifiedLine(uLine, stageKey, field)
+                            },
+                            onIgnore = {
+                                onIgnoreUnclassifiedLine(uLine)
+                            }
+                        )
+                    }
+                }
+            } else {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Default.CheckCircle,
+                        contentDescription = null,
+                        tint = Color(0xFF059669),
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "جميع أسطر الملف تم تصنيفها بنجاح (0 سطر غير مصنّف).",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color(0xFF065F46),
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun UnclassifiedLineRow(
+    line: UnclassifiedLine,
+    stages: List<com.example.model.StageMetadata>,
+    onAssign: (stageKey: String, field: String) -> Unit,
+    onIgnore: () -> Unit
+) {
+    var menuExpanded by remember { mutableStateOf(false) }
+
+    val fieldLabels = listOf(
+        "content" to "المحتوى الديداكتيكي",
+        "teacher" to "أنشطة المدرس",
+        "abil" to "القدرات المستهدفة",
+        "eval" to "التقويم والدعم"
+    )
+
+    Surface(
+        color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.25f),
+        shape = RoundedCornerShape(8.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .border(0.5.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.4f), RoundedCornerShape(8.dp))
+            .testTag("unclassified_line_${line.lineNumber}")
+    ) {
+        Column(modifier = Modifier.padding(10.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.Top
+            ) {
+                Surface(
+                    color = MaterialTheme.colorScheme.errorContainer,
+                    shape = RoundedCornerShape(4.dp)
+                ) {
+                    Text(
+                        text = "سطر ${line.lineNumber}",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onErrorContainer,
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                    )
+                }
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = line.text,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier.weight(1f)
+                )
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box {
+                    FilledTonalButton(
+                        onClick = { menuExpanded = true },
+                        modifier = Modifier.testTag("assign_dropdown_btn_${line.lineNumber}")
+                    ) {
+                        Text(
+                            text = "إسناد إلى مرحلة وخانة",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Icon(
+                            imageVector = Icons.Default.ArrowDropDown,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+
+                    DropdownMenu(
+                        expanded = menuExpanded,
+                        onDismissRequest = { menuExpanded = false }
+                    ) {
+                        DropdownMenuItem(
+                            text = {
+                                Text(
+                                    text = "تجاهل هذا السطر",
+                                    color = MaterialTheme.colorScheme.error,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            },
+                            onClick = {
+                                menuExpanded = false
+                                onIgnore()
+                            }
+                        )
+                        HorizontalDivider()
+                        stages.forEach { stage ->
+                            fieldLabels.forEach { (fieldKey, fieldTitle) ->
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(
+                                            text = "${stage.title} ← $fieldTitle",
+                                            style = MaterialTheme.typography.bodySmall
+                                        )
+                                    },
+                                    onClick = {
+                                        menuExpanded = false
+                                        onAssign(stage.key, fieldKey)
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.width(8.dp))
+
+                OutlinedButton(
+                    onClick = onIgnore,
+                    modifier = Modifier.testTag("ignore_line_btn_${line.lineNumber}")
+                ) {
+                    Text(
+                        text = "تجاهل",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error
+                    )
                 }
             }
         }

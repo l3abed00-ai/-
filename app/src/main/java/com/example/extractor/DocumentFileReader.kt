@@ -196,6 +196,7 @@ object DocumentFileReader {
                     evalLines.forEach { result.add(it) }
                 }
             }
+            result.add("[نهاية الجدول]")
         } else {
             // Parse as Header / Metadata Table
             for (row in rows) {

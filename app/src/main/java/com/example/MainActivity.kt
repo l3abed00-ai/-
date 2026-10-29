@@ -386,6 +386,7 @@ fun JadhadhaMainApp(viewModel: JadhadhaViewModel) {
                         onUpdateCategory = { viewModel.updateCategory(it) },
                         onUpdateInfo = { viewModel.updateInfo(it) },
                         onAddItem = { k, f, t -> viewModel.addStageItem(k, f, t) },
+                        onEditItem = { k, f, idx, t -> viewModel.editStageItem(k, f, idx, t) },
                         onRemoveItem = { k, f, idx -> viewModel.removeStageItem(k, f, idx) },
                         onNavigateToTab = { viewModel.selectTab(it) },
                         onSavePlan = { viewModel.saveCurrentPlan() },
@@ -405,8 +406,8 @@ fun JadhadhaMainApp(viewModel: JadhadhaViewModel) {
 
                     AppTab.EXTRACTOR -> ExtractorScreen(
                         initialComponent = uiState.activeComponent,
-                        onApplyExtractedPlan = { raw, topic, comp ->
-                            viewModel.parseAndApplyText(raw, topic, comp)
+                        onApplyExtractedPlan = { raw, topic, comp, preParsed ->
+                            viewModel.parseAndApplyText(raw, topic, comp, preParsed)
                         }
                     )
 

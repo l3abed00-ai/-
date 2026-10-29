@@ -71,6 +71,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
+import com.example.model.FieldSource
 import com.example.model.JadhadhaCategories
 import com.example.model.JadhadhaInfo
 import com.example.model.JadhadhaPlan
@@ -89,6 +90,7 @@ fun ModelEditorScreen(
     onUpdateCategory: (String) -> Unit = {},
     onUpdateInfo: (JadhadhaInfo) -> Unit,
     onAddItem: (stageKey: String, field: String, text: String) -> Unit,
+    onEditItem: (stageKey: String, field: String, index: Int, newText: String) -> Unit = { _, _, _, _ -> },
     onRemoveItem: (stageKey: String, field: String, index: Int) -> Unit,
     onNavigateToTab: (AppTab) -> Unit,
     onSavePlan: () -> Unit = {},
@@ -376,6 +378,7 @@ fun ModelEditorScreen(
                 meta = stageMeta,
                 data = stageData,
                 onAddItem = { field, text -> onAddItem(stageMeta.key, field, text) },
+                onEditItem = { field, idx, newText -> onEditItem(stageMeta.key, field, idx, newText) },
                 onRemoveItem = { field, idx -> onRemoveItem(stageMeta.key, field, idx) }
             )
         }
@@ -534,20 +537,26 @@ private fun HeaderInfoRow(label: String, value: String) {
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun StageCard(
     meta: com.example.model.StageMetadata,
     data: StageData,
     onAddItem: (field: String, text: String) -> Unit,
+    onEditItem: (field: String, index: Int, newText: String) -> Unit = { _, _, _ -> },
     onRemoveItem: (field: String, index: Int) -> Unit
 ) {
     var selectedField by remember { mutableStateOf("content") }
     var newItemText by remember { mutableStateOf("") }
     var isAdding by remember { mutableStateOf(false) }
 
+    val allFields = listOf("content", "teacher", "abil", "eval")
+    val isWholeStageDefault = allFields.all { data.sourceFor(it) == FieldSource.DEFAULT }
+
     Card(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("stage_card_${meta.key}"),
         shape = RoundedCornerShape(12.dp),
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surface
@@ -561,7 +570,10 @@ fun StageCard(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.weight(1f)
+                ) {
                     Box(
                         modifier = Modifier
                             .size(28.dp)
@@ -592,12 +604,23 @@ fun StageCard(
                     Spacer(modifier = Modifier.width(10.dp))
 
                     Column {
-                        Text(
-                            text = meta.title,
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.onSurface
-                        )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Text(
+                                text = meta.title,
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            if (isWholeStageDefault) {
+                                FieldSourceBadge(
+                                    source = FieldSource.DEFAULT,
+                                    testTag = "stage_default_badge_${meta.key}"
+                                )
+                            }
+                        }
                         Text(
                             text = meta.description,
                             style = MaterialTheme.typography.bodySmall,
@@ -609,10 +632,11 @@ fun StageCard(
 
             Spacer(modifier = Modifier.height(12.dp))
 
-            // Sub-field Tabs
-            Row(
+            // Sub-field Tabs with source indicator
+            FlowRow(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 val fields = listOf(
                     "content" to "المحتوى (${data.content.size})",
@@ -622,11 +646,25 @@ fun StageCard(
                 )
 
                 fields.forEach { (fieldKey, label) ->
+                    val fieldSource = data.sourceFor(fieldKey)
                     FilterChip(
                         selected = selectedField == fieldKey,
                         onClick = { selectedField = fieldKey },
-                        label = { Text(label, style = MaterialTheme.typography.labelSmall) },
-                        modifier = Modifier.weight(1f),
+                        label = {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Text(label, style = MaterialTheme.typography.labelSmall)
+                                if (fieldSource != null) {
+                                    FieldSourceBadge(
+                                        source = fieldSource,
+                                        compact = true,
+                                        testTag = "tab_source_badge_${meta.key}_$fieldKey"
+                                    )
+                                }
+                            }
+                        },
                         colors = FilterChipDefaults.filterChipColors(
                             selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
                             selectedLabelColor = MaterialTheme.colorScheme.onPrimaryContainer
@@ -636,6 +674,40 @@ fun StageCard(
             }
 
             Spacer(modifier = Modifier.height(8.dp))
+
+            // Active Field Source Strip
+            val activeFieldSource = data.sourceFor(selectedField)
+            if (activeFieldSource != null) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 6.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Text(
+                            text = "مصدر بيانات هذه الخانة:",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        FieldSourceBadge(
+                            source = activeFieldSource,
+                            testTag = "active_source_badge_${meta.key}_$selectedField"
+                        )
+                    }
+                    if (activeFieldSource == FieldSource.DEFAULT) {
+                        Text(
+                            text = "تزول شارة «افتراضي» تلقائياً عند التعديل",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color(0xFFB45309)
+                        )
+                    }
+                }
+            }
 
             // List of items for selected field
             val itemsToShow = when (selectedField) {
@@ -676,6 +748,9 @@ fun StageCard(
                                 "teacher", "eval" -> "+ "
                                 "abil" -> "- "
                                 else -> "• "
+                            },
+                            onEdit = { updatedText ->
+                                onEditItem(selectedField, idx, updatedText)
                             },
                             onDelete = { onRemoveItem(selectedField, idx) }
                         )
@@ -750,45 +825,139 @@ fun StageCard(
 }
 
 @Composable
+fun FieldSourceBadge(
+    source: FieldSource,
+    compact: Boolean = false,
+    testTag: String? = null
+) {
+    val (bgColor, textColor, borderColor) = when (source) {
+        FieldSource.DEFAULT -> Triple(Color(0xFFFEF3C7), Color(0xFF92400E), Color(0xFFD97706))
+        FieldSource.FILE -> Triple(Color(0xFFD1FAE5), Color(0xFF065F46), Color(0xFF059669))
+        FieldSource.AI -> Triple(Color(0xFFEDE9FE), Color(0xFF5B21B6), Color(0xFF7C3AED))
+        FieldSource.USER -> Triple(Color(0xFFDBEAFE), Color(0xFF1E40AF), Color(0xFF2563EB))
+    }
+
+    Surface(
+        color = bgColor,
+        shape = RoundedCornerShape(6.dp),
+        modifier = Modifier
+            .border(0.75.dp, borderColor.copy(alpha = 0.7f), RoundedCornerShape(6.dp))
+            .then(if (testTag != null) Modifier.testTag(testTag) else Modifier)
+    ) {
+        Text(
+            text = source.arabicLabel,
+            style = MaterialTheme.typography.labelSmall,
+            color = textColor,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.padding(
+                horizontal = if (compact) 5.dp else 8.dp,
+                vertical = if (compact) 1.dp else 2.dp
+            )
+        )
+    }
+}
+
+@Composable
 fun ItemRow(
     text: String,
     prefix: String,
+    onEdit: (String) -> Unit = {},
     onDelete: () -> Unit
 ) {
+    var isEditing by remember(text) { mutableStateOf(false) }
+    var editedText by remember(text) { mutableStateOf(text) }
+
     Surface(
         modifier = Modifier.fillMaxWidth(),
         color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
         shape = RoundedCornerShape(8.dp)
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 10.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                text = prefix,
-                style = MaterialTheme.typography.bodyMedium,
-                fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.primary
-            )
-            Spacer(modifier = Modifier.width(4.dp))
-            Text(
-                text = text,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurface,
-                modifier = Modifier.weight(1f)
-            )
-            IconButton(
-                onClick = onDelete,
-                modifier = Modifier.size(24.dp)
+        if (isEditing) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                Icon(
-                    imageVector = Icons.Default.Close,
-                    contentDescription = "حذف",
-                    tint = MaterialTheme.colorScheme.error.copy(alpha = 0.7f),
-                    modifier = Modifier.size(16.dp)
+                OutlinedTextField(
+                    value = editedText,
+                    onValueChange = { editedText = it },
+                    modifier = Modifier.weight(1f),
+                    singleLine = false,
+                    maxLines = 3
                 )
+                IconButton(
+                    onClick = {
+                        if (editedText.isNotBlank()) {
+                            onEdit(editedText.trim())
+                            isEditing = false
+                        }
+                    },
+                    modifier = Modifier.size(32.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Check,
+                        contentDescription = "حفظ التعديل",
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                }
+                IconButton(
+                    onClick = {
+                        editedText = text
+                        isEditing = false
+                    },
+                    modifier = Modifier.size(32.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Close,
+                        contentDescription = "إلغاء التعديل",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        } else {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = prefix,
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.primary
+                )
+                Spacer(modifier = Modifier.width(4.dp))
+                Text(
+                    text = text,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier.weight(1f)
+                )
+                IconButton(
+                    onClick = { isEditing = true },
+                    modifier = Modifier.size(26.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Edit,
+                        contentDescription = "تعديل",
+                        tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.75f),
+                        modifier = Modifier.size(15.dp)
+                    )
+                }
+                IconButton(
+                    onClick = onDelete,
+                    modifier = Modifier.size(26.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Close,
+                        contentDescription = "حذف",
+                        tint = MaterialTheme.colorScheme.error.copy(alpha = 0.7f),
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
             }
         }
     }

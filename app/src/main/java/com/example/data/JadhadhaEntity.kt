@@ -2,6 +2,7 @@ package com.example.data
 
 import androidx.room.Entity
 import androidx.room.PrimaryKey
+import com.example.model.FieldSource
 import com.example.model.JadhadhaCategories
 import com.example.model.JadhadhaInfo
 import com.example.model.JadhadhaPlan
@@ -45,12 +46,23 @@ data class JadhadhaEntity(
                 val keys = json.keys()
                 while (keys.hasNext()) {
                     val k = keys.next()
-                    val obj = json.getJSONObject(k)
+                    val obj = json.optJSONObject(k) ?: continue
+                    val sourcesObj = obj.optJSONObject("sources")
+                    val parsedSources = mutableMapOf<String, FieldSource>()
+                    if (sourcesObj != null) {
+                        val srcKeys = sourcesObj.keys()
+                        while (srcKeys.hasNext()) {
+                            val fieldKey = srcKeys.next()
+                            val srcVal = sourcesObj.optString(fieldKey, "")
+                            FieldSource.fromString(srcVal)?.let { parsedSources[fieldKey] = it }
+                        }
+                    }
                     stagesMap[k] = StageData(
                         eval = jsonArrayToList(obj.optJSONArray("eval")),
                         content = jsonArrayToList(obj.optJSONArray("content")),
                         teacher = jsonArrayToList(obj.optJSONArray("teacher")),
-                        abil = jsonArrayToList(obj.optJSONArray("abil"))
+                        abil = jsonArrayToList(obj.optJSONArray("abil")),
+                        sources = parsedSources
                     )
                 }
             }
@@ -86,6 +98,13 @@ data class JadhadhaEntity(
                     put("content", JSONArray(data.content))
                     put("teacher", JSONArray(data.teacher))
                     put("abil", JSONArray(data.abil))
+                    if (data.sources.isNotEmpty()) {
+                        val sourcesJson = JSONObject()
+                        data.sources.forEach { (fieldKey, source) ->
+                            sourcesJson.put(fieldKey, source.name)
+                        }
+                        put("sources", sourcesJson)
+                    }
                 }
                 stagesObj.put(key, stageJson)
             }

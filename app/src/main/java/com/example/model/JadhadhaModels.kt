@@ -59,12 +59,35 @@ data class JadhadhaInfo(
     val culturalComp: String = "أن يغني المتعلم رصيده المعرفي بقيم النص ومقاصده الإنسانية والوطنية."
 )
 
+enum class FieldSource(val arabicLabel: String) {
+    FILE("من الملف"),
+    DEFAULT("افتراضي"),
+    AI("ذكاء اصطناعي"),
+    USER("معدّل يدوياً");
+
+    companion object {
+        fun fromString(value: String?): FieldSource? {
+            if (value.isNullOrBlank()) return null
+            return entries.firstOrNull { it.name.equals(value.trim(), ignoreCase = true) }
+        }
+    }
+}
+
 data class StageData(
     val eval: List<String> = emptyList(),
     val content: List<String> = emptyList(),
     val teacher: List<String> = emptyList(),
-    val abil: List<String> = emptyList()
-)
+    val abil: List<String> = emptyList(),
+    val sources: Map<String, FieldSource> = emptyMap()
+) {
+    fun sourceFor(field: String): FieldSource? = sources[field]
+
+    fun withFieldSource(field: String, source: FieldSource): StageData {
+        val updated = sources.toMutableMap()
+        updated[field] = source
+        return copy(sources = updated)
+    }
+}
 
 data class StageMetadata(
     val key: String,
@@ -255,6 +278,39 @@ data class SuggestedObjectives(
     val cognitiveObjectives: List<String> = emptyList(),
     val skillObjectives: List<String> = emptyList(),
     val affectiveObjectives: List<String> = emptyList(),
-    val stageAbilities: Map<String, List<String>> = emptyMap()
+    val stageAbilities: Map<String, List<String>> = emptyMap(),
+    val source: FieldSource = FieldSource.AI
 )
+
+data class UnclassifiedLine(
+    val lineNumber: Int,
+    val text: String
+)
+
+data class StageSourceCount(
+    val stageKey: String,
+    val stageTitle: String,
+    val fileCount: Int,
+    val defaultCount: Int
+)
+
+data class ParseReport(
+    val detectedComponent: PedagogicalComponent,
+    val isComponentDefaulted: Boolean,
+    val usedKeywordsForComponent: Boolean = !isComponentDefaulted,
+    val stageSourceCounts: Map<String, StageSourceCount> = emptyMap(),
+    val unclassifiedLines: List<UnclassifiedLine> = emptyList()
+) {
+    val totalFileFields: Int
+        get() = stageSourceCounts.values.sumOf { it.fileCount }
+
+    val totalDefaultFields: Int
+        get() = stageSourceCounts.values.sumOf { it.defaultCount }
+}
+
+data class ParseResult(
+    val plan: JadhadhaPlan,
+    val report: ParseReport
+)
+
 
