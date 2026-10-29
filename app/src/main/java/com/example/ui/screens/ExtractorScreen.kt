@@ -68,6 +68,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.example.ai.GeminiAiService
+import com.example.docx.DocxGenerator
 import com.example.extractor.DocumentFileReader
 import com.example.extractor.JadhadhaParser
 import com.example.model.ParseResult
@@ -97,6 +99,27 @@ fun ExtractorScreen(
     var uploadedFileSize by remember { mutableLongStateOf(0L) }
     var parseResult by remember { mutableStateOf<ParseResult?>(null) }
     var isParsing by remember { mutableStateOf(false) }
+    var autoDelegateAiOnFileUpload by remember { mutableStateOf(false) }
+
+    // Track bound Model Jadhadha templates from "الملف التربوي" (Google Drive)
+    var templateRefreshTick by remember { mutableStateOf(0) }
+    var targetTemplateComponent by remember { mutableStateOf(PedagogicalComponent.LANGUAGE) }
+
+    val modelTemplatePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            val savedName = DocxGenerator.saveModelTemplate(context, targetTemplateComponent, uri)
+            templateRefreshTick++
+            if (savedName != null) {
+                Toast.makeText(
+                    context,
+                    "تم ربط الجذاذة النموذجية «$savedName» لمكون ${targetTemplateComponent.title} بنجاح!",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+        }
+    }
 
     // Run parsing on Dispatchers.Default whenever input, topic, or component filter changes
     LaunchedEffect(rawInputText, topicName, selectedComponentFilter) {
@@ -105,14 +128,23 @@ fun ExtractorScreen(
             isParsing = false
         } else {
             isParsing = true
-            val result = withContext(Dispatchers.Default) {
+            val initial = withContext(Dispatchers.Default) {
                 JadhadhaParser.parseWithReport(
                     raw = rawInputText,
                     fallbackTopic = topicName.ifBlank { "درس جديد" },
                     forcedComponent = selectedComponentFilter
                 )
             }
-            parseResult = result
+            if (autoDelegateAiOnFileUpload) {
+                autoDelegateAiOnFileUpload = false
+                val refined = GeminiAiService.classifyAndRefineExtraction(
+                    rawText = rawInputText,
+                    initialResult = initial
+                )
+                parseResult = refined
+            } else {
+                parseResult = initial
+            }
             isParsing = false
         }
     }
@@ -131,29 +163,27 @@ fun ExtractorScreen(
                     uploadedFileName = fileInfo.name
                     uploadedFileSize = fileInfo.sizeBytes
 
-                    if (topicName.isBlank()) {
-                        val base = fileInfo.name.substringBeforeLast(".")
-                            .replace("جذاذة_", "")
-                            .replace("جذاذة ", "")
-                            .replace("درس_", "")
-                            .replace("درس ", "")
-                            .replace("مهارة_", "")
-                            .replace("مهارة ", "")
-                            .trim()
-                        if (base.isNotBlank() && base.length in 2..50) {
-                            topicName = base
-                        }
+                    val cleanedFromName = DocumentFileReader.cleanTopicFromFilename(fileInfo.name)
+                    if (cleanedFromName.isNotBlank() && cleanedFromName.length in 2..60) {
+                        topicName = cleanedFromName
                     }
 
+                    autoDelegateAiOnFileUpload = true
                     rawInputText = fileInfo.textContent
                     if (fileInfo.textContent.isNotBlank()) {
-                        Toast.makeText(context, "تم رفع واستخراج محتوى الملف بنجاح!", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(
+                            context,
+                            "تم رفع الملف وإسناد التصنيف والتنقيح إلى الذكاء الاصطناعي المدمج بنجاح!",
+                            Toast.LENGTH_SHORT
+                        ).show()
                     } else {
                         isParsing = false
+                        autoDelegateAiOnFileUpload = false
                         Toast.makeText(context, "الملف المرفوع فارغ أو تعذر استخراج النص منه.", Toast.LENGTH_LONG).show()
                     }
                 } catch (e: Exception) {
                     isParsing = false
+                    autoDelegateAiOnFileUpload = false
                     Toast.makeText(context, "حدث خطأ أثناء قراءة الملف: ${e.message}", Toast.LENGTH_LONG).show()
                 }
             }
@@ -187,7 +217,7 @@ fun ExtractorScreen(
                     )
                     Spacer(modifier = Modifier.width(10.dp))
                     Text(
-                        text = "تفريغ ونقل محتوى الجذاذات",
+                        text = "تفريغ ونقل محتوى الجذاذات (مع الذكاء الاصطناعي المدمج)",
                         style = MaterialTheme.typography.titleLarge,
                         fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.onPrimaryContainer
@@ -195,10 +225,94 @@ fun ExtractorScreen(
                 }
                 Spacer(modifier = Modifier.height(6.dp))
                 Text(
-                    text = "ارفع ملف الجذاذة المصدر (بصيغة Word .docx أو ملف نصي) أو الصق مسودتها، وسيقوم المحرك الذكي بقراءتها وعرض تقرير مراجعة شفاف للخانات المستخرجة والافتراضية والأسطر غير المصنّفة قبل التطبيق.",
+                    text = "ارفع ملف الجذاذة المصدر (مثل جذاذات المختار .docx) أو الصق مسودتها، وسيتولى نموذج الذكاء الاصطناعي المدمج تصنيف الأسطر والجداول الفرعية وتنقيح المراحل مع الحفاظ التام على تنسيق الجذاذة النموذجية (خط Sakkal Majalla 10pt عريض والألوان الرسمية) في جميع المكونات.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.85f)
                 )
+            }
+        }
+
+        // Model Jadhadha Formatting & Google Drive "الملف التربوي" Template Binding Card
+        Card(
+            shape = RoundedCornerShape(14.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.45f)
+            ),
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("model_template_drive_card")
+        ) {
+            Column(modifier = Modifier.padding(14.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "تنسيق الجذاذة النموذجية (مجلد «الملف التربوي» — Google Drive):",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSecondaryContainer
+                    )
+                    Surface(
+                        color = Color(0xFFD1FAE5),
+                        shape = RoundedCornerShape(6.dp)
+                    ) {
+                        Text(
+                            text = "Sakkal Majalla 10pt Bold ✓",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color(0xFF065F46),
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "يحافظ التطبيق تلقائياً على تنسيق الجذاذات النموذجية في جميع المكونات (الألوان، الإطارات، الجداول التحليلية، وخط Sakkal Majalla بحجم 10pt عريض). كما يمكنك ربط ملف الجذاذة النموذجية من مجلد «الملف التربوي» على Google Drive لأي مكون:",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+
+                // Per-component template binding buttons
+                val _tick = templateRefreshTick
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    PedagogicalComponent.entries.forEach { comp ->
+                        val boundName = remember(comp, _tick) {
+                            DocxGenerator.getModelTemplateName(context, comp)
+                        }
+                        OutlinedButton(
+                            onClick = {
+                                targetTemplateComponent = comp
+                                modelTemplatePickerLauncher.launch(
+                                    arrayOf(
+                                        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                                        "application/msword",
+                                        "*/*"
+                                    )
+                                )
+                            },
+                            modifier = Modifier.testTag("bind_template_${comp.name.lowercase()}")
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.InsertDriveFile,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp),
+                                tint = if (boundName != null) Color(0xFF059669) else MaterialTheme.colorScheme.primary
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = if (boundName != null) "نموذج ${comp.title}: $boundName ✓" else "ربط نموذج ${comp.title} (Google Drive)",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                }
             }
         }
 
@@ -232,7 +346,7 @@ fun ExtractorScreen(
         }
 
         val availableDocxFiles = remember {
-            runCatching { com.example.docx.DocxGenerator.getOrCreateAvailableDocxFiles(context) }.getOrDefault(emptyList())
+            runCatching { DocxGenerator.getOrCreateAvailableDocxFiles(context) }.getOrDefault(emptyList())
         }
 
         // Upload Source File Action Card
@@ -246,13 +360,13 @@ fun ExtractorScreen(
         ) {
             Column(modifier = Modifier.padding(14.dp)) {
                 Text(
-                    text = "رفع الجذاذة المصدر من جهازك:",
+                    text = "رفع الجذاذة المصدر من جهازك أو Google Drive:",
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.Bold
                 )
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    text = "تُحفظ الجذاذات المصدّرة تلقائياً في مجلد «التنزيلات / Downloads» على هاتفك. يمكنك اختيار ملف من الهاتف أو الضغط على أحد ملفات Word الجاهزة أسفله:",
+                    text = "تُحفظ الجذاذات المصدّرة تلقائياً في مجلد «التنزيلات / Downloads» على هاتفك. يمكنك اختيار ملف الجذاذة المصدر من الهاتف أو Google Drive أو الضغط على أحد ملفات Word الجاهزة أسفله:",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -286,7 +400,7 @@ fun ExtractorScreen(
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = "استعراض ملفات الهاتف (التنزيلات / المستندات)",
+                        text = "استعراض ملفات الهاتف / Google Drive (الملف التربوي)",
                         fontWeight = FontWeight.Bold
                     )
                 }
@@ -317,13 +431,11 @@ fun ExtractorScreen(
                                             }
                                             uploadedFileName = docxFile.name
                                             uploadedFileSize = docxFile.length()
-                                            val cleanBase = docxFile.name.substringBeforeLast(".")
-                                                .replace("جذاذة_", "")
-                                                .replace("_", " ")
-                                                .trim()
+                                            val cleanBase = DocumentFileReader.cleanTopicFromFilename(docxFile.name)
                                             if (cleanBase.isNotBlank()) {
                                                 topicName = cleanBase
                                             }
+                                            autoDelegateAiOnFileUpload = true
                                             rawInputText = extracted
                                             Toast.makeText(
                                                 context,
@@ -332,6 +444,7 @@ fun ExtractorScreen(
                                             ).show()
                                         }.onFailure {
                                             isParsing = false
+                                            autoDelegateAiOnFileUpload = false
                                         }
                                     }
                                 }
@@ -482,7 +595,7 @@ fun ExtractorScreen(
             value = topicName,
             onValueChange = { topicName = it },
             label = { Text("عنوان الدرس / المهارة (اختياري، يمكن استخراجه آليا)") },
-            placeholder = { Text("مثال: اسم الفاعل / أنا والمدينة / كتابة حكاية عجيبة...") },
+            placeholder = { Text("مثال: اسما الزمان والمكان / أنا والمدينة / كتابة حكاية عجيبة...") },
             modifier = Modifier
                 .fillMaxWidth()
                 .testTag("extract_topic_input"),
@@ -525,7 +638,7 @@ fun ExtractorScreen(
                     )
                     Spacer(modifier = Modifier.width(10.dp))
                     Text(
-                        text = "جارٍ تحليل الجذاذة وتصنيف الخانات...",
+                        text = "جارٍ تحليل الجذاذة وتصنيف الخانات بالذكاء الاصطناعي المدمج...",
                         style = MaterialTheme.typography.bodyMedium,
                         fontWeight = FontWeight.Bold
                     )
@@ -537,6 +650,22 @@ fun ExtractorScreen(
         parseResult?.let { currentResult ->
             ExtractionReviewCard(
                 parseResult = currentResult,
+                onDelegateToBuiltInAi = {
+                    coroutineScope.launch {
+                        isParsing = true
+                        val refined = GeminiAiService.classifyAndRefineExtraction(
+                            rawText = rawInputText,
+                            initialResult = currentResult
+                        )
+                        parseResult = refined
+                        isParsing = false
+                        Toast.makeText(
+                            context,
+                            "تم إسناد المهمة إلى الذكاء الاصطناعي المدمج: صُنّفت جميع الأسطر ونُقّحت المراحل بنجاح ✨",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
+                },
                 onChangeComponentAndReparse = { newComp ->
                     selectedComponentFilter = newComp
                 },
@@ -590,6 +719,7 @@ fun ExtractorScreen(
 @Composable
 fun ExtractionReviewCard(
     parseResult: ParseResult,
+    onDelegateToBuiltInAi: () -> Unit,
     onChangeComponentAndReparse: (PedagogicalComponent) -> Unit,
     onAssignUnclassifiedLine: (UnclassifiedLine, stageKey: String, field: String) -> Unit,
     onIgnoreUnclassifiedLine: (UnclassifiedLine) -> Unit
@@ -655,8 +785,9 @@ fun ExtractionReviewCard(
                     .testTag("review_summary_banner")
             ) {
                 Column(modifier = Modifier.padding(12.dp)) {
+                    val aiSummarySuffix = if (report.totalAiFields > 0) " (${report.totalAiFields} خانة ذكاء اصطناعي ✨)" else ""
                     Text(
-                        text = "«${report.totalFileFields} خانة من ملفك، ${report.totalDefaultFields} خانة افتراضية، ${report.unclassifiedLines.size} سطرًا غير مصنّف»",
+                        text = "«${report.totalFileFields} خانة من ملفك، ${report.totalDefaultFields} خانة افتراضية، ${report.unclassifiedLines.size} سطرًا غير مصنّف»$aiSummarySuffix",
                         style = MaterialTheme.typography.bodyMedium,
                         fontWeight = FontWeight.ExtraBold,
                         color = MaterialTheme.colorScheme.onPrimaryContainer
@@ -666,6 +797,69 @@ fun ExtractionReviewCard(
                         text = "العنوان: «${plan.topic}» • المستوى: ${plan.info.level} — ${plan.info.unit}",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+
+            // 1b. Built-in AI Delegation Button & Status Banner
+            if (report.isAiDelegated) {
+                Surface(
+                    color = Color(0xFFEDE9FE),
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .border(1.dp, Color(0xFF7C3AED), RoundedCornerShape(10.dp))
+                        .testTag("ai_delegated_status_banner")
+                ) {
+                    Row(
+                        modifier = Modifier.padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.AutoAwesome,
+                            contentDescription = null,
+                            tint = Color(0xFF5B21B6),
+                            modifier = Modifier.size(22.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "تم إسناد المهمة إلى نموذج الذكاء الاصطناعي المدمج بنجاح ✨",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFF5B21B6)
+                            )
+                            Text(
+                                text = "صُنّف ${report.aiClassifiedLinesCount} سطرًا من الملف، وتم تنقيح واستكمال ${report.aiRefinedFieldsCount} خانة وفق تنسيق الجذاذة النموذجية.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = Color(0xFF4C1D95)
+                            )
+                        }
+                    }
+                }
+            } else if (report.unclassifiedLines.isNotEmpty() || report.totalDefaultFields > 0) {
+                FilledTonalButton(
+                    onClick = onDelegateToBuiltInAi,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp)
+                        .testTag("ai_delegate_refine_button"),
+                    colors = ButtonDefaults.filledTonalButtonColors(
+                        containerColor = Color(0xFFEDE9FE),
+                        contentColor = Color(0xFF5B21B6)
+                    ),
+                    shape = RoundedCornerShape(10.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.AutoAwesome,
+                        contentDescription = null,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "إسناد المهمة إلى الذكاء الاصطناعي المدمج (تصنيف الأسطر وتنقيح المراحل) ✨",
+                        fontWeight = FontWeight.Bold,
+                        style = MaterialTheme.typography.labelLarge
                     )
                 }
             }
@@ -725,7 +919,7 @@ fun ExtractionReviewCard(
                 }
             }
 
-            // 3. Per-Stage Source Breakdown (FILE vs DEFAULT per stage)
+            // 3. Per-Stage Source Breakdown (FILE vs AI vs DEFAULT per stage)
             Surface(
                 color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
                 shape = RoundedCornerShape(10.dp),
@@ -743,8 +937,9 @@ fun ExtractionReviewCard(
                     stages.forEach { stageMeta ->
                         val count = report.stageSourceCounts[stageMeta.key]
                         val fileCount = count?.fileCount ?: 0
+                        val aiCount = count?.aiCount ?: 0
                         val defCount = count?.defaultCount ?: 0
-                        val isAllDefault = fileCount == 0 && defCount > 0
+                        val isAllDefault = fileCount == 0 && aiCount == 0 && defCount > 0
 
                         Row(
                             modifier = Modifier.fillMaxWidth(),
@@ -767,6 +962,20 @@ fun ExtractionReviewCard(
                                             text = "$fileCount من الملف",
                                             style = MaterialTheme.typography.labelSmall,
                                             color = Color(0xFF065F46),
+                                            fontWeight = FontWeight.Bold,
+                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                        )
+                                    }
+                                }
+                                if (aiCount > 0) {
+                                    Surface(
+                                        color = Color(0xFFEDE9FE),
+                                        shape = RoundedCornerShape(6.dp)
+                                    ) {
+                                        Text(
+                                            text = "$aiCount ذكاء اصطناعي ✨",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = Color(0xFF5B21B6),
                                             fontWeight = FontWeight.Bold,
                                             modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
                                         )
@@ -796,7 +1005,7 @@ fun ExtractionReviewCard(
             if (report.unclassifiedLines.isNotEmpty()) {
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                 Text(
-                    text = "أسطر غير مصنّفة (${report.unclassifiedLines.size}) — اختر المرحلة والخانة لإضافتها أو تجاهلها:",
+                    text = "أسطر غير مصنّفة (${report.unclassifiedLines.size}) — يمكنك إسناد المهمة للذكاء الاصطناعي أعلاه أو اختيار المرحلة يدوياً:",
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.error

@@ -48,7 +48,11 @@ object JadhadhaParser {
             if (trimmed.isNotEmpty()) (idx + 1) to trimmed else null
         }
         val plainLines = indexedNonEmptyLines.map { it.second }
-        var topic = fallbackTopic
+        var topic = if (fallbackTopic.contains("جذاذة") || fallbackTopic.contains("المختار") || fallbackTopic.contains("3اع") || fallbackTopic.contains("3إع")) {
+            DocumentFileReader.cleanTopicFromFilename(fallbackTopic).ifBlank { fallbackTopic }
+        } else {
+            fallbackTopic
+        }
 
         // Detect component type and whether keywords were matched
         val (keywordDetectedComp, matchedByKeywords) = detectComponentWithKeywords(normalizedRaw, plainLines)
@@ -184,10 +188,19 @@ object JadhadhaParser {
                         matchedHeader = true
                     }
                 } else if (strippedHeaderLine.startsWith("الوحدة")) {
-                    val extracted = extractAfterColon(strippedHeaderLine)
-                    if (extracted.isNotBlank()) {
-                        unit = extracted
-                        matchedHeader = true
+                    val colonIdx = strippedHeaderLine.indexOf(':')
+                    if (colonIdx > 0) {
+                        val beforeColon = strippedHeaderLine.substring(0, colonIdx).trim()
+                        val afterColon = strippedHeaderLine.substring(colonIdx + 1).trim()
+                        val unitWords = beforeColon.removePrefix("الوحدة").trim()
+                        if (unitWords.isNotBlank() && afterColon.isNotBlank()) {
+                            unit = beforeColon
+                            domain = afterColon.removePrefix("المجال:").removePrefix("المجال").trim().ifBlank { afterColon }
+                            matchedHeader = true
+                        } else if (afterColon.isNotBlank()) {
+                            unit = afterColon
+                            matchedHeader = true
+                        }
                     }
                 } else if (strippedHeaderLine.startsWith("المجال")) {
                     val extracted = extractAfterColon(strippedHeaderLine)
@@ -201,7 +214,11 @@ object JadhadhaParser {
                         component = extracted
                         matchedHeader = true
                     }
-                } else if (strippedHeaderLine.startsWith("المدة") || strippedHeaderLine.startsWith("الغلاف الزمني")) {
+                } else if (strippedHeaderLine.startsWith("المدة") ||
+                    strippedHeaderLine.startsWith("الغلاف الزمني") ||
+                    strippedHeaderLine.startsWith("الحصيص الزمني") ||
+                    strippedHeaderLine.startsWith("مدة الإنجاز")
+                ) {
                     val extracted = extractAfterColon(strippedHeaderLine)
                     if (extracted.isNotBlank()) {
                         duration = extracted
@@ -226,7 +243,8 @@ object JadhadhaParser {
                     matchedHeader = true
                 } else if (strippedHeaderLine.contains("كفاية ثقافية") ||
                     strippedHeaderLine.contains("كفاية معرفية") ||
-                    strippedHeaderLine.startsWith("الكفاية الثقافية")
+                    strippedHeaderLine.startsWith("الكفاية الثقافية") ||
+                    strippedHeaderLine.startsWith("القدرة الخاصة بالدرس")
                 ) {
                     val extracted = extractAfterColon(strippedHeaderLine)
                     if (extracted.isNotBlank()) cultural = extracted
@@ -334,7 +352,10 @@ object JadhadhaParser {
     fun buildReport(
         plan: JadhadhaPlan,
         isComponentDefaulted: Boolean,
-        unclassifiedLines: List<UnclassifiedLine>
+        unclassifiedLines: List<UnclassifiedLine>,
+        aiClassifiedLinesCount: Int = 0,
+        aiRefinedFieldsCount: Int = 0,
+        isAiDelegated: Boolean = false
     ): ParseReport {
         val stageMetaList = StageCatalog.getStagesForComponent(plan.componentType)
         val stageCounts = stageMetaList.associate { sm ->
@@ -342,11 +363,15 @@ object JadhadhaParser {
             val fields = listOf("abil", "teacher", "content", "eval")
             val fileCount = fields.count { f -> stData.sourceFor(f) == FieldSource.FILE }
             val defaultCount = fields.count { f -> stData.sourceFor(f) == FieldSource.DEFAULT }
+            val aiCount = fields.count { f -> stData.sourceFor(f) == FieldSource.AI }
+            val userCount = fields.count { f -> stData.sourceFor(f) == FieldSource.USER }
             sm.key to StageSourceCount(
                 stageKey = sm.key,
                 stageTitle = sm.title,
                 fileCount = fileCount,
-                defaultCount = defaultCount
+                defaultCount = defaultCount,
+                aiCount = aiCount,
+                userCount = userCount
             )
         }
         return ParseReport(
@@ -354,7 +379,10 @@ object JadhadhaParser {
             isComponentDefaulted = isComponentDefaulted,
             usedKeywordsForComponent = !isComponentDefaulted,
             stageSourceCounts = stageCounts,
-            unclassifiedLines = unclassifiedLines
+            unclassifiedLines = unclassifiedLines,
+            aiClassifiedLinesCount = aiClassifiedLinesCount,
+            aiRefinedFieldsCount = aiRefinedFieldsCount,
+            isAiDelegated = isAiDelegated
         )
     }
 
@@ -449,12 +477,13 @@ object JadhadhaParser {
         stageFields: MutableMap<String, MutableList<String>>?
     ): Boolean {
         val trimmed = rawLine.trim()
-        // Bulleted items (-, •, +, *, 1.) or underlined items are structured content
+        // Bulleted items (-, •, +, *, 1.), underlined items, or nested table rows ([جدول: ...]) are structured content
         if (trimmed.startsWith("-") ||
             trimmed.startsWith("•") ||
             trimmed.startsWith("+") ||
             trimmed.startsWith("*") ||
             trimmed.startsWith("<u>") ||
+            trimmed.startsWith("[جدول:") ||
             trimmed.matches(Regex("^\\d+[.\\-)].*"))
         ) {
             return false
@@ -617,7 +646,7 @@ object JadhadhaParser {
     )
 
     private fun formatContentSubLabel(clean: String): String {
-        if (clean.contains("<u>")) return clean
+        if (clean.contains("<u>") || clean.startsWith("[جدول:")) return clean
         val colonIdx = clean.indexOf(':')
         if (colonIdx in 2..32 && !clean.startsWith("http")) {
             val label = clean.substring(0, colonIdx).trim()
@@ -674,7 +703,21 @@ object JadhadhaParser {
                     plain.startsWith("يقدم") ||
                     plain.startsWith("يقترح") ||
                     plain.startsWith("يقرأ الأستاذ") ||
-                    plain.startsWith("يقرأ المدرس") -> "teacher"
+                    plain.startsWith("يقرأ المدرس") ||
+                    plain.startsWith("يتأملون") ||
+                    plain.startsWith("يصفون") ||
+                    plain.startsWith("يلاحظون") ||
+                    plain.startsWith("يستنتجون") ||
+                    plain.startsWith("يجيبون") ||
+                    plain.startsWith("يقرأون") ||
+                    plain.startsWith("يقرؤون") ||
+                    plain.startsWith("يستخرجون") ||
+                    plain.startsWith("ينجزون") ||
+                    plain.startsWith("يشاركون") ||
+                    plain.startsWith("يبنون") ||
+                    plain.startsWith("يصوغون") ||
+                    plain.startsWith("يركبون") ||
+                    plain.startsWith("يعربون") -> "teacher"
 
             plain.startsWith("تقويم ") ||
                     plain.startsWith("فحص ") ||
@@ -694,17 +737,23 @@ object JadhadhaParser {
      * If no explicit component keywords were found, returns (READING, false).
      */
     private fun detectComponentWithKeywords(raw: String, lines: List<String>): Pair<PedagogicalComponent, Boolean> {
-        val sample = (lines.take(30).joinToString(" ") + " " + raw.take(800)).lowercase()
+        val sample = (lines.take(35).joinToString(" ") + " " + raw.take(1000)).lowercase()
         return when {
             sample.contains("درس لغوي") || sample.contains("الدرس اللغوي") || sample.contains("ظاهرة لغوية") ||
-                    sample.contains("ملاحظة الظاهرة") || sample.contains("الوصف والتحليل") ||
+                    sample.contains("ملاحظة الظاهرة") || sample.contains("ملاحظة الأمثلة") || sample.contains("الوصف والتحليل") ||
                     sample.contains("اسم الفاعل") || sample.contains("صيغ المبالغة") || sample.contains("أسلوب الاختصاص") ||
-                    sample.contains("اسم المفعول") || sample.contains("القاعدة التركيبية") ->
+                    sample.contains("اسم المفعول") || sample.contains("اسما الزمان والمكان") || sample.contains("اسم الزمان") ||
+                    sample.contains("اسم المكان") || sample.contains("اسم الآلة") || sample.contains("اسم التفضيل") ||
+                    sample.contains("الممنوع من الصرف") || sample.contains("الإضافة") || sample.contains("النسبة") ||
+                    sample.contains("أسلوب التعجب") || sample.contains("أسلوب المدح") || sample.contains("أسلوب النداء") ||
+                    sample.contains("أسلوب الاستفهام") || sample.contains("القاعدة التركيبية") ->
                 PedagogicalComponent.LANGUAGE to true
 
             sample.contains("تعبير وإنشاء") || sample.contains("التعبير والإنشاء") || sample.contains("أنشطة الاكتساب") ||
                     sample.contains("أنشطة التطبيق") || sample.contains("أنشطة الإنتاج") || sample.contains("أنشطة التصحيح") ||
-                    sample.contains("حصة الاكتساب") || sample.contains("كتابة حكاية") || sample.contains("كتابة يوميات") ->
+                    sample.contains("حصة الاكتساب") || sample.contains("كتابة حكاية") || sample.contains("كتابة يوميات") ||
+                    sample.contains("وصف رحلة") || sample.contains("وصف شاخص") || sample.contains("إصدار حكم") ||
+                    sample.contains("خطاب الحجاج") || sample.contains("السيرة الذاتية") ->
                 PedagogicalComponent.EXPRESSION to true
 
             sample.contains("نصوص قرائية") || sample.contains("النصوص القرائية") || sample.contains("نص قرائي") ||
@@ -752,12 +801,14 @@ object JadhadhaParser {
             return null
         }
 
-        // 2. Do NOT treat bulleted lines (-, +, •, *) or underlined content items (<u>...</u>) as stage headers
+        // 2. Do NOT treat bulleted lines (-, +, •, *), underlined content items (<u>...</u>), table rows ([جدول:...]), or pure field headers (e.g. التقويم والدعم:) as stage headers
         if (trimmed.startsWith("-") ||
             trimmed.startsWith("+") ||
             trimmed.startsWith("•") ||
             trimmed.startsWith("*") ||
-            trimmed.startsWith("<u>")
+            trimmed.startsWith("<u>") ||
+            trimmed.startsWith("[جدول:") ||
+            (detectField(trimmed) != null && extractAfterColon(trimmed).isBlank())
         ) {
             return null
         }
@@ -805,32 +856,45 @@ object JadhadhaParser {
     }
 
     private fun matchStageName(text: String, component: PedagogicalComponent): String? {
-        val t = text.replace(":", " ").replace("-", " ").trim()
+        val t = text.replace(":", " ").replace("-", " ").replace(Regex("\\s+"), " ").trim()
         return when (component) {
             PedagogicalComponent.READING -> when {
-                t.contains("تشخيص المكتسبات") || t.contains("تقويم تشخيصي") || t == "التمهيد" || t == "تمهيد" -> "diagnostic"
-                t.contains("ملاحظة النص") || t.contains("تأطير النص") || t == "الملاحظة والتأطير" || t == "ملاحظة وتأطير" -> "observation"
-                t.contains("فهم النص") || t == "الفهم" || t == "القراءة التوجيهية" -> "comprehension"
-                t.contains("القراءة التحليلية") || t.contains("تحليل النص") || t == "التحليل" -> "analysis"
-                t.contains("التركيب") || t.contains("الخلاصة التركيبية") || t == "تركيب" -> "synthesis"
-                t.contains("الاستثمار") || t.contains("الأنشطة الاستثمارية") || t == "استثمار" -> "investment"
+                t.contains("تشخيص المكتسبات") || t.contains("تقويم تشخيصي") || t.contains("مراقبة الإعداد") ||
+                        t == "التمهيد" || t == "تمهيد" || t.startsWith("تمهيد ") -> "diagnostic"
+                t.contains("ملاحظة النص") || t.contains("تأطير النص") || t.contains("القراءة الاستكشافية") ||
+                        t.contains("عتبات النص") || t == "الملاحظة والتأطير" || t == "ملاحظة وتأطير" || t == "الملاحظة" -> "observation"
+                t.contains("فهم النص") || t.contains("القراءة التوجيهية") || t.contains("فهم المضامين") || t == "الفهم" -> "comprehension"
+                t.contains("القراءة التحليلية") || t.contains("تحليل النص") || t.contains("الدراسة المعجمية") || t == "التحليل" -> "analysis"
+                t.contains("التركيب") || t.contains("الخلاصة التركيبية") || t.contains("القراءة التركيبية") || t == "تركيب" -> "synthesis"
+                t.contains("الاستثمار") || t.contains("الأنشطة الاستثمارية") || t.contains("الامتداد") || t == "استثمار" -> "investment"
                 else -> null
             }
 
             PedagogicalComponent.LANGUAGE -> when {
-                t.contains("تشخيص") || t.contains("تقويم تشخيصي") || t == "تمهيد" || t == "التمهيد" -> "lang_diagnostic"
-                t.contains("ملاحظة الظاهرة") || t.contains("عزل الظاهرة") || t == "الملاحظة" || t == "أمثلة الانطلاق" -> "lang_observation"
-                t.contains("الوصف والتحليل") || t.contains("تفكيك الظاهرة") || t == "الوصف" || t == "التحليل" -> "lang_analysis"
-                t.contains("الاستنتاج") || t.contains("استنتاج") || t.contains("القاعدة التركيبية") || t == "القاعدة" -> "lang_synthesis"
-                t.contains("التطبيقات") || t.contains("تطبيق") || t.contains("تقويم إجمالي") || t.contains("تمارين") -> "lang_application"
+                t.contains("الوصف والتحليل") || t.contains("البناء والتحليل") || t.contains("العرض والتحليل") ||
+                        t.contains("تحليل الأمثلة") || t.contains("تحليل الامثلة") || t.contains("تحليل الظاهرة") ||
+                        t.contains("مناقشة الأمثلة") || t.contains("تفكيك الظاهرة") ||
+                        t.contains("التحليل") || t == "الوصف" ||
+                        (t.contains("المقطع الوسطي") && !t.contains("ملاحظة") && !t.contains("استنتاج")) -> "lang_analysis"
+                t.contains("ملاحظة الظاهرة") || t.contains("ملاحظة الأمثلة") || t.contains("ملاحظة الامثلة") ||
+                        t.contains("قراءة الأمثلة") || t.contains("عزل الظاهرة") || t.contains("أمثلة الانطلاق") ||
+                        t.contains("امثلة الانطلاق") || t.contains("شواهد الانطلاق") || t == "الملاحظة" ||
+                        t.contains("ملاحظة") -> "lang_observation"
+                t.contains("تشخيص") || t.contains("تقويم تشخيصي") || t == "تمهيد" || t == "التمهيد" ||
+                        t.contains("المقطع التمهيدي") -> "lang_diagnostic"
+                t.contains("الاستنتاج") || t.contains("استنتاج") || t.contains("القاعدة التركيبية") ||
+                        t.contains("القاعدة") || t.contains("خلاصة") -> "lang_synthesis"
+                t.contains("التطبيقات") || t.contains("تطبيق") || t.contains("تقويم إجمالي") ||
+                        t.contains("تمارين") || t.contains("المقطع النهائي") || t.contains("المقطع الختامي") ||
+                        t.contains("استثمار") -> "lang_application"
                 else -> null
             }
 
             PedagogicalComponent.EXPRESSION -> when {
-                t.contains("اكتساب") || t.contains("الحصة الأولى") -> "insha_acquisition"
-                t.contains("تطبيق") || t.contains("الحصة الثانية") -> "insha_application"
-                t.contains("إنتاج") || t.contains("انتاج") || t.contains("الحصة الثالثة") -> "insha_production"
-                t.contains("تصحيح") || t.contains("الحصة الرابعة") -> "insha_correction"
+                t.contains("اكتساب") || t.contains("الحصة الأولى") || t.contains("التعريف بالمهارة") || t.contains("تقديم المهارة") -> "insha_acquisition"
+                t.contains("تطبيق") || t.contains("الحصة الثانية") || t.contains("التدرب على المهارة") -> "insha_application"
+                t.contains("إنتاج") || t.contains("انتاج") || t.contains("الحصة الثالثة") || t.contains("التحرير") -> "insha_production"
+                t.contains("تصحيح") || t.contains("الحصة الرابعة") || t.contains("التصحيح والدعم") || t.contains("معالجة وتصحيح") -> "insha_correction"
                 else -> null
             }
         }

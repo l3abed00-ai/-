@@ -261,12 +261,21 @@ class JadhadhaViewModel(
         _uiState.value = _uiState.value.copy(isParsing = true, errorMessage = null)
 
         viewModelScope.launch {
-            val parseResult = preParsedResult ?: withContext(Dispatchers.Default) {
+            val initialResult = preParsedResult ?: withContext(Dispatchers.Default) {
                 JadhadhaParser.parseWithReport(
                     raw = rawText,
                     fallbackTopic = topic.ifBlank { "درس جديد" },
                     forcedComponent = forcedComponent
                 )
+            }
+            val parseResult = if (initialResult.report.unclassifiedLines.isNotEmpty() && !initialResult.report.isAiDelegated) {
+                GeminiAiService.classifyAndRefineExtraction(
+                    rawText = rawText,
+                    initialResult = initialResult,
+                    customKey = _uiState.value.customApiKey
+                )
+            } else {
+                initialResult
             }
             val parsed = parseResult.plan
             repository.savePlan(parsed, isCustom = true)
@@ -276,7 +285,7 @@ class JadhadhaViewModel(
                 isParsing = false,
                 lastParseReport = parseResult.report,
                 selectedTab = AppTab.MODEL_EDITOR,
-                successMessage = "تم تفريغ المحتوى (${parseResult.report.totalFileFields} خانة من الملف، ${parseResult.report.totalDefaultFields} افتراضية) وحفظه بنجاح!"
+                successMessage = "تم تفريغ المحتوى (${parseResult.report.totalFileFields} خانة من الملف، ${parseResult.report.totalAiFields} ذكاء اصطناعي، ${parseResult.report.totalDefaultFields} افتراضية) وحفظه بنجاح!"
             )
         }
     }

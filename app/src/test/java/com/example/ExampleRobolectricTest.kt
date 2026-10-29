@@ -403,5 +403,86 @@ class ExampleRobolectricTest {
 
         db.close()
     }
+
+    @Test
+    fun `test Mokhtar docx with nested table in lang_analysis extracts cleanly and AI delegation refines all fields`() = kotlinx.coroutines.runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+
+        // 1. Verify cleanTopicFromFilename on "جذاذة--(اسما الزمان والمكان)3اع- المختار.docx"
+        val cleanedTitle = com.example.extractor.DocumentFileReader.cleanTopicFromFilename(
+            "جذاذة--(اسما الزمان والمكان)3اع- المختار.docx"
+        )
+        assertEquals("اسما الزمان والمكان", cleanedTitle)
+
+        // 2. Generate a language lesson docx containing a nested analytical table [جدول: ...] in lang_analysis
+        val synthesized = com.example.ai.GeminiAiService.synthesizeSmartPlan(
+            topic = "اسما الزمان والمكان",
+            lessonText = "",
+            component = com.example.model.PedagogicalComponent.LANGUAGE
+        )
+        val docxFile = DocxGenerator.generateDocx(context, synthesized, saveToDownloads = false)
+
+        // Verify the generated Word XML has Sakkal Majalla 10pt Bold and a nested <w:tbl> inside lang_analysis
+        val zip = ZipFile(docxFile)
+        val docXml = zip.getInputStream(zip.getEntry("word/document.xml")).bufferedReader().readText()
+        zip.close()
+        assertTrue(docXml.contains("Sakkal Majalla"))
+        assertTrue(docXml.contains("<w:sz w:val=\"20\"/>"))
+        assertTrue(docXml.contains("<w:b/><w:bCs/>"))
+
+        // 3. Extract text back from the docx with nested table and verify lang_analysis is NOT truncated
+        val extractedText = java.io.FileInputStream(docxFile).use { stream ->
+            com.example.extractor.DocumentFileReader.extractTextFromDocx(stream)
+        }
+        val parseResult = com.example.extractor.JadhadhaParser.parseWithReport(
+            raw = extractedText,
+            fallbackTopic = cleanedTitle,
+            forcedComponent = null
+        )
+        assertEquals(com.example.model.PedagogicalComponent.LANGUAGE, parseResult.plan.componentType)
+        assertEquals(0, parseResult.report.unclassifiedLines.size)
+        val langAnalysis = parseResult.plan.stages["lang_analysis"]!!
+        assertEquals(com.example.model.FieldSource.FILE, langAnalysis.sourceFor("content"))
+        assertTrue(langAnalysis.content.any { it.startsWith("[جدول:") })
+
+        // 4. Test AI delegation on a partial extraction with unclassified lines (like lines 141-142 in user screenshot)
+        val partialRaw = """
+            المكون: الدرس اللغوي
+            الموضوع: جذاذة--(اسما الزمان والمكان)3اع- المختار
+            + يتأملون الأمثلة، مع التركيز على الكلمات والحركات المكتوبة بلون مغاير.
+            + يصفون الظاهرة اللغوية، ويكتشفون متغيراتها.
+            [مرحلة: التقويم التشخيصي والتمهيد]
+            المحتوى الديداكتيكي:
+            - تذكير بالدرس السابق حول المشتقات.
+        """.trimIndent()
+
+        val initialPartial = com.example.extractor.JadhadhaParser.parseWithReport(
+            raw = partialRaw,
+            fallbackTopic = "جذاذة--(اسما الزمان والمكان)3اع- المختار",
+            forcedComponent = null
+        )
+        assertTrue(initialPartial.report.unclassifiedLines.isNotEmpty())
+        assertEquals(
+            com.example.model.FieldSource.DEFAULT,
+            initialPartial.plan.stages["lang_analysis"]?.sourceFor("content")
+        )
+
+        val delegatedResult = com.example.ai.GeminiAiService.classifyAndRefineExtraction(
+            rawText = partialRaw,
+            initialResult = initialPartial
+        )
+        assertTrue(delegatedResult.report.isAiDelegated)
+        assertEquals(0, delegatedResult.report.unclassifiedLines.size)
+        assertEquals("اسما الزمان والمكان", delegatedResult.plan.topic)
+        assertEquals(
+            com.example.model.FieldSource.FILE,
+            delegatedResult.plan.stages["lang_analysis"]?.sourceFor("teacher")
+        )
+        assertEquals(
+            com.example.model.FieldSource.AI,
+            delegatedResult.plan.stages["lang_analysis"]?.sourceFor("content")
+        )
+    }
 }
+
 

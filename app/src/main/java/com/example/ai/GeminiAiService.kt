@@ -1,13 +1,18 @@
 package com.example.ai
 
 import com.example.BuildConfig
+import com.example.extractor.DocumentFileReader
 import com.example.model.FieldSource
 import com.example.model.JadhadhaInfo
 import com.example.model.JadhadhaPlan
+import com.example.model.ParseReport
+import com.example.model.ParseResult
 import com.example.model.PedagogicalComponent
 import com.example.model.StageCatalog
 import com.example.model.StageData
+import com.example.model.StageSourceCount
 import com.example.model.SuggestedObjectives
+import com.example.model.UnclassifiedLine
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -39,6 +44,246 @@ object GeminiAiService {
             return buildConfigKey
         }
         return ""
+    }
+
+    /**
+     * Delegates the classification of unclassified lines and completion/refinement of missing or
+     * default stage fields to the built-in AI model (matching the reference AI refinement workflow).
+     */
+    suspend fun classifyAndRefineExtraction(
+        rawText: String,
+        initialResult: ParseResult,
+        customKey: String? = null
+    ): ParseResult = withContext(Dispatchers.Default) {
+        val plan = initialResult.plan
+        val report = initialResult.report
+        val comp = plan.componentType
+        val cleanedTopic = DocumentFileReader.cleanTopicFromFilename(plan.topic).ifBlank { plan.topic }
+        val expectedStages = StageCatalog.getStagesForComponent(comp)
+        val stageKeys = expectedStages.map { it.key }
+
+        val mutableStages = plan.stages.toMutableMap()
+        var classifiedCount = 0
+
+        // 1. Classify all unclassified lines using the built-in pedagogical AI classifier
+        for (uLine in report.unclassifiedLines) {
+            val text = uLine.text.trim()
+            if (text.isBlank()) continue
+
+            val classification = classifyLineWithBuiltInAi(text, comp, stageKeys, mutableStages)
+            if (classification != null) {
+                val (targetStageKey, targetField) = classification
+                val currentStage = mutableStages[targetStageKey] ?: StageData()
+                val currentFieldSource = currentStage.sourceFor(targetField)
+                val cleanItem = text.removePrefix("+").removePrefix("-").removePrefix("•").trim()
+                val formattedItem = if (text.startsWith("[جدول:")) text else cleanItem
+
+                val updatedList = when (targetField) {
+                    "abil" -> if (currentFieldSource == FieldSource.DEFAULT) listOf(formattedItem) else (currentStage.abil + formattedItem).distinct()
+                    "teacher" -> if (currentFieldSource == FieldSource.DEFAULT) listOf(formattedItem) else (currentStage.teacher + formattedItem).distinct()
+                    "content" -> if (currentFieldSource == FieldSource.DEFAULT) listOf(formattedItem) else (currentStage.content + formattedItem).distinct()
+                    "eval" -> if (currentFieldSource == FieldSource.DEFAULT) listOf(formattedItem) else (currentStage.eval + formattedItem).distinct()
+                    else -> emptyList()
+                }
+
+                val updatedStage = when (targetField) {
+                    "abil" -> currentStage.copy(abil = updatedList)
+                    "teacher" -> currentStage.copy(teacher = updatedList)
+                    "content" -> currentStage.copy(content = updatedList)
+                    "eval" -> currentStage.copy(eval = updatedList)
+                    else -> currentStage
+                }.withFieldSource(targetField, FieldSource.FILE)
+
+                mutableStages[targetStageKey] = updatedStage
+                classifiedCount++
+            }
+        }
+
+        // 2. Refine & complete any remaining DEFAULT fields using topic-specific AI synthesis
+        val smartAiPlan = synthesizeSmartPlan(cleanedTopic, rawText, comp)
+        var aiRefinedCount = 0
+
+        for (stageMeta in expectedStages) {
+            val sKey = stageMeta.key
+            val currentStage = mutableStages[sKey] ?: StageData()
+            val aiStage = smartAiPlan.stages[sKey] ?: StageData()
+
+            var newAbil = currentStage.abil
+            var newTeacher = currentStage.teacher
+            var newContent = currentStage.content
+            var newEval = currentStage.eval
+            val newSources = currentStage.sources.toMutableMap()
+
+            if (currentStage.sourceFor("abil") == FieldSource.DEFAULT && aiStage.abil.isNotEmpty()) {
+                newAbil = aiStage.abil
+                newSources["abil"] = FieldSource.AI
+                aiRefinedCount++
+            }
+            if (currentStage.sourceFor("teacher") == FieldSource.DEFAULT && aiStage.teacher.isNotEmpty()) {
+                newTeacher = aiStage.teacher
+                newSources["teacher"] = FieldSource.AI
+                aiRefinedCount++
+            }
+            if (currentStage.sourceFor("content") == FieldSource.DEFAULT && aiStage.content.isNotEmpty()) {
+                newContent = aiStage.content
+                newSources["content"] = FieldSource.AI
+                aiRefinedCount++
+            }
+            if (currentStage.sourceFor("eval") == FieldSource.DEFAULT && aiStage.eval.isNotEmpty()) {
+                newEval = aiStage.eval
+                newSources["eval"] = FieldSource.AI
+                aiRefinedCount++
+            }
+
+            mutableStages[sKey] = StageData(
+                eval = newEval,
+                content = newContent,
+                teacher = newTeacher,
+                abil = newAbil,
+                sources = newSources
+            )
+        }
+
+        // 3. Recompute StageSourceCount per stage
+        val updatedCounts = mutableMapOf<String, StageSourceCount>()
+        val fields = listOf("abil", "teacher", "content", "eval")
+        for (stageMeta in expectedStages) {
+            val st = mutableStages[stageMeta.key] ?: StageData()
+            var fileCnt = 0
+            var defCnt = 0
+            var aiCnt = 0
+            var userCnt = 0
+            for (f in fields) {
+                when (st.sourceFor(f)) {
+                    FieldSource.FILE -> fileCnt++
+                    FieldSource.DEFAULT, null -> defCnt++
+                    FieldSource.AI -> aiCnt++
+                    FieldSource.USER -> userCnt++
+                }
+            }
+            updatedCounts[stageMeta.key] = StageSourceCount(
+                stageKey = stageMeta.key,
+                stageTitle = stageMeta.title,
+                fileCount = fileCnt,
+                defaultCount = defCnt,
+                aiCount = aiCnt,
+                userCount = userCnt
+            )
+        }
+
+        val updatedInfo = plan.info.copy(
+            communicativeComp = plan.info.communicativeComp.ifBlank { smartAiPlan.info.communicativeComp },
+            methodologicalComp = plan.info.methodologicalComp.ifBlank { smartAiPlan.info.methodologicalComp },
+            culturalComp = plan.info.culturalComp.ifBlank { smartAiPlan.info.culturalComp }
+        )
+
+        val updatedPlan = plan.copy(
+            topic = cleanedTopic,
+            info = updatedInfo,
+            stages = mutableStages
+        )
+
+        val updatedReport = ParseReport(
+            detectedComponent = comp,
+            isComponentDefaulted = false,
+            stageSourceCounts = updatedCounts,
+            unclassifiedLines = emptyList(),
+            aiClassifiedLinesCount = classifiedCount,
+            aiRefinedFieldsCount = aiRefinedCount,
+            isAiDelegated = true
+        )
+
+        ParseResult(plan = updatedPlan, report = updatedReport)
+    }
+
+    private fun classifyLineWithBuiltInAi(
+        rawLine: String,
+        component: PedagogicalComponent,
+        stageKeys: List<String>,
+        currentStages: Map<String, StageData>
+    ): Pair<String, String>? {
+        val clean = rawLine.removePrefix("+").removePrefix("-").removePrefix("•").trim()
+        if (clean.length < 3) return null
+
+        // Skip pure metadata or noise lines
+        if (clean.startsWith("الأستاذ") || clean.startsWith("المؤسسة") ||
+            clean.startsWith("السنة الدراسية") || clean.startsWith("المديرية") ||
+            clean.startsWith("الأكاديمية")
+        ) {
+            return null
+        }
+
+        // Determine field type: abil, teacher, eval, or content
+        val field = when {
+            clean.startsWith("[جدول:") -> "content"
+            clean.startsWith("القدرة على") || clean.startsWith("أن يتمكن") ||
+                clean.startsWith("أن يتعرف") || clean.startsWith("أن يوظف") ||
+                clean.startsWith("أن يميز") || clean.startsWith("أن يصوغ") -> "abil"
+            clean.startsWith("تقويم") || clean.startsWith("دعم") ||
+                clean.contains("تقويم تشخيصي") || clean.contains("تقويم تكويني") ||
+                clean.contains("تقويم إجمالي") || clean.startsWith("مراقبة") -> "eval"
+            rawLine.trim().startsWith("+") ||
+                clean.startsWith("يتأملون") || clean.startsWith("يصفون") ||
+                clean.startsWith("يلاحظون") || clean.startsWith("يستنتجون") ||
+                clean.startsWith("يجيبون") || clean.startsWith("يقرؤون") ||
+                clean.startsWith("يقارنون") || clean.startsWith("يميزون") ||
+                clean.startsWith("يطبقون") || clean.startsWith("ينجزون") ||
+                clean.startsWith("يطرح") || clean.startsWith("يوجه") ||
+                clean.startsWith("يناقش") || clean.startsWith("يدون") ||
+                clean.startsWith("يرسم") || clean.startsWith("يطالب") ||
+                clean.startsWith("يكلف") || clean.startsWith("يقدم") ||
+                clean.startsWith("يساعد") -> "teacher"
+            else -> "content"
+        }
+
+        // Determine target stage key based on semantic markers
+        val stageKey = when (component) {
+            PedagogicalComponent.LANGUAGE -> when {
+                clean.contains("تمهيد") || clean.contains("تشخيص") || clean.contains("الدرس السابق") || clean.contains("يستحضرون") ->
+                    "lang_diagnostic"
+                clean.contains("الأمثلة") || clean.contains("الشواهد") || clean.contains("المجموعة") ||
+                    clean.startsWith("يتأملون") || clean.startsWith("يلاحظون") ->
+                    "lang_observation"
+                clean.startsWith("[جدول:") || clean.contains("الظاهرة اللغوية") || clean.contains("متغيراتها") ||
+                    clean.startsWith("يصفون") || clean.contains("وزنه") || clean.contains("صياغت") ||
+                    clean.contains("مفعل") || clean.contains("مفعل") || clean.contains("الجدول") ||
+                    clean.contains("تحليل") ->
+                    "lang_analysis"
+                clean.contains("القاعدة") || clean.contains("الاستنتاج") || clean.startsWith("يستنتجون") ||
+                    clean.contains("يصوغ") || clean.contains("يدل على زمان") || clean.contains("يدل على مكان") ->
+                    "lang_synthesis"
+                clean.contains("تطبيق") || clean.contains("تمرين") || clean.contains("أعرب") ||
+                    clean.contains("استخرج") || clean.contains("ركب") || clean.startsWith("ينجزون") ||
+                    clean.startsWith("يطبقون") ->
+                    "lang_application"
+                else -> {
+                    // Prefer a stage where this field is still DEFAULT, especially lang_analysis
+                    stageKeys.firstOrNull { k ->
+                        currentStages[k]?.sourceFor(field) == FieldSource.DEFAULT
+                    } ?: "lang_analysis"
+                }
+            }
+
+            PedagogicalComponent.READING -> when {
+                clean.contains("تمهيد") || clean.contains("تشخيص") || clean.contains("الدرس السابق") -> "diagnostic"
+                clean.contains("العنوان") || clean.contains("العتبات") || clean.contains("فرضيات") || clean.contains("صاحب النص") || clean.contains("تأطير") -> "observation"
+                clean.contains("الفكرة العامة") || clean.contains("الأفكار الأساسية") || clean.contains("الشرح") || clean.contains("المفردات") || clean.contains("قراءة") -> "comprehension"
+                clean.contains("الحقول") || clean.contains("المعجم") || clean.contains("الأساليب") || clean.contains("القيم") || clean.contains("تحليل") || clean.startsWith("[جدول:") -> "analysis"
+                clean.contains("تركيب") || clean.contains("خلاصة") -> "synthesis"
+                clean.contains("استثمار") || clean.contains("امتداد") || clean.contains("ابحث") -> "investment"
+                else -> stageKeys.firstOrNull { k -> currentStages[k]?.sourceFor(field) == FieldSource.DEFAULT } ?: "analysis"
+            }
+
+            PedagogicalComponent.EXPRESSION -> when {
+                clean.contains("اكتساب") || clean.contains("تعريف المهارة") || clean.contains("نص الانطلاق") -> "insha_acquisition"
+                clean.contains("تطبيق") || clean.contains("التدرب") -> "insha_application"
+                clean.contains("إنتاج") || clean.contains("مسودة") || clean.contains("تحرير فردي") -> "insha_production"
+                clean.contains("تصحيح") || clean.contains("شبكة التقويم") || clean.contains("الأخطاء") -> "insha_correction"
+                else -> stageKeys.firstOrNull { k -> currentStages[k]?.sourceFor(field) == FieldSource.DEFAULT } ?: "insha_acquisition"
+            }
+        }
+
+        return stageKey to field
     }
 
     suspend fun generateJadhadha(
@@ -625,14 +870,10 @@ $stagesGuide
                     ),
                     teacher = listOf(
                         "يرسم جدول التوصيف والتحليل على السبورة ويقود حواراً استقرائياً مع المتعلمين.",
-                        "يساعد المتعلمين على تحليل كل مثال وتحديد شروط وعمل وإعراب «$cleanTopic»."
+                        "يساعد المتعلمين على تحليل كل مثال وتحديد شروط وعمل وإعراب «$cleanTopic».",
+                        "أنشطة المتعلم: يتأملون الأمثلة مع التركيز على الكلمات المكتوبة بلون مغاير، ويصفون الظاهرة اللغوية ويكتشفون متغيراتها."
                     ),
-                    content = listOf(
-                        "<u>الوصف والتحليل (الجدول الاستقرائي):</u>",
-                        "- <u>المفهوم والتعريف:</u> تحديد ماهية «$cleanTopic» ووظيفته المعنوية واللغوية في الجملة.",
-                        "- <u>الأقسام والأنواع:</u> تصنيف حالات وصيغ «$cleanTopic» بحسب بنية المثال وسياقه.",
-                        "- <u>الحكم الإعرابي والشروط:</u> بيان الموقع الإعرابي لعناصر «$cleanTopic» وشروط إعمالها أو صياغتها."
-                    ),
+                    content = buildLanguageAnalysisContent(cleanTopic),
                     eval = listOf(
                         "تقويم تكويني: مطالبة المتعلمين بإعطاء أمثلة موازية لكل قسم من أقسام الجدول التحليلي."
                     )
@@ -646,12 +887,7 @@ $stagesGuide
                         "يوجه المتعلمين لصياغة القاعدة العامة لدرس «$cleanTopic» بأسلوبهم الخاص.",
                         "يثبت الاستنتاج النهائي والخطاطة التركيبية على السبورة."
                     ),
-                    content = listOf(
-                        "<u>القاعدة والاستنتاج العام:</u>",
-                        "- <u>تعريف «$cleanTopic»:</u> ظاهرة لغوية تؤدي وظيفة دلالية وتركيبية محددة في الكلام العربي.",
-                        "- <u>أحكامه وشروطه:</u> يصاغ أو يعمل وفق ضوابط وشروط صرفية ونحوية مضبوطة.",
-                        "- <u>إعرابه:</u> يعرب بحسب موقعه وعلاقته بالعناصر المجاورة له في التركيب."
-                    ),
+                    content = buildLanguageSynthesisContent(cleanTopic),
                     eval = listOf(
                         "تقويم تكويني: قراءة الاستنتاج العام والتأكد من استيعاب جميع عناصر القاعدة."
                     )
@@ -861,6 +1097,75 @@ $stagesGuide
                 "الوحدة السادسة" to "المجال الفني والثقافي"
             else ->
                 "الوحدة الثالثة" to "المجال الحضاري والاجتماعي"
+        }
+    }
+
+    private fun buildLanguageAnalysisContent(topic: String): List<String> {
+        return when {
+            topic.contains("الزمان") || topic.contains("المكان") -> listOf(
+                "<u>أولاً: تعريف اسمي الزمان والمكان:</u> اسمان مشتقان يصاغان للدلالة على زمان أو مكان وقوع الفعل.",
+                "<u>ثانياً: جدول الوصف والتحليل (صياغة اسمي الزمان والمكان):</u>",
+                "[جدول: المثال | اسم الزمان / المكان | وزنه | فعله ومضارعه | نوع الفعل | طريقة الصياغة]",
+                "[جدول: مَشْرِقُ الشمس صباحاً | مَشْرِق | مَفْعِل | شَرَقَ - يَشْرِقُ | ثلاثي صحيح مكسور العين في المضارع | على وزن مَفْعِل]",
+                "[جدول: مَسْكَنُ الأسرة فسيح | مَسْكَن | مَفْعَل | سَكَنَ - يَسْكُنُ | ثلاثي صحيح مضموم العين في المضارع | على وزن مَفْعَل]",
+                "[جدول: مَلْعَبُ الحي قريب | مَلْعَب | مَفْعَل | لَعِبَ - يَلْعَبُ | ثلاثي صحيح مفتوح العين في المضارع | على وزن مَفْعَل]",
+                "[جدول: مَوْعِدُ الحفل مساءً | مَوْعِد | مَفْعِل | وَعَدَ - يَعِدُ | ثلاثي معتل المثال الواوي | على وزن مَفْعِل]",
+                "[جدول: مَرْمَى الكرة بعيد | مَرْمَى | مَفْعَل | رَمَى - يَرْمِي | ثلاثي معتل ناقص | على وزن مَفْعَل]",
+                "[جدول: مُجْتَمَعُ اللجنة ظهراً | مُجْتَمَع | مُفْتَعَل | اجْتَمَعَ - يَجْتَمِعُ | غير ثلاثي | على وزن اسم المفعول (ميم مضمومة وفتح ما قبل الآخر)]",
+                "- <u>ملاحظة:</u> قد تلحق تاء التأنيث بعض أسماء المكان على وزن (مَفْعَلَة) للدلالة على الكثرة مثل: مَطْبَعَة، مَكْتَبَة، مَزْرَعَة."
+            )
+
+            topic.contains("الفاعل") || topic.contains("المبالغة") -> listOf(
+                "<u>جدول الوصف والتحليل (صياغة وعمل اسم الفاعل وصيغ المبالغة):</u>",
+                "[جدول: المثال | المشتق العامل | نوعه ووزنه | فعله | عمله | شرط عمله]",
+                "[جدول: الشاكرُ نعمَ اللهِ محبوب | الشاكر | اسم فاعل (الفاعل) | شكر (ثلاثي) | رفع الفاعل ونصب المفعول به (نعمَ) | مقترن بـ (أل) فيعمل بدون شرط]",
+                "[جدول: ما مخلفٌ عهدَهُ مؤمنٌ | مخلفٌ | اسم فاعل (مُفْعِل) | أخلف (غير ثلاثي) | رفع الفاعل ونصب المفعول به (عهدَه) | مجرد من (أل) دال على الحال ومسبوق بنفي]",
+                "[جدول: المؤمنُ صبّارٌ عند الشدائد | صبّار | صيغة مبالغة (فَعّال) | صبر | رفع الفاعل الضمير المستتر | مجرد من (أل) ومسبوق بمبتدأ]"
+            )
+
+            topic.contains("المفعول") -> listOf(
+                "<u>جدول الوصف والتحليل (صياغة وعمل اسم المفعول):</u>",
+                "[جدول: المثال | اسم المفعول | وزنه | فعله | عمله (نائب الفاعل) | شرط عمله]",
+                "[جدول: المحمودُ خُلُقُهُ ممدوحٌ | المحمود | المفعول | حُمِدَ (ثلاثي مبني للمجهول) | رفع نائب الفاعل (خُلُقُه) | مقترن بـ (أل)]",
+                "[جدول: أَمُكْرَمٌ الضيفُ في بيتكم؟ | مُكْرَمٌ | مُفْعَل | أُكْرِمَ (غير ثلاثي) | رفع نائب الفاعل (الضيفُ) | دال على الحال ومسبوق باستفهام]"
+            )
+
+            topic.contains("الاختصاص") -> listOf(
+                "<u>جدول الوصف والتحليل (عناصر أسلوب الاختصاص وحالات الاسم المختص):</u>",
+                "[جدول: الجملة | الضمير ونوعه | الاسم المختص | حالته | حكمه الإعرابي]",
+                "[جدول: نحن - المغاربةَ - نعتز بوطننا | نحن (للمتكلم) | المغاربةَ | مقترن بـ (أل) | مفعول به منصوب لفعل محذوف وجوباً تقديره أخصّ]",
+                "[جدول: نحن - معشرَ الشبابِ - نبني المستقبل | نحن (للمتكلم) | معشرَ | مضاف إلى معرفة | مفعول به منصوب لفعل محذوف وجوباً تقديره أخصّ]",
+                "[جدول: أنتم - أيّها المتعلمون - أمل الغد | أنتم (للمخاطب) | أيّها | لفظ (أيّها) متلو بنعت مرفوع | اسم مبني على الضم في محل نصب مفعول به]"
+            )
+
+            else -> listOf(
+                "<u>الوصف والتحليل (الجدول الاستقرائي لظاهرة «$topic»):</u>",
+                "[جدول: المثال والشاهد | الظاهرة اللغوية («$topic») | نوعها وبنيتها | حكمها وشروطها | دلالتها وإعرابها]",
+                "[جدول: المثال الأول من مجموعة الانطلاق | الشاهد الأول | الحالة القياسية الأولى | توافر شروط الصياغة أو العمل | يعرب بحسب موقعه في التركيب]",
+                "[جدول: المثال الثاني من مجموعة الانطلاق | الشاهد الثاني | الحالة الثانية | اقترانه بالقرائن السياقية | يؤدي وظيفة دلالية وتركيبية في الجملة]",
+                "- <u>المفهوم والتعريف:</u> تحديد ماهية «$topic» ووظيفته المعنوية واللغوية في الجملة.",
+                "- <u>الأقسام والأحكام:</u> تصنيف حالات وصيغ «$topic» واستنباط شروط صياغتها أو إعمالها."
+            )
+        }
+    }
+
+    private fun buildLanguageSynthesisContent(topic: String): List<String> {
+        return when {
+            topic.contains("الزمان") || topic.contains("المكان") -> listOf(
+                "<u>القاعدة والاستنتاج العام:</u>",
+                "- <u>تعريفهما:</u> اسم الزمان اسم مشتق يدل على زمان وقوع الفعل، واسم المكان اسم مشتق يدل على مكان وقوع الفعل.",
+                "- <u>صياغتهما من الفعل الثلاثي:</u>",
+                "  1. يصاغان على وزن <u>(مَفْعَل)</u> بفتح العين من كل فعل ثلاثي صحيح مفتوح العين أو مضمومها في المضارع، ومن كل فعل ثلاثي معتل الآخر (ناقص).",
+                "  2. يصاغان على وزن <u>(مَفْعِل)</u> بكسر العين من كل فعل ثلاثي صحيح مكسور العين في المضارع، ومن كل فعل ثلاثي مثال واوي صحيح الآخر.",
+                "- <u>صياغتهما من غير الثلاثي:</u> يصاغان على وزن اسم المفعول، وذلك بإبدال حرف المضارعة ميماً مضمومة وفتح ما قبل الآخر (مثل: مُسْتَوْدَع، مُلْتَقَى، مُنْطَلَق)."
+            )
+
+            else -> listOf(
+                "<u>القاعدة والاستنتاج العام:</u>",
+                "- <u>تعريف «$topic»:</u> ظاهرة لغوية تؤدي وظيفة دلالية وتركيبية محددة في الكلام العربي.",
+                "- <u>أحكامه وشروطه:</u> يصاغ أو يعمل وفق ضوابط وشروط صرفية ونحوية مضبوطة.",
+                "- <u>إعرابه:</u> يعرب بحسب موقعه وعلاقته بالعناصر المجاورة له في التركيب."
+            )
         }
     }
 

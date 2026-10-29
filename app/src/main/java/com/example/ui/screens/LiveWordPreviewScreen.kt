@@ -65,6 +65,7 @@ import com.example.ui.theme.PaperHeaderBackground
 import com.example.ui.theme.PaperTableRowAlt
 
 enum class PreviewDocFont(val label: String, val fontFamily: FontFamily) {
+    SAKKAL_MAJALLA("خط صقال مجلة النموذجي (10pt عريض)", AmiriFontFamily),
     AMIRI("خط النسخ الأميري", AmiriFontFamily),
     CAIRO("خط القاهرة الحديث", CairoFontFamily),
     TAJAWAL("خط تجوال المتزن", TajawalFontFamily),
@@ -79,7 +80,7 @@ fun LiveWordPreviewScreen(
 ) {
     val context = LocalContext.current
     var isFullWidthMode by remember { mutableStateOf(false) }
-    var selectedDocFont by remember { mutableStateOf(PreviewDocFont.AMIRI) }
+    var selectedDocFont by remember { mutableStateOf(PreviewDocFont.SAKKAL_MAJALLA) }
     var exportedFile by remember { mutableStateOf<java.io.File?>(null) }
 
     val saveAsLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
@@ -703,26 +704,6 @@ private fun HeaderCell(text: String, width: androidx.compose.ui.unit.Dp, fontFam
 }
 
 @Composable
-private fun PreviewDefaultBadge() {
-    Surface(
-        color = Color(0xFFFEF3C7),
-        shape = RoundedCornerShape(4.dp),
-        modifier = Modifier
-            .padding(bottom = 3.dp)
-            .border(0.5.dp, Color(0xFFD97706), RoundedCornerShape(4.dp))
-    ) {
-        Text(
-            text = "افتراضي",
-            style = MaterialTheme.typography.labelSmall,
-            color = Color(0xFF92400E),
-            fontWeight = FontWeight.Bold,
-            fontSize = 9.sp,
-            modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp)
-        )
-    }
-}
-
-@Composable
 private fun BodyCell(
     width: androidx.compose.ui.unit.Dp,
     title: String? = null,
@@ -738,9 +719,6 @@ private fun BodyCell(
             .width(width)
             .padding(6.dp)
     ) {
-        if (isDefaultSource) {
-            PreviewDefaultBadge()
-        }
         if (title != null) {
             Text(
                 text = title,
@@ -756,31 +734,93 @@ private fun BodyCell(
                 text = subtitle,
                 style = MaterialTheme.typography.labelSmall,
                 fontFamily = fontFamily,
-                color = Color(0xFF64748B),
+                fontWeight = FontWeight.Bold,
+                color = Color(0xFF475569),
                 fontSize = 10.sp
             )
         }
-        items.forEach { item ->
-            if (item.isNotBlank()) {
+
+        val pendingTableRows = mutableListOf<List<String>>()
+        val nonBlankItems = items.filter { it.isNotBlank() }
+
+        nonBlankItems.forEachIndexed { idx, rawItem ->
+            val trimmed = rawItem.trim()
+            if (trimmed.startsWith("[جدول:") && trimmed.endsWith("]")) {
+                val cols = trimmed.removePrefix("[جدول:").removeSuffix("]")
+                    .split("|")
+                    .map { it.trim() }
+                    .filter { it.isNotEmpty() }
+                if (cols.isNotEmpty()) {
+                    pendingTableRows.add(cols)
+                }
+                val nextIsTable = nonBlankItems.getOrNull(idx + 1)?.trim()?.startsWith("[جدول:") == true
+                if (!nextIsTable && pendingTableRows.isNotEmpty()) {
+                    NestedPreviewTable(rows = pendingTableRows.toList(), fontFamily = fontFamily)
+                    pendingTableRows.clear()
+                }
+            } else {
+                val cleanText = trimmed.replace("<u>", "").replace("</u>", "")
                 Text(
-                    text = "• $item",
+                    text = "• $cleanText",
                     style = MaterialTheme.typography.bodySmall,
                     fontFamily = fontFamily,
-                    color = if (isEval) Color(0xFF9A3412) else Color(0xFF1E293B),
+                    fontWeight = FontWeight.Bold,
+                    color = if (isEval) Color(0xFF9A3412) else Color(0xFF0F172A),
                     fontSize = 10.sp,
                     lineHeight = 14.sp,
                     modifier = Modifier.padding(bottom = 2.dp)
                 )
             }
         }
-        if (title == null && items.isEmpty()) {
+
+        if (title == null && nonBlankItems.isEmpty()) {
             Text(
                 text = "-",
                 style = MaterialTheme.typography.bodySmall,
                 fontFamily = fontFamily,
+                fontWeight = FontWeight.Bold,
                 color = Color(0xFF94A3B8),
                 fontSize = 11.sp
             )
+        }
+    }
+}
+
+@Composable
+private fun NestedPreviewTable(rows: List<List<String>>, fontFamily: FontFamily) {
+    val colCount = rows.maxOfOrNull { it.size }?.coerceAtLeast(1) ?: 1
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp)
+            .border(1.dp, Color(0xFF1E3A8A), RoundedCornerShape(2.dp))
+    ) {
+        rows.forEachIndexed { rIdx, row ->
+            val isHeader = rIdx == 0
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(if (isHeader) Color(0xFFD9E2F3) else Color.White)
+                    .border(0.5.dp, Color(0xFF94A3B8)),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                for (cIdx in 0 until colCount) {
+                    val cellText = row.getOrNull(cIdx).orEmpty()
+                    Text(
+                        text = cellText,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontFamily = fontFamily,
+                        fontWeight = FontWeight.Bold,
+                        color = if (isHeader) Color(0xFF1E3A8A) else Color(0xFF0F172A),
+                        textAlign = TextAlign.Center,
+                        fontSize = 8.5.sp,
+                        lineHeight = 11.sp,
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(3.dp)
+                    )
+                }
+            }
         }
     }
 }
@@ -798,14 +838,11 @@ private fun BodyActivitiesCell(
             .width(width)
             .padding(6.dp)
     ) {
-        if (isDefaultSource) {
-            PreviewDefaultBadge()
-        }
         Text(
             text = "أنشطة المدرس والمتعلم:",
             style = MaterialTheme.typography.labelSmall,
             fontFamily = fontFamily,
-            fontWeight = FontWeight.SemiBold,
+            fontWeight = FontWeight.Bold,
             color = Color(0xFF1E3A8A),
             fontSize = 10.sp,
             modifier = Modifier.padding(bottom = 2.dp)
@@ -817,7 +854,8 @@ private fun BodyActivitiesCell(
                     text = "• $act",
                     style = MaterialTheme.typography.bodySmall,
                     fontFamily = fontFamily,
-                    color = Color(0xFF334155),
+                    fontWeight = FontWeight.Bold,
+                    color = Color(0xFF1E293B),
                     fontSize = 10.sp,
                     lineHeight = 13.5.sp,
                     modifier = Modifier.padding(bottom = 2.dp)

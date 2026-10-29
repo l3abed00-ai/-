@@ -291,7 +291,9 @@ data class StageSourceCount(
     val stageKey: String,
     val stageTitle: String,
     val fileCount: Int,
-    val defaultCount: Int
+    val defaultCount: Int,
+    val aiCount: Int = 0,
+    val userCount: Int = 0
 )
 
 data class ParseReport(
@@ -299,18 +301,25 @@ data class ParseReport(
     val isComponentDefaulted: Boolean,
     val usedKeywordsForComponent: Boolean = !isComponentDefaulted,
     val stageSourceCounts: Map<String, StageSourceCount> = emptyMap(),
-    val unclassifiedLines: List<UnclassifiedLine> = emptyList()
+    val unclassifiedLines: List<UnclassifiedLine> = emptyList(),
+    val aiClassifiedLinesCount: Int = 0,
+    val aiRefinedFieldsCount: Int = 0,
+    val isAiDelegated: Boolean = false
 ) {
     val totalFileFields: Int
         get() = stageSourceCounts.values.sumOf { it.fileCount }
 
     val totalDefaultFields: Int
         get() = stageSourceCounts.values.sumOf { it.defaultCount }
+
+    val totalAiFields: Int
+        get() = stageSourceCounts.values.sumOf { it.aiCount }
 }
 
 data class ParseResult(
     val plan: JadhadhaPlan,
     val report: ParseReport
 )
+
 
 
