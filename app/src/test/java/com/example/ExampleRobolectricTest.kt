@@ -483,6 +483,80 @@ class ExampleRobolectricTest {
             delegatedResult.plan.stages["lang_analysis"]?.sourceFor("content")
         )
     }
+
+    @Test
+    fun `test content-based file detection docx without extension and doc rejection and binary rejection`() = kotlinx.coroutines.runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+
+        // 1 & 2. Generate a valid .docx, copy it to a file WITHOUT any extension, and read via readUploadedFile
+        val generatedDocx = DocxGenerator.generateDocx(context, SamplePlans.ISM_FAIL_PLAN, saveToDownloads = false)
+        val extensionlessFile = java.io.File(context.cacheDir, "ملف_جذاذة_بدون_امتداد")
+        generatedDocx.copyTo(extensionlessFile, overwrite = true)
+
+        val info = com.example.extractor.DocumentFileReader.readUploadedFile(context, android.net.Uri.fromFile(extensionlessFile))
+        assertEquals(com.example.extractor.DetectedFileType.DOCX, info.detectedType)
+        assertTrue("Extensionless .docx should extract Arabic text", info.textContent.contains("اسم الفاعل"))
+
+        // 3. Legacy .doc file (magic bytes D0 CF 11 E0) -> throws exact Arabic message
+        val docFile = java.io.File(context.cacheDir, "legacy_file.doc")
+        docFile.writeBytes(byteArrayOf(0xD0.toByte(), 0xCF.toByte(), 0x11.toByte(), 0xE0.toByte(), 0xA1.toByte(), 0xB1.toByte(), 0x1A.toByte(), 0xE1.toByte()))
+        val docError = runCatching {
+            com.example.extractor.DocumentFileReader.readUploadedFile(context, android.net.Uri.fromFile(docFile))
+        }.exceptionOrNull()
+        assertNotNull("Legacy .doc must be rejected", docError)
+        assertTrue(docError is com.example.extractor.DocumentReadException)
+        assertEquals(
+            "صيغة .doc القديمة غير مدعومة؛ افتحه في Word أو WPS واحفظه بصيغة .docx",
+            (docError as com.example.extractor.DocumentReadException).arabicMessage
+        )
+
+        // 4. Binary file disguised as .txt -> rejected instead of garbled text
+        val binaryFile = java.io.File(context.cacheDir, "fake_text.txt")
+        binaryFile.writeBytes(byteArrayOf(0x89.toByte(), 0x50.toByte(), 0x4E.toByte(), 0x47.toByte(), 0x00.toByte(), 0x01.toByte(), 0x02.toByte(), 0x03.toByte()))
+        val binError = runCatching {
+            com.example.extractor.DocumentFileReader.readUploadedFile(context, android.net.Uri.fromFile(binaryFile))
+        }.exceptionOrNull()
+        assertNotNull("Binary file must be rejected", binError)
+        assertTrue(binError is com.example.extractor.DocumentReadException)
+
+        // 5. File > 25 MB -> rejected with clear Arabic message
+        val oversizedError = runCatching {
+            com.example.extractor.DocumentFileReader.inspectAndReadStream(
+                inputStream = java.io.ByteArrayInputStream("نص عربي".toByteArray()),
+                fileName = "huge.docx",
+                declaredSize = 26L * 1024 * 1024
+            )
+        }.exceptionOrNull()
+        assertNotNull("File > 25 MB must be rejected", oversizedError)
+        assertEquals(
+            com.example.extractor.DocumentFileReader.MSG_FILE_TOO_LARGE,
+            (oversizedError as com.example.extractor.DocumentReadException).arabicMessage
+        )
+    }
+
+    @Test
+    fun `test pdf detection and transcribeDocument without key and ViewModel extraction state`() = kotlinx.coroutines.runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+
+        // PDF magic bytes %PDF-1.5
+        val pdfBytes = "%PDF-1.5\n1 0 obj\n<< /Type /Catalog >>\nendobj\n%%EOF".toByteArray()
+        val pdfFile = java.io.File(context.cacheDir, "lesson_plan.pdf")
+        pdfFile.writeBytes(pdfBytes)
+
+        val pdfInfo = com.example.extractor.DocumentFileReader.readUploadedFile(context, android.net.Uri.fromFile(pdfFile))
+        assertEquals(com.example.extractor.DetectedFileType.PDF, pdfInfo.detectedType)
+        assertNotNull(pdfInfo.pdfBytes)
+
+        // Calling transcribeDocument without a valid key returns the exact Arabic message
+        val resultNoKey = com.example.ai.GeminiAiService.transcribeDocument(
+            bytes = pdfBytes,
+            mimeType = "application/pdf",
+            customKey = ""
+        )
+        assertTrue(resultNoKey.isFailure)
+        assertEquals(
+            "تفريغ PDF يحتاج مفتاح Gemini؛ أدخله أو حوّل الملف إلى docx",
+            resultNoKey.exceptionOrNull()?.message
+        )
+    }
 }
-
-

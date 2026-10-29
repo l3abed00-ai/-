@@ -3,19 +3,52 @@ package com.example.extractor
 import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.withContext
+import java.io.BufferedInputStream
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
+import java.io.File
 import java.io.InputStream
 import java.nio.charset.Charset
 import java.nio.charset.StandardCharsets
 import java.util.zip.ZipEntry
+import java.util.zip.ZipException
 import java.util.zip.ZipInputStream
+import kotlin.coroutines.coroutineContext
+
+enum class DetectedFileType {
+    DOCX,
+    PDF,
+    PLAIN_TEXT
+}
+
+class DocumentReadException(
+    val arabicMessage: String,
+    cause: Throwable? = null
+) : Exception(arabicMessage, cause)
 
 data class UploadedFileInfo(
     val name: String,
     val sizeBytes: Long,
-    val textContent: String
+    val textContent: String,
+    val detectedType: DetectedFileType = DetectedFileType.PLAIN_TEXT,
+    val pdfBytes: ByteArray? = null
 )
 
 object DocumentFileReader {
+
+    const val MAX_FILE_SIZE_BYTES: Long = 25L * 1024 * 1024 // 25 MB
+    const val MAX_DOCX_UNCOMPRESSED_BYTES: Long = 20L * 1024 * 1024 // 20 MB
+    const val MAX_PDF_SIZE_BYTES: Long = 10L * 1024 * 1024 // 10 MB
+
+    const val MSG_DOC_UNSUPPORTED = "صيغة .doc القديمة غير مدعومة؛ افتحه في Word أو WPS واحفظه بصيغة .docx"
+    const val MSG_FILE_TOO_LARGE = "حجم الملف كبير جدًا (يتجاوز الحد الأقصى 25 ميغابايت)؛ يرجى اختيار ملف أصغر حجماً."
+    const val MSG_DOCX_UNCOMPRESSED_TOO_LARGE = "حجم محتوى ملف Word بعد فك الضغط كبير جدًا (يتجاوز 20 ميغابايت)."
+    const val MSG_FILE_EMPTY = "الملف المرفوع فارغ ولا يحتوي على نص قابل للتفريغ."
+    const val MSG_FILE_CORRUPTED_OR_PROTECTED = "الملف تالف أو محمي بكلمة سر؛ تعذر استخراج محتوى الجذاذة."
+    const val MSG_FORMAT_UNSUPPORTED = "صيغة الملف غير مدعومة؛ يرجى اختيار ملف وورد (.docx) أو PDF أو ملف نصي عربي."
 
     private enum class TableColType {
         STAGE, SEGMENT, ABIL, TEACHER, LEARNER, ACTIVITIES, CONTENT, EVAL, TIME, UNKNOWN
@@ -30,7 +63,7 @@ object DocumentFileReader {
     )
 
     fun cleanTopicFromFilename(fileName: String): String {
-        val stem = fileName.substringBeforeLast(".")
+        val stem = if (fileName.contains(".")) fileName.substringBeforeLast(".") else fileName
         val stopWords = setOf(
             "جذاذة", "جذاذه", "درس", "تربوية", "تربويه", "رقم", "مهارة", "مهاره",
             "المختار", "الاحترافية", "الاحترافيه", "اللغة", "اللغه", "العربية", "العربيه",
@@ -47,52 +80,398 @@ object DocumentFileReader {
         return s.ifBlank { stem.trim() }
     }
 
-    fun readUploadedFile(context: Context, uri: Uri): UploadedFileInfo {
+    suspend fun readUploadedFile(context: Context, uri: Uri): UploadedFileInfo = withContext(Dispatchers.IO) {
+        coroutineContext.ensureActive()
         val contentResolver = context.contentResolver
         var fileName = "ملف_جذاذة"
         var fileSize = 0L
 
-        // Query file metadata
-        contentResolver.query(uri, null, null, null, null)?.use { cursor ->
-            val nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-            val sizeIndex = cursor.getColumnIndex(OpenableColumns.SIZE)
-            if (cursor.moveToFirst()) {
-                if (nameIndex != -1) fileName = cursor.getString(nameIndex) ?: fileName
-                if (sizeIndex != -1) fileSize = cursor.getLong(sizeIndex)
+        if (uri.scheme == "file") {
+            val path = uri.path
+            if (!path.isNullOrBlank()) {
+                val f = File(path)
+                fileName = f.name.ifBlank { fileName }
+                fileSize = f.length()
+            }
+        } else {
+            runCatching {
+                contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+                    val nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                    val sizeIndex = cursor.getColumnIndex(OpenableColumns.SIZE)
+                    if (cursor.moveToFirst()) {
+                        if (nameIndex != -1) {
+                            val n = cursor.getString(nameIndex)
+                            if (!n.isNullOrBlank()) fileName = n
+                        }
+                        if (sizeIndex != -1 && !cursor.isNull(sizeIndex)) {
+                            fileSize = cursor.getLong(sizeIndex)
+                        }
+                    }
+                }
+            }
+            if (fileName == "ملف_جذاذة") {
+                uri.lastPathSegment?.substringAfterLast('/')?.takeIf { it.isNotBlank() }?.let {
+                    fileName = it
+                }
             }
         }
 
-        val textContent = contentResolver.openInputStream(uri)?.use { stream ->
-            if (fileName.lowercase().endsWith(".docx")) {
-                extractTextFromDocx(stream)
+        if (fileSize > MAX_FILE_SIZE_BYTES) {
+            throw DocumentReadException(MSG_FILE_TOO_LARGE)
+        }
+
+        val rawStream = try {
+            if (uri.scheme == "file") {
+                File(uri.path ?: throw DocumentReadException(MSG_FILE_CORRUPTED_OR_PROTECTED)).inputStream()
             } else {
-                readPlainText(stream)
+                contentResolver.openInputStream(uri)
             }
-        }.orEmpty()
+        } catch (e: DocumentReadException) {
+            throw e
+        } catch (e: Exception) {
+            throw DocumentReadException(MSG_FILE_CORRUPTED_OR_PROTECTED, e)
+        } ?: throw DocumentReadException(MSG_FILE_CORRUPTED_OR_PROTECTED)
+
+        rawStream.use { stream ->
+            inspectAndReadStream(
+                inputStream = stream,
+                fileName = fileName,
+                declaredSize = fileSize,
+                onCheckActive = { coroutineContext.ensureActive() }
+            )
+        }
+    }
+
+    /**
+     * Inspects magic bytes from [inputStream] rather than relying on the file extension,
+     * enforces size limits (25 MB raw, 20 MB uncompressed DOCX), and returns [UploadedFileInfo]
+     * or throws [DocumentReadException] with a clear Arabic message.
+     */
+    fun inspectAndReadStream(
+        inputStream: InputStream,
+        fileName: String = "ملف_جذاذة",
+        declaredSize: Long = 0L,
+        onCheckActive: () -> Unit = {}
+    ): UploadedFileInfo {
+        if (declaredSize > MAX_FILE_SIZE_BYTES) {
+            throw DocumentReadException(MSG_FILE_TOO_LARGE)
+        }
+
+        val buffered = if (inputStream is BufferedInputStream) inputStream else BufferedInputStream(inputStream, 64 * 1024)
+        buffered.mark(16)
+        val header = ByteArray(8)
+        var headerRead = 0
+        while (headerRead < header.size) {
+            val r = buffered.read(header, headerRead, header.size - headerRead)
+            if (r == -1) break
+            headerRead += r
+        }
+        if (headerRead == 0) {
+            throw DocumentReadException(MSG_FILE_EMPTY)
+        }
+        buffered.reset()
+
+        val b0 = header[0].toInt() and 0xFF
+        val b1 = if (headerRead > 1) header[1].toInt() and 0xFF else -1
+        val b2 = if (headerRead > 2) header[2].toInt() and 0xFF else -1
+        val b3 = if (headerRead > 3) header[3].toInt() and 0xFF else -1
+
+        // 1. Check OLE2 Compound Document: D0 CF 11 E0 -> Legacy Word (.doc) or encrypted Office container
+        if (headerRead >= 4 && b0 == 0xD0 && b1 == 0xCF && b2 == 0x11 && b3 == 0xE0) {
+            throw DocumentReadException(MSG_DOC_UNSUPPORTED)
+        }
+
+        // 2. Check PDF: %PDF (25 50 44 46)
+        if (headerRead >= 4 && b0 == 0x25 && b1 == 0x50 && b2 == 0x44 && b3 == 0x46) {
+            val pdfBytes = readStreamBounded(buffered, MAX_FILE_SIZE_BYTES, onCheckActive)
+            if (pdfBytes.size <= 4) {
+                throw DocumentReadException(MSG_FILE_EMPTY)
+            }
+            return UploadedFileInfo(
+                name = fileName,
+                sizeBytes = if (declaredSize > 0L) declaredSize else pdfBytes.size.toLong(),
+                textContent = "",
+                detectedType = DetectedFileType.PDF,
+                pdfBytes = pdfBytes
+            )
+        }
+
+        // 3. Check ZIP / PK header: 50 4B 03 04 (or 50 4B 05 06 / 50 4B 07 08)
+        if (headerRead >= 2 && b0 == 0x50 && b1 == 0x4B) {
+            if (headerRead >= 4 && b2 == 0x05 && b3 == 0x06) {
+                // Empty ZIP archive
+                throw DocumentReadException(MSG_FILE_EMPTY)
+            }
+            val countedStream = BoundedCountingInputStream(buffered, MAX_FILE_SIZE_BYTES, onCheckActive)
+            val extractedText = extractTextFromDocxStreamInternal(
+                inputStream = countedStream,
+                requireDocumentXmlEntry = true,
+                onCheckActive = onCheckActive
+            )
+            if (extractedText.isBlank()) {
+                throw DocumentReadException(MSG_FILE_EMPTY)
+            }
+            return UploadedFileInfo(
+                name = fileName,
+                sizeBytes = if (declaredSize > 0L) declaredSize else countedStream.totalBytesRead,
+                textContent = extractedText.trim(),
+                detectedType = DetectedFileType.DOCX
+            )
+        }
+
+        // 4. Reject known binary signatures (PNG, JPEG, GIF, RAR, 7Z, ELF, GZIP)
+        if (isKnownBinarySignature(header, headerRead)) {
+            throw DocumentReadException(MSG_FORMAT_UNSUPPORTED)
+        }
+
+        // 5. Plain text (UTF-8 then windows-1256) with binary/garbled rejection
+        val rawBytes = readStreamBounded(buffered, MAX_FILE_SIZE_BYTES, onCheckActive)
+        if (rawBytes.isEmpty()) {
+            throw DocumentReadException(MSG_FILE_EMPTY)
+        }
+        val decodedText = decodeAndValidatePlainText(rawBytes)
+        if (decodedText.isBlank()) {
+            throw DocumentReadException(MSG_FILE_EMPTY)
+        }
 
         return UploadedFileInfo(
             name = fileName,
-            sizeBytes = fileSize,
-            textContent = textContent.trim()
+            sizeBytes = if (declaredSize > 0L) declaredSize else rawBytes.size.toLong(),
+            textContent = decodedText.trim(),
+            detectedType = DetectedFileType.PLAIN_TEXT
         )
     }
 
     /**
-     * Extracts text and structured table cells from Word .docx file by inspecting word/document.xml.
+     * Extracts text and structured table cells from Word .docx file by streaming word/document.xml
+     * with a 20 MB uncompressed size limit.
      */
     fun extractTextFromDocx(inputStream: InputStream): String {
-        val zip = ZipInputStream(inputStream)
-        var entry: ZipEntry? = zip.nextEntry
+        return extractTextFromDocxStreamInternal(
+            inputStream = inputStream,
+            requireDocumentXmlEntry = false,
+            onCheckActive = {}
+        )
+    }
 
-        while (entry != null) {
-            if (entry.name == "word/document.xml") {
-                val xml = zip.readBytes().toString(StandardCharsets.UTF_8)
-                return parseDocumentXml(xml)
+    private fun extractTextFromDocxStreamInternal(
+        inputStream: InputStream,
+        requireDocumentXmlEntry: Boolean,
+        onCheckActive: () -> Unit
+    ): String {
+        var foundDocumentXml = false
+        var foundAnyEntry = false
+        var totalUncompressedBytes = 0L
+        var documentXmlText = ""
+
+        try {
+            val zip = ZipInputStream(inputStream)
+            var entry: ZipEntry? = zip.nextEntry
+
+            while (entry != null) {
+                onCheckActive()
+                foundAnyEntry = true
+                val entryName = entry.name
+
+                if (entryName.equals("EncryptionInfo", ignoreCase = true) ||
+                    entryName.equals("EncryptedPackage", ignoreCase = true)
+                ) {
+                    throw DocumentReadException(MSG_FILE_CORRUPTED_OR_PROTECTED)
+                }
+
+                if (entryName == "word/document.xml") {
+                    foundDocumentXml = true
+                    val out = ByteArrayOutputStream(32 * 1024)
+                    val buffer = ByteArray(8 * 1024)
+                    while (true) {
+                        onCheckActive()
+                        val read = zip.read(buffer)
+                        if (read == -1) break
+                        totalUncompressedBytes += read
+                        if (totalUncompressedBytes > MAX_DOCX_UNCOMPRESSED_BYTES) {
+                            throw DocumentReadException(MSG_DOCX_UNCOMPRESSED_TOO_LARGE)
+                        }
+                        out.write(buffer, 0, read)
+                    }
+                    val xml = out.toByteArray().toString(StandardCharsets.UTF_8)
+                    documentXmlText = parseDocumentXml(xml)
+                    break
+                } else {
+                    // Drain entry while counting uncompressed bytes to guard against zip bombs
+                    val skipBuf = ByteArray(8 * 1024)
+                    while (true) {
+                        onCheckActive()
+                        val read = zip.read(skipBuf)
+                        if (read == -1) break
+                        totalUncompressedBytes += read
+                        if (totalUncompressedBytes > MAX_DOCX_UNCOMPRESSED_BYTES) {
+                            throw DocumentReadException(MSG_DOCX_UNCOMPRESSED_TOO_LARGE)
+                        }
+                    }
+                }
+                zip.closeEntry()
+                entry = zip.nextEntry
             }
-            zip.closeEntry()
-            entry = zip.nextEntry
+        } catch (e: DocumentReadException) {
+            throw e
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: ZipException) {
+            throw DocumentReadException(MSG_FILE_CORRUPTED_OR_PROTECTED, e)
+        } catch (e: Exception) {
+            if (requireDocumentXmlEntry) {
+                throw DocumentReadException(MSG_FILE_CORRUPTED_OR_PROTECTED, e)
+            }
+            return ""
         }
-        return ""
+
+        if (requireDocumentXmlEntry) {
+            if (!foundAnyEntry) {
+                throw DocumentReadException(MSG_FILE_CORRUPTED_OR_PROTECTED)
+            }
+            if (!foundDocumentXml) {
+                throw DocumentReadException(MSG_FORMAT_UNSUPPORTED)
+            }
+        }
+
+        return documentXmlText
+    }
+
+    private class BoundedCountingInputStream(
+        private val delegate: InputStream,
+        private val maxBytes: Long,
+        private val onCheckActive: () -> Unit
+    ) : InputStream() {
+        var totalBytesRead: Long = 0L
+            private set
+
+        override fun read(): Int {
+            onCheckActive()
+            val b = delegate.read()
+            if (b != -1) {
+                totalBytesRead++
+                if (totalBytesRead > maxBytes) {
+                    throw DocumentReadException(MSG_FILE_TOO_LARGE)
+                }
+            }
+            return b
+        }
+
+        override fun read(b: ByteArray, off: Int, len: Int): Int {
+            onCheckActive()
+            val n = delegate.read(b, off, len)
+            if (n > 0) {
+                totalBytesRead += n
+                if (totalBytesRead > maxBytes) {
+                    throw DocumentReadException(MSG_FILE_TOO_LARGE)
+                }
+            }
+            return n
+        }
+
+        override fun close() {
+            delegate.close()
+        }
+    }
+
+    private fun readStreamBounded(
+        inputStream: InputStream,
+        maxBytes: Long,
+        onCheckActive: () -> Unit
+    ): ByteArray {
+        val out = ByteArrayOutputStream(16 * 1024)
+        val buffer = ByteArray(8 * 1024)
+        var total = 0L
+        while (true) {
+            onCheckActive()
+            val read = inputStream.read(buffer)
+            if (read == -1) break
+            total += read
+            if (total > maxBytes) {
+                throw DocumentReadException(MSG_FILE_TOO_LARGE)
+            }
+            out.write(buffer, 0, read)
+        }
+        return out.toByteArray()
+    }
+
+    private fun isKnownBinarySignature(header: ByteArray, length: Int): Boolean {
+        if (length < 4) return false
+        val b0 = header[0].toInt() and 0xFF
+        val b1 = header[1].toInt() and 0xFF
+        val b2 = header[2].toInt() and 0xFF
+        val b3 = header[3].toInt() and 0xFF
+        // PNG: 89 50 4E 47
+        if (b0 == 0x89 && b1 == 0x50 && b2 == 0x4E && b3 == 0x47) return true
+        // JPEG: FF D8 FF
+        if (b0 == 0xFF && b1 == 0xD8 && b2 == 0xFF) return true
+        // GIF: 47 49 46 38
+        if (b0 == 0x47 && b1 == 0x49 && b2 == 0x46 && b3 == 0x38) return true
+        // RAR: 52 61 72 21
+        if (b0 == 0x52 && b1 == 0x61 && b2 == 0x72 && b3 == 0x21) return true
+        // 7Z: 37 7A BC AF
+        if (b0 == 0x37 && b1 == 0x7A && b2 == 0xBC && b3 == 0xAF) return true
+        // ELF: 7F 45 4C 46
+        if (b0 == 0x7F && b1 == 0x45 && b2 == 0x4C && b3 == 0x46) return true
+        // GZIP: 1F 8B
+        if (b0 == 0x1F && b1 == 0x8B) return true
+        return false
+    }
+
+    private fun decodeAndValidatePlainText(bytes: ByteArray): String {
+        // Check raw bytes for null bytes or excessive control bytes
+        val sampleSize = minOf(bytes.size, 8192)
+        var nullCount = 0
+        var rawControlCount = 0
+        for (i in 0 until sampleSize) {
+            val b = bytes[i].toInt() and 0xFF
+            if (b == 0x00) {
+                nullCount++
+            } else if (b < 0x20 && b != 0x09 && b != 0x0A && b != 0x0D) {
+                rawControlCount++
+            }
+        }
+        // Check UTF-16 BOM (FE FF or FF FE) which may legitimately contain null bytes for ASCII chars
+        val hasUtf16Bom = bytes.size >= 2 && (
+            ((bytes[0].toInt() and 0xFF) == 0xFE && (bytes[1].toInt() and 0xFF) == 0xFF) ||
+                ((bytes[0].toInt() and 0xFF) == 0xFF && (bytes[1].toInt() and 0xFF) == 0xFE)
+            )
+        if (!hasUtf16Bom && (nullCount > 0 || (sampleSize > 0 && rawControlCount.toDouble() / sampleSize > 0.08))) {
+            throw DocumentReadException(MSG_FORMAT_UNSUPPORTED)
+        }
+
+        val decoded = if (hasUtf16Bom) {
+            String(bytes, StandardCharsets.UTF_16)
+        } else {
+            val utf8 = String(bytes, StandardCharsets.UTF_8)
+            if (utf8.contains('\uFFFD')) {
+                val win1256 = try {
+                    String(bytes, Charset.forName("windows-1256"))
+                } catch (_: Exception) {
+                    utf8
+                }
+                win1256
+            } else {
+                utf8
+            }
+        }
+
+        // Verify the decoded string does not have excessive replacement characters or control chars
+        if (decoded.isNotEmpty()) {
+            var replacementOrControl = 0
+            for (ch in decoded) {
+                val code = ch.code
+                if (ch == '\uFFFD' || (code < 0x20 && ch != '\t' && ch != '\n' && ch != '\r') || code in 0x7F..0x9F) {
+                    replacementOrControl++
+                }
+            }
+            val ratio = replacementOrControl.toDouble() / decoded.length.toDouble()
+            if (ratio > 0.05) {
+                throw DocumentReadException(MSG_FORMAT_UNSUPPORTED)
+            }
+        }
+
+        return decoded
     }
 
     /**

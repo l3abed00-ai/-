@@ -232,47 +232,6 @@ fun LiveWordPreviewScreen(
                         Text("مشاركة", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
                     }
                 }
-
-                Spacer(modifier = Modifier.height(10.dp))
-
-                // Arabic Font Switcher Bar
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState()),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Text(
-                        text = "الخط العربي المعتمد:",
-                        style = MaterialTheme.typography.labelSmall,
-                        fontWeight = FontWeight.SemiBold,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-
-                    PreviewDocFont.values().forEach { fontOption ->
-                        val isSelected = selectedDocFont == fontOption
-                        Surface(
-                            onClick = { selectedDocFont = fontOption },
-                            shape = RoundedCornerShape(20.dp),
-                            color = if (isSelected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
-                            border = androidx.compose.foundation.BorderStroke(
-                                1.dp,
-                                if (isSelected) MaterialTheme.colorScheme.primary else Color.Transparent
-                            ),
-                            modifier = Modifier.testTag("font_chip_${fontOption.name.lowercase()}")
-                        ) {
-                            Text(
-                                text = fontOption.label,
-                                style = MaterialTheme.typography.labelSmall,
-                                fontFamily = fontOption.fontFamily,
-                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
-                                color = if (isSelected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
-                            )
-                        }
-                    }
-                }
             }
         }
 

@@ -1,5 +1,6 @@
 package com.example.ai
 
+import android.util.Base64
 import com.example.BuildConfig
 import com.example.extractor.DocumentFileReader
 import com.example.model.FieldSource
@@ -13,7 +14,9 @@ import com.example.model.StageData
 import com.example.model.StageSourceCount
 import com.example.model.SuggestedObjectives
 import com.example.model.UnclassifiedLine
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -21,7 +24,9 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.IOException
 import java.util.concurrent.TimeUnit
+import kotlin.coroutines.coroutineContext
 
 object GeminiAiService {
 
@@ -33,6 +38,8 @@ object GeminiAiService {
     private const val API_BASE = "https://generativelanguage.googleapis.com/v1beta"
     const val PRIMARY_MODEL = "gemini-3.8-flash"
     private val API_MODELS = listOf("gemini-3.8-flash", "gemini-2.5-flash", "gemini-2.0-flash")
+    const val MAX_PDF_INLINE_BYTES = 10 * 1024 * 1024 // 10 MB
+    const val MSG_PDF_NEEDS_KEY = "تفريغ PDF يحتاج مفتاح Gemini؛ أدخله أو حوّل الملف إلى docx"
 
     fun getEffectiveApiKey(customKey: String?): String {
         val trimmedCustom = customKey?.trim().orEmpty()
@@ -44,6 +51,196 @@ object GeminiAiService {
             return buildConfigKey
         }
         return ""
+    }
+
+    fun hasValidApiKey(customKey: String?): Boolean {
+        val key = getEffectiveApiKey(customKey)
+        return key.isNotBlank() && !key.startsWith("AQ.", ignoreCase = true)
+    }
+
+    /**
+     * Transcribes a PDF document inline (base64, max 10 MB) via Gemini using the same model list,
+     * passing the key in the `x-goog-api-key` header and omitting temperature, top_p, and top_k.
+     * Never falls back to `synthesizeSmartPlan`; returns the real failure reason in Arabic.
+     */
+    suspend fun transcribeDocument(
+        bytes: ByteArray,
+        mimeType: String = "application/pdf",
+        customKey: String? = null
+    ): Result<String> = withContext(Dispatchers.IO) {
+        coroutineContext.ensureActive()
+
+        if (bytes.isEmpty()) {
+            return@withContext Result.failure(IllegalArgumentException(DocumentFileReader.MSG_FILE_EMPTY))
+        }
+        if (bytes.size > MAX_PDF_INLINE_BYTES) {
+            return@withContext Result.failure(
+                IllegalArgumentException("حجم ملف PDF يتجاوز الحد الأقصى المسموح به للتفريغ (10 ميغابايت).")
+            )
+        }
+
+        val apiKey = getEffectiveApiKey(customKey)
+        if (apiKey.isBlank() || apiKey.startsWith("AQ.", ignoreCase = true)) {
+            return@withContext Result.failure(IllegalStateException(MSG_PDF_NEEDS_KEY))
+        }
+
+        val base64Data = Base64.encodeToString(bytes, Base64.NO_WRAP)
+        val prompt = buildPdfTranscriptionPrompt()
+        var lastArabicError = "تعذر تفريغ ملف PDF عبر Gemini."
+
+        for (model in API_MODELS) {
+            coroutineContext.ensureActive()
+            try {
+                val url = "$API_BASE/models/$model:generateContent"
+                val bodyJson = JSONObject().apply {
+                    put("contents", JSONArray().apply {
+                        put(JSONObject().apply {
+                            put("role", "user")
+                            put("parts", JSONArray().apply {
+                                put(JSONObject().apply {
+                                    put("inline_data", JSONObject().apply {
+                                        put("mime_type", mimeType)
+                                        put("data", base64Data)
+                                    })
+                                })
+                                put(JSONObject().apply {
+                                    put("text", prompt)
+                                })
+                            })
+                        })
+                    })
+                }
+
+                val request = Request.Builder()
+                    .url(url)
+                    .addHeader("x-goog-api-key", apiKey)
+                    .addHeader("Content-Type", "application/json")
+                    .post(bodyJson.toString().toRequestBody("application/json".toMediaType()))
+                    .build()
+
+                val response = client.newCall(request).execute()
+                val responseBody = response.body?.string().orEmpty()
+
+                if (!response.isSuccessful) {
+                    val code = response.code
+                    val rawErrMsg = runCatching {
+                        JSONObject(responseBody).getJSONObject("error").getString("message")
+                    }.getOrDefault(response.message)
+                    val rawStatus = runCatching {
+                        JSONObject(responseBody).getJSONObject("error").optString("status", "")
+                    }.getOrDefault("")
+
+                    if (code == 401 || code == 403 ||
+                        rawErrMsg.contains("API key not valid", ignoreCase = true) ||
+                        rawErrMsg.contains("API_KEY_INVALID", ignoreCase = true) ||
+                        rawStatus.equals("PERMISSION_DENIED", ignoreCase = true) ||
+                        rawStatus.equals("UNAUTHENTICATED", ignoreCase = true)
+                    ) {
+                        return@withContext Result.failure(
+                            RuntimeException("مفتاح Gemini غير صالح؛ يرجى التحقق من صحة المفتاح وإعادة المحاولة.")
+                        )
+                    }
+                    if (code == 429 || rawStatus.equals("RESOURCE_EXHAUSTED", ignoreCase = true) ||
+                        rawErrMsg.contains("quota", ignoreCase = true)
+                    ) {
+                        return@withContext Result.failure(
+                            RuntimeException("تم تجاوز الحصة المسموحة لمفتاح Gemini؛ يرجى المحاولة لاحقًا.")
+                        )
+                    }
+
+                    // Model-not-found (404) or transient error -> try next model in API_MODELS
+                    lastArabicError = "تعذر التفريغ من الخادم ($code): $rawErrMsg"
+                    continue
+                }
+
+                val respJson = JSONObject(responseBody)
+                val candidates = respJson.optJSONArray("candidates")
+                if (candidates == null || candidates.length() == 0) {
+                    lastArabicError = "استجابة فارغة من خادم Gemini؛ قد يكون ملف PDF محمياً أو غير قابل للقراءة."
+                    continue
+                }
+
+                val parts = candidates.getJSONObject(0)
+                    .getJSONObject("content")
+                    .getJSONArray("parts")
+
+                val sb = StringBuilder()
+                for (i in 0 until parts.length()) {
+                    sb.append(parts.getJSONObject(i).optString("text", ""))
+                }
+
+                val cleaned = sb.toString()
+                    .trim()
+                    .removePrefix("```text")
+                    .removePrefix("```")
+                    .removeSuffix("```")
+                    .trim()
+
+                if (cleaned.isBlank()) {
+                    return@withContext Result.failure(
+                        RuntimeException(DocumentFileReader.MSG_FILE_EMPTY)
+                    )
+                }
+
+                return@withContext Result.success(cleaned)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: IOException) {
+                return@withContext Result.failure(
+                    RuntimeException("لا يوجد اتصال بالإنترنت أو تعذر الوصول إلى خوادم Google.", e)
+                )
+            } catch (e: Exception) {
+                lastArabicError = e.message ?: "حدث خطأ غير متوقع أثناء تفريغ ملف PDF."
+            }
+        }
+
+        Result.failure(RuntimeException(lastArabicError))
+    }
+
+    private fun buildPdfTranscriptionPrompt(): String {
+        return """
+فرّغ محتوى الجذاذة حرفيًا بالعربية دون تلخيص أو إضافة أو تصحيح، بلا مقدمات ولا Markdown، واكتب الجداول بنفس صيغة الأسطر التي تنتجها parseTableXml (عناوين المراحل [مرحلة: ...] والخانات «عنوان: عنصر - عنصر»).
+
+مثال ١ لناتج parseTableXml (درس قرائي):
+المكون: النصوص القرائية - الموضوع: أنا والمدينة
+الفئة المستهدفة: الثالثة ثانوي إعدادي - الوحدة: الثالثة - المجال الحضاري
+الكفاية التواصلية: أن يتمكن المتعلم من قراءة النص واستيعاب مضامينه الحضارية.
+[مرحلة: تشخيص المكتسبات والتمهيد]
+القدرات المستهدفة:
+القدرة على استحضار المكتسبات القبلية وربطها بالدرس الجديد.
+أنشطة المدرس:
+يطرح أسئلة تشخيصية لاستحضار مكتسبات المتعلمين حول المجال الحضاري.
+المحتوى الديداكتيكي:
+ما الفرق بين نمط العيش في القرية والمدينة؟
+التقويم والدعم:
+تقويم تشخيصي لقياس استعداد المتعلمين للانخراط في الدرس.
+[مرحلة: ملاحظة النص وتأطيره]
+القدرات المستهدفة:
+القدرة على ملاحظة العتبات النصية وصياغة فرضيات القراءة.
+أنشطة المدرس:
+يوجه المتعلمين لملاحظة العنوان والصورة المرفقة وصاحب النص.
+المحتوى الديداكتيكي:
+العنوان: مركب عطفي يربط الذات الشاعرة بالفضاء الحضري - صاحب النص: أحمد عبد المعطي حجازي - فرضية القراءة: نفترض أن النص يصور غربة الشاعر في المدينة.
+التقويم والدعم:
+تقويم تكويني لمدى قدرة المتعلمين على التقاط المؤشرات الدالة.
+[نهاية الجدول]
+
+مثال ٢ لناتج parseTableXml (درس لغوي مع جدول تحليلي فرعي):
+المكون: الدرس اللغوي - الموضوع: اسما الزمان والمكان
+الفئة المستهدفة: الثالثة ثانوي إعدادي - الوحدة: الثانية - مجال القيم الوطنية والإنسانية
+[مرحلة: الوصف والتحليل]
+القدرات المستهدفة:
+القدرة على تعرف اسمي الزمان والمكان وأوزانهما وطريقة صياغتهما.
+أنشطة المدرس:
+يرسم جدول التحليل على السبورة ويقود المتعلمين لاستنباط أوزان اسمي الزمان والمكان.
+المحتوى الديداكتيكي:
+[جدول: التراكيب | اسم الزمان أو المكان | وزنه | فعله | نوع الفعل | طريقة الصياغة]
+[جدول: مَطْلَعُ الشمس السادسة | مَطْلَع | مَفْعَل | طَلَعَ | ثلاثي مضموم العين في المضارع | على وزن مَفْعَل]
+[جدول: مَهْبِطُ الطائرة المدرج | مَهْبِط | مَفْعِل | هَبَطَ | ثلاثي مكسور العين في المضارع | على وزن مَفْعِل]
+التقويم والدعم:
+يركب المتعلم جملتين تتضمنان اسم زمان واسم مكان من الفعل الثلاثي وغير الثلاثي.
+[نهاية الجدول]
+""".trimIndent()
     }
 
     /**

@@ -2,12 +2,16 @@ package com.example.ui
 
 import android.app.Application
 import android.content.Context
+import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.ai.GeminiAiService
 import com.example.data.AppDatabase
 import com.example.data.JadhadhaRepository
 import com.example.docx.DocxGenerator
+import com.example.extractor.DetectedFileType
+import com.example.extractor.DocumentFileReader
+import com.example.extractor.DocumentReadException
 import com.example.extractor.JadhadhaParser
 import com.example.model.FieldSource
 import com.example.model.JadhadhaInfo
@@ -19,8 +23,13 @@ import com.example.model.SamplePlans
 import com.example.model.StageCatalog
 import com.example.model.StageData
 import com.example.model.SuggestedObjectives
+import com.example.model.UnclassifiedLine
 import com.example.python.PythonToolkit
+import com.example.ui.theme.AppUiFont
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -39,6 +48,18 @@ enum class AppTab(val title: String) {
     SAMPLES("بنك النماذج")
 }
 
+sealed interface ExtractionState {
+    data object Idle : ExtractionState
+    data class Reading(val fileName: String) : ExtractionState
+    data object Parsing : ExtractionState
+    data class Done(
+        val fileName: String? = null,
+        val extractedText: String = "",
+        val isAiTranscribed: Boolean = false
+    ) : ExtractionState
+    data class Error(val message: String) : ExtractionState
+}
+
 data class JadhadhaUiState(
     val currentPlan: JadhadhaPlan = SamplePlans.MANFA_PLAN,
     val activeComponent: PedagogicalComponent = PedagogicalComponent.READING,
@@ -50,11 +71,28 @@ data class JadhadhaUiState(
     val isSuggestingContent: Boolean = false,
     val suggestedObjectives: SuggestedObjectives? = null,
     val isDarkMode: Boolean = false,
+    val appUiFont: AppUiFont = AppUiFont.READEX_PRO,
     val errorMessage: String? = null,
     val successMessage: String? = null,
     val lastGeneratedFile: File? = null,
-    val customApiKey: String = ""
+    val customApiKey: String = "",
+    // Persistent Extractor screen state (survives screen rotation)
+    val extraction: ExtractionState = ExtractionState.Idle,
+    val extractorFileName: String? = null,
+    val extractorFileSize: Long = 0L,
+    val extractorRawText: String = "",
+    val extractorTopicName: String = "",
+    val extractorComponentFilter: PedagogicalComponent? = null,
+    val extractorParseResult: ParseResult? = null,
+    val extractorIsAiTranscribed: Boolean = false,
+    val showPdfConfirmationDialog: Boolean = false,
+    val showPdfApiKeyDialog: Boolean = false,
+    val pendingPdfFileName: String? = null,
+    val pendingPdfSizeBytes: Long = 0L,
+    val pendingPdfBytes: ByteArray? = null
 ) {
+    val extractionState: ExtractionState
+        get() = extraction
     val totalWordCount: Int
         get() {
             var count = 0
@@ -109,8 +147,20 @@ class JadhadhaViewModel(
         JadhadhaRepository(AppDatabase.getDatabase(application).jadhadhaDao())
     )
 
-    private val _uiState = MutableStateFlow(JadhadhaUiState())
+    private val uiPrefs = application.getSharedPreferences("jadhadha_ui_prefs", Context.MODE_PRIVATE)
+
+    private val _uiState = MutableStateFlow(
+        JadhadhaUiState(
+            appUiFont = runCatching {
+                val savedName = uiPrefs.getString("app_ui_font", AppUiFont.READEX_PRO.name)
+                AppUiFont.valueOf(savedName ?: AppUiFont.READEX_PRO.name)
+            }.getOrDefault(AppUiFont.READEX_PRO)
+        )
+    )
     val uiState: StateFlow<JadhadhaUiState> = _uiState.asStateFlow()
+
+    private var extractionJob: Job? = null
+    private var reparseJob: Job? = null
 
     init {
         viewModelScope.launch {
@@ -135,6 +185,14 @@ class JadhadhaViewModel(
 
     fun setDarkMode(dark: Boolean) {
         _uiState.value = _uiState.value.copy(isDarkMode = dark)
+    }
+
+    fun setAppUiFont(font: AppUiFont) {
+        uiPrefs.edit().putString("app_ui_font", font.name).apply()
+        _uiState.value = _uiState.value.copy(
+            appUiFont = font,
+            successMessage = "تم تغيير خط واجهة التطبيق إلى: ${font.label}"
+        )
     }
 
     fun setActiveComponent(component: PedagogicalComponent) {
@@ -251,6 +309,434 @@ class JadhadhaViewModel(
         updateStage(stageKey, updated)
     }
 
+    fun readAndExtractFile(context: Context, uri: Uri, initialFileName: String? = null) {
+        extractionJob?.cancel()
+        reparseJob?.cancel()
+
+        val initialName = initialFileName
+            ?: uri.lastPathSegment?.substringAfterLast('/')?.takeIf { it.isNotBlank() }
+            ?: "ملف_جذاذة"
+
+        _uiState.value = _uiState.value.copy(
+            extraction = ExtractionState.Reading(initialName),
+            isParsing = true,
+            showPdfConfirmationDialog = false,
+            showPdfApiKeyDialog = false,
+            errorMessage = null
+        )
+
+        extractionJob = viewModelScope.launch {
+            try {
+                ensureActive()
+                val fileInfo = withContext(Dispatchers.IO) {
+                    DocumentFileReader.readUploadedFile(context, uri)
+                }
+                ensureActive()
+
+                _uiState.value = _uiState.value.copy(
+                    extraction = ExtractionState.Reading(fileInfo.name)
+                )
+
+                if (fileInfo.detectedType == DetectedFileType.PDF) {
+                    val pdfBytes = fileInfo.pdfBytes
+                    if (pdfBytes == null || pdfBytes.isEmpty()) {
+                        _uiState.value = _uiState.value.copy(
+                            extraction = ExtractionState.Error(DocumentFileReader.MSG_FILE_EMPTY),
+                            isParsing = false
+                        )
+                        return@launch
+                    }
+                    if (pdfBytes.size > GeminiAiService.MAX_PDF_INLINE_BYTES) {
+                        _uiState.value = _uiState.value.copy(
+                            extraction = ExtractionState.Error("حجم ملف PDF يتجاوز الحد الأقصى المسموح به للتفريغ (10 ميغابايت)."),
+                            isParsing = false
+                        )
+                        return@launch
+                    }
+
+                    val hasKey = GeminiAiService.hasValidApiKey(_uiState.value.customApiKey)
+                    if (!hasKey) {
+                        _uiState.value = _uiState.value.copy(
+                            extraction = ExtractionState.Error(GeminiAiService.MSG_PDF_NEEDS_KEY),
+                            isParsing = false,
+                            pendingPdfFileName = fileInfo.name,
+                            pendingPdfSizeBytes = fileInfo.sizeBytes,
+                            pendingPdfBytes = pdfBytes,
+                            showPdfApiKeyDialog = true,
+                            showPdfConfirmationDialog = false
+                        )
+                    } else {
+                        _uiState.value = _uiState.value.copy(
+                            extraction = ExtractionState.Idle,
+                            isParsing = false,
+                            pendingPdfFileName = fileInfo.name,
+                            pendingPdfSizeBytes = fileInfo.sizeBytes,
+                            pendingPdfBytes = pdfBytes,
+                            showPdfConfirmationDialog = true,
+                            showPdfApiKeyDialog = false
+                        )
+                    }
+                    return@launch
+                }
+
+                // DOCX or PLAIN_TEXT
+                val cleanedTopic = DocumentFileReader.cleanTopicFromFilename(fileInfo.name)
+                val nextTopic = if (cleanedTopic.isNotBlank() && cleanedTopic.length in 2..60) {
+                    cleanedTopic
+                } else {
+                    _uiState.value.extractorTopicName
+                }
+
+                _uiState.value = _uiState.value.copy(
+                    extraction = ExtractionState.Parsing,
+                    extractorFileName = fileInfo.name,
+                    extractorFileSize = fileInfo.sizeBytes,
+                    extractorTopicName = nextTopic,
+                    extractorRawText = fileInfo.textContent,
+                    extractorIsAiTranscribed = false
+                )
+
+                ensureActive()
+                val parseResult = withContext(Dispatchers.Default) {
+                    ensureActive()
+                    val initial = JadhadhaParser.parseWithReport(
+                        raw = fileInfo.textContent,
+                        fallbackTopic = nextTopic.ifBlank { "درس جديد" },
+                        forcedComponent = _uiState.value.extractorComponentFilter
+                    )
+                    ensureActive()
+                    GeminiAiService.classifyAndRefineExtraction(
+                        rawText = fileInfo.textContent,
+                        initialResult = initial,
+                        customKey = _uiState.value.customApiKey
+                    )
+                }
+                ensureActive()
+
+                _uiState.value = _uiState.value.copy(
+                    extraction = ExtractionState.Done(
+                        fileName = fileInfo.name,
+                        extractedText = fileInfo.textContent,
+                        isAiTranscribed = false
+                    ),
+                    isParsing = false,
+                    extractorParseResult = parseResult,
+                    extractorIsAiTranscribed = false
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: DocumentReadException) {
+                _uiState.value = _uiState.value.copy(
+                    extraction = ExtractionState.Error(e.arabicMessage),
+                    isParsing = false
+                )
+            } catch (_: Exception) {
+                _uiState.value = _uiState.value.copy(
+                    extraction = ExtractionState.Error(DocumentFileReader.MSG_FILE_CORRUPTED_OR_PROTECTED),
+                    isParsing = false
+                )
+            }
+        }
+    }
+
+    fun confirmPdfTranscription() {
+        val pdfBytes = _uiState.value.pendingPdfBytes ?: return
+        val fileName = _uiState.value.pendingPdfFileName ?: "ملف.pdf"
+        val fileSize = _uiState.value.pendingPdfSizeBytes
+
+        extractionJob?.cancel()
+        reparseJob?.cancel()
+
+        _uiState.value = _uiState.value.copy(
+            showPdfConfirmationDialog = false,
+            showPdfApiKeyDialog = false,
+            extraction = ExtractionState.Reading(fileName),
+            isParsing = true
+        )
+
+        extractionJob = viewModelScope.launch {
+            try {
+                ensureActive()
+                val transcribeResult = GeminiAiService.transcribeDocument(
+                    bytes = pdfBytes,
+                    mimeType = "application/pdf",
+                    customKey = _uiState.value.customApiKey
+                )
+                ensureActive()
+
+                transcribeResult.onSuccess { transcribedText ->
+                    val cleanedTopic = DocumentFileReader.cleanTopicFromFilename(fileName)
+                    val nextTopic = if (cleanedTopic.isNotBlank() && cleanedTopic.length in 2..60) {
+                        cleanedTopic
+                    } else {
+                        _uiState.value.extractorTopicName
+                    }
+
+                    _uiState.value = _uiState.value.copy(
+                        extraction = ExtractionState.Parsing,
+                        extractorFileName = fileName,
+                        extractorFileSize = fileSize,
+                        extractorTopicName = nextTopic,
+                        extractorRawText = transcribedText,
+                        extractorIsAiTranscribed = true,
+                        pendingPdfBytes = null
+                    )
+
+                    val parsed = withContext(Dispatchers.Default) {
+                        ensureActive()
+                        // Use parseRawText / parseWithReport off the main thread
+                        val initial = JadhadhaParser.parseWithReport(
+                            raw = transcribedText,
+                            fallbackTopic = nextTopic.ifBlank { "درس جديد" },
+                            forcedComponent = _uiState.value.extractorComponentFilter
+                        )
+                        ensureActive()
+                        GeminiAiService.classifyAndRefineExtraction(
+                            rawText = transcribedText,
+                            initialResult = initial,
+                            customKey = _uiState.value.customApiKey
+                        )
+                    }
+                    ensureActive()
+
+                    _uiState.value = _uiState.value.copy(
+                        extraction = ExtractionState.Done(
+                            fileName = fileName,
+                            extractedText = transcribedText,
+                            isAiTranscribed = true
+                        ),
+                        isParsing = false,
+                        extractorParseResult = parsed,
+                        extractorIsAiTranscribed = true
+                    )
+                }.onFailure { err ->
+                    _uiState.value = _uiState.value.copy(
+                        extraction = ExtractionState.Error(
+                            err.message ?: "تعذر تفريغ ملف PDF عبر Gemini."
+                        ),
+                        isParsing = false
+                    )
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                _uiState.value = _uiState.value.copy(
+                    extraction = ExtractionState.Error("تعذر تفريغ ملف PDF عبر Gemini."),
+                    isParsing = false
+                )
+            }
+        }
+    }
+
+    fun submitPdfApiKey(key: String) {
+        val trimmed = key.trim()
+        val hasPendingPdf = _uiState.value.pendingPdfBytes != null
+        val isValid = GeminiAiService.hasValidApiKey(trimmed)
+        _uiState.value = _uiState.value.copy(
+            customApiKey = trimmed,
+            showPdfApiKeyDialog = false,
+            showPdfConfirmationDialog = hasPendingPdf && isValid,
+            extraction = if (isValid) ExtractionState.Idle else ExtractionState.Error(GeminiAiService.MSG_PDF_NEEDS_KEY),
+            successMessage = if (trimmed.isNotBlank()) "تم حفظ مفتاح Gemini بنجاح." else null
+        )
+    }
+
+    fun dismissPdfDialogs() {
+        _uiState.value = _uiState.value.copy(
+            showPdfConfirmationDialog = false,
+            showPdfApiKeyDialog = false,
+            pendingPdfBytes = null,
+            pendingPdfFileName = null,
+            pendingPdfSizeBytes = 0L
+        )
+    }
+
+    fun cancelExtraction() {
+        extractionJob?.cancel()
+        reparseJob?.cancel()
+        extractionJob = null
+        reparseJob = null
+        _uiState.value = _uiState.value.copy(
+            extraction = ExtractionState.Idle,
+            isParsing = false,
+            showPdfConfirmationDialog = false
+        )
+    }
+
+    fun clearExtractionError() {
+        val currExt = _uiState.value.extraction
+        if (currExt is ExtractionState.Error) {
+            _uiState.value = _uiState.value.copy(
+                extraction = if (_uiState.value.extractorRawText.isNotBlank()) {
+                    ExtractionState.Done(
+                        fileName = _uiState.value.extractorFileName,
+                        extractedText = _uiState.value.extractorRawText,
+                        isAiTranscribed = _uiState.value.extractorIsAiTranscribed
+                    )
+                } else {
+                    ExtractionState.Idle
+                }
+            )
+        }
+    }
+
+    fun clearExtractedFile() {
+        extractionJob?.cancel()
+        reparseJob?.cancel()
+        _uiState.value = _uiState.value.copy(
+            extraction = ExtractionState.Idle,
+            isParsing = false,
+            extractorFileName = null,
+            extractorFileSize = 0L,
+            extractorRawText = "",
+            extractorParseResult = null,
+            extractorIsAiTranscribed = false,
+            pendingPdfBytes = null,
+            pendingPdfFileName = null,
+            pendingPdfSizeBytes = 0L
+        )
+    }
+
+    fun updateExtractorRawText(
+        newText: String,
+        newTopic: String? = null,
+        newComponentFilter: PedagogicalComponent? = _uiState.value.extractorComponentFilter,
+        clearUploadedFile: Boolean = false
+    ) {
+        val effectiveTopic = newTopic ?: _uiState.value.extractorTopicName
+        _uiState.value = _uiState.value.copy(
+            extractorRawText = newText,
+            extractorTopicName = effectiveTopic,
+            extractorComponentFilter = newComponentFilter,
+            extractorFileName = if (clearUploadedFile) null else _uiState.value.extractorFileName,
+            extractorFileSize = if (clearUploadedFile) 0L else _uiState.value.extractorFileSize,
+            extractorIsAiTranscribed = if (clearUploadedFile) false else _uiState.value.extractorIsAiTranscribed
+        )
+        scheduleExtractorReparse(newText, effectiveTopic, newComponentFilter)
+    }
+
+    fun updateExtractorTopic(newTopic: String) {
+        _uiState.value = _uiState.value.copy(extractorTopicName = newTopic)
+        if (_uiState.value.extractorRawText.isNotBlank()) {
+            scheduleExtractorReparse(
+                _uiState.value.extractorRawText,
+                newTopic,
+                _uiState.value.extractorComponentFilter
+            )
+        }
+    }
+
+    fun updateExtractorComponentFilter(newComponent: PedagogicalComponent?) {
+        _uiState.value = _uiState.value.copy(extractorComponentFilter = newComponent)
+        if (_uiState.value.extractorRawText.isNotBlank()) {
+            scheduleExtractorReparse(
+                _uiState.value.extractorRawText,
+                _uiState.value.extractorTopicName,
+                newComponent
+            )
+        }
+    }
+
+    private fun scheduleExtractorReparse(
+        rawText: String,
+        topic: String,
+        componentFilter: PedagogicalComponent?
+    ) {
+        reparseJob?.cancel()
+        if (rawText.isBlank()) {
+            _uiState.value = _uiState.value.copy(
+                extractorParseResult = null,
+                extraction = ExtractionState.Idle,
+                isParsing = false
+            )
+            return
+        }
+        reparseJob = viewModelScope.launch {
+            _uiState.value = _uiState.value.copy(
+                extraction = ExtractionState.Parsing,
+                isParsing = true
+            )
+            try {
+                val parsed = withContext(Dispatchers.Default) {
+                    ensureActive()
+                    JadhadhaParser.parseWithReport(
+                        raw = rawText,
+                        fallbackTopic = topic.ifBlank { "درس جديد" },
+                        forcedComponent = componentFilter
+                    )
+                }
+                ensureActive()
+                _uiState.value = _uiState.value.copy(
+                    extractorParseResult = parsed,
+                    extraction = ExtractionState.Done(
+                        fileName = _uiState.value.extractorFileName,
+                        extractedText = rawText,
+                        isAiTranscribed = _uiState.value.extractorIsAiTranscribed
+                    ),
+                    isParsing = false
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                _uiState.value = _uiState.value.copy(
+                    extraction = ExtractionState.Idle,
+                    isParsing = false
+                )
+            }
+        }
+    }
+
+    fun delegateExtractorToBuiltInAi() {
+        val currentResult = _uiState.value.extractorParseResult ?: return
+        val rawText = _uiState.value.extractorRawText
+        reparseJob?.cancel()
+        reparseJob = viewModelScope.launch {
+            _uiState.value = _uiState.value.copy(
+                extraction = ExtractionState.Parsing,
+                isParsing = true
+            )
+            try {
+                val refined = withContext(Dispatchers.Default) {
+                    ensureActive()
+                    GeminiAiService.classifyAndRefineExtraction(
+                        rawText = rawText,
+                        initialResult = currentResult,
+                        customKey = _uiState.value.customApiKey
+                    )
+                }
+                ensureActive()
+                _uiState.value = _uiState.value.copy(
+                    extractorParseResult = refined,
+                    extraction = ExtractionState.Done(
+                        fileName = _uiState.value.extractorFileName,
+                        extractedText = rawText,
+                        isAiTranscribed = _uiState.value.extractorIsAiTranscribed
+                    ),
+                    isParsing = false
+                )
+            } catch (e: CancellationException) {
+                throw e
+            }
+        }
+    }
+
+    fun assignExtractorUnclassifiedLine(line: UnclassifiedLine, stageKey: String, field: String) {
+        val currentResult = _uiState.value.extractorParseResult ?: return
+        val updated = JadhadhaParser.assignUnclassifiedLine(
+            currentResult = currentResult,
+            line = line,
+            targetStageKey = stageKey,
+            targetField = field
+        )
+        _uiState.value = _uiState.value.copy(extractorParseResult = updated)
+    }
+
+    fun ignoreExtractorUnclassifiedLine(line: UnclassifiedLine) {
+        val currentResult = _uiState.value.extractorParseResult ?: return
+        val updated = JadhadhaParser.ignoreUnclassifiedLine(currentResult, line)
+        _uiState.value = _uiState.value.copy(extractorParseResult = updated)
+    }
+
     fun parseAndApplyText(
         rawText: String,
         topic: String,
@@ -258,13 +744,24 @@ class JadhadhaViewModel(
         preParsedResult: ParseResult? = null
     ) {
         if (rawText.isBlank() && preParsedResult == null) return
-        _uiState.value = _uiState.value.copy(isParsing = true, errorMessage = null)
+        _uiState.value = _uiState.value.copy(
+            isParsing = true,
+            extraction = ExtractionState.Parsing,
+            errorMessage = null
+        )
 
         viewModelScope.launch {
             val initialResult = preParsedResult ?: withContext(Dispatchers.Default) {
+                val fallback = topic.ifBlank { "درس جديد" }
+                // Ensure both parseRawText and parseWithReport run on Dispatchers.Default off the main thread
+                val rawPlan = JadhadhaParser.parseRawText(
+                    raw = rawText,
+                    fallbackTopic = fallback,
+                    forcedComponent = forcedComponent
+                )
                 JadhadhaParser.parseWithReport(
                     raw = rawText,
-                    fallbackTopic = topic.ifBlank { "درس جديد" },
+                    fallbackTopic = rawPlan.topic.ifBlank { fallback },
                     forcedComponent = forcedComponent
                 )
             }
@@ -283,6 +780,11 @@ class JadhadhaViewModel(
                 currentPlan = parsed,
                 activeComponent = parsed.componentType,
                 isParsing = false,
+                extraction = ExtractionState.Done(
+                    fileName = _uiState.value.extractorFileName,
+                    extractedText = rawText,
+                    isAiTranscribed = _uiState.value.extractorIsAiTranscribed
+                ),
                 lastParseReport = parseResult.report,
                 selectedTab = AppTab.MODEL_EDITOR,
                 successMessage = "تم تفريغ المحتوى (${parseResult.report.totalFileFields} خانة من الملف، ${parseResult.report.totalAiFields} ذكاء اصطناعي، ${parseResult.report.totalDefaultFields} افتراضية) وحفظه بنجاح!"

@@ -31,9 +31,12 @@ import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentPaste
+import androidx.compose.material.icons.filled.ErrorOutline
+import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.UploadFile
 import androidx.compose.material.icons.filled.WarningAmber
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -51,8 +54,10 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -70,13 +75,20 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.ai.GeminiAiService
 import com.example.docx.DocxGenerator
+import com.example.extractor.DetectedFileType
 import com.example.extractor.DocumentFileReader
+import com.example.extractor.DocumentReadException
 import com.example.extractor.JadhadhaParser
 import com.example.model.ParseResult
 import com.example.model.PedagogicalComponent
 import com.example.model.StageCatalog
 import com.example.model.UnclassifiedLine
+import com.example.ui.ExtractionState
+import com.example.ui.JadhadhaViewModel
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -85,21 +97,67 @@ import kotlinx.coroutines.withContext
 fun ExtractorScreen(
     initialComponent: PedagogicalComponent = PedagogicalComponent.READING,
     onApplyExtractedPlan: (rawText: String, topic: String, forcedComponent: PedagogicalComponent?, preParsedResult: ParseResult?) -> Unit,
+    viewModel: JadhadhaViewModel? = null,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
     val clipboardManager: ClipboardManager = LocalClipboardManager.current
     val coroutineScope = rememberCoroutineScope()
 
-    // Default to null ("كشف تلقائي") so component keyword detection and defaulted-component alert work transparently
-    var selectedComponentFilter by remember { mutableStateOf<PedagogicalComponent?>(null) }
-    var rawInputText by remember { mutableStateOf("") }
-    var topicName by remember { mutableStateOf("") }
-    var uploadedFileName by remember { mutableStateOf<String?>(null) }
-    var uploadedFileSize by remember { mutableLongStateOf(0L) }
-    var parseResult by remember { mutableStateOf<ParseResult?>(null) }
-    var isParsing by remember { mutableStateOf(false) }
-    var autoDelegateAiOnFileUpload by remember { mutableStateOf(false) }
+    val vmState = viewModel?.uiState?.collectAsState()?.value
+
+    // Local fallback state when ExtractorScreen is rendered standalone without a ViewModel
+    var localComponentFilter by remember { mutableStateOf<PedagogicalComponent?>(null) }
+    var localRawInputText by remember { mutableStateOf("") }
+    var localTopicName by remember { mutableStateOf("") }
+    var localUploadedFileName by remember { mutableStateOf<String?>(null) }
+    var localUploadedFileSize by remember { mutableLongStateOf(0L) }
+    var localParseResult by remember { mutableStateOf<ParseResult?>(null) }
+    var localExtractionState by remember { mutableStateOf<ExtractionState>(ExtractionState.Idle) }
+    var localIsAiTranscribed by remember { mutableStateOf(false) }
+    var localAutoDelegateAi by remember { mutableStateOf(false) }
+    var localShowPdfConfirmDialog by remember { mutableStateOf(false) }
+    var localShowPdfKeyDialog by remember { mutableStateOf(false) }
+    var localPendingPdfBytes by remember { mutableStateOf<ByteArray?>(null) }
+    var localPendingPdfName by remember { mutableStateOf<String?>(null) }
+    var localPendingPdfSize by remember { mutableLongStateOf(0L) }
+    var localCustomApiKey by remember { mutableStateOf("") }
+    var localJob by remember { mutableStateOf<Job?>(null) }
+
+    val selectedComponentFilter = if (vmState != null) vmState.extractorComponentFilter else localComponentFilter
+    val rawInputText = if (vmState != null) vmState.extractorRawText else localRawInputText
+    val topicName = if (vmState != null) vmState.extractorTopicName else localTopicName
+    val uploadedFileName = if (vmState != null) vmState.extractorFileName else localUploadedFileName
+    val uploadedFileSize = if (vmState != null) vmState.extractorFileSize else localUploadedFileSize
+    val parseResult = if (vmState != null) vmState.extractorParseResult else localParseResult
+    val extractionState = if (vmState != null) vmState.extraction else localExtractionState
+    val isAiTranscribed = if (vmState != null) vmState.extractorIsAiTranscribed else localIsAiTranscribed
+    val showPdfConfirmDialog = if (vmState != null) vmState.showPdfConfirmationDialog else localShowPdfConfirmDialog
+    val showPdfKeyDialog = if (vmState != null) vmState.showPdfApiKeyDialog else localShowPdfKeyDialog
+    val pendingPdfFileName = if (vmState != null) vmState.pendingPdfFileName else localPendingPdfName
+    val currentApiKey = if (vmState != null) vmState.customApiKey else localCustomApiKey
+
+    val isBusy = extractionState is ExtractionState.Reading || extractionState is ExtractionState.Parsing
+
+    // Show quick Arabic Toast whenever extractionState enters Error or Done from file upload
+    LaunchedEffect(extractionState) {
+        when (val st = extractionState) {
+            is ExtractionState.Error -> {
+                Toast.makeText(context, st.message, Toast.LENGTH_LONG).show()
+            }
+            is ExtractionState.Done -> {
+                if (st.fileName != null) {
+                    val toastMsg = if (st.isAiTranscribed) {
+                        "فُرِّغ هذا الملف بالذكاء الاصطناعي، راجع النص"
+                    } else {
+                        "تم رفع وتفريغ الملف «${st.fileName}» بنجاح!"
+                    }
+                    Toast.makeText(context, toastMsg, Toast.LENGTH_SHORT).show()
+                }
+            }
+            else -> {}
+        }
+    }
 
     // Track bound Model Jadhadha templates from "الملف التربوي" (Google Drive)
     var templateRefreshTick by remember { mutableStateOf(0) }
@@ -121,73 +179,280 @@ fun ExtractorScreen(
         }
     }
 
-    // Run parsing on Dispatchers.Default whenever input, topic, or component filter changes
-    LaunchedEffect(rawInputText, topicName, selectedComponentFilter) {
-        if (rawInputText.isBlank()) {
-            parseResult = null
-            isParsing = false
-        } else {
-            isParsing = true
-            val initial = withContext(Dispatchers.Default) {
-                JadhadhaParser.parseWithReport(
-                    raw = rawInputText,
-                    fallbackTopic = topicName.ifBlank { "درس جديد" },
-                    forcedComponent = selectedComponentFilter
-                )
-            }
-            if (autoDelegateAiOnFileUpload) {
-                autoDelegateAiOnFileUpload = false
-                val refined = GeminiAiService.classifyAndRefineExtraction(
-                    rawText = rawInputText,
-                    initialResult = initial
-                )
-                parseResult = refined
+    // Run parsing on Dispatchers.Default in standalone mode whenever input, topic, or component filter changes
+    LaunchedEffect(localRawInputText, localTopicName, localComponentFilter) {
+        if (viewModel == null) {
+            if (localRawInputText.isBlank()) {
+                localParseResult = null
+                if (localExtractionState is ExtractionState.Parsing) {
+                    localExtractionState = ExtractionState.Idle
+                }
             } else {
-                parseResult = initial
+                localExtractionState = ExtractionState.Parsing
+                val initial = withContext(Dispatchers.Default) {
+                    ensureActive()
+                    JadhadhaParser.parseWithReport(
+                        raw = localRawInputText,
+                        fallbackTopic = localTopicName.ifBlank { "درس جديد" },
+                        forcedComponent = localComponentFilter
+                    )
+                }
+                if (localAutoDelegateAi) {
+                    localAutoDelegateAi = false
+                    val refined = withContext(Dispatchers.Default) {
+                        ensureActive()
+                        GeminiAiService.classifyAndRefineExtraction(
+                            rawText = localRawInputText,
+                            initialResult = initial,
+                            customKey = localCustomApiKey
+                        )
+                    }
+                    localParseResult = refined
+                } else {
+                    localParseResult = initial
+                }
+                localExtractionState = ExtractionState.Done(
+                    fileName = localUploadedFileName,
+                    extractedText = localRawInputText,
+                    isAiTranscribed = localIsAiTranscribed
+                )
             }
-            isParsing = false
         }
     }
 
-    // File picker launcher supporting Word .docx, text, json
+    fun launchFileExtraction(uri: Uri, initialName: String? = null) {
+        if (viewModel != null) {
+            viewModel.readAndExtractFile(context, uri, initialName)
+        } else {
+            localJob?.cancel()
+            val startName = initialName ?: uri.lastPathSegment?.substringAfterLast('/') ?: "ملف_جذاذة"
+            localExtractionState = ExtractionState.Reading(startName)
+            localJob = coroutineScope.launch {
+                try {
+                    ensureActive()
+                    val fileInfo = withContext(Dispatchers.IO) {
+                        DocumentFileReader.readUploadedFile(context, uri)
+                    }
+                    ensureActive()
+                    if (fileInfo.detectedType == DetectedFileType.PDF) {
+                        val pdfBytes = fileInfo.pdfBytes
+                        if (pdfBytes == null || pdfBytes.isEmpty()) {
+                            localExtractionState = ExtractionState.Error(DocumentFileReader.MSG_FILE_EMPTY)
+                            return@launch
+                        }
+                        if (pdfBytes.size > GeminiAiService.MAX_PDF_INLINE_BYTES) {
+                            localExtractionState = ExtractionState.Error(
+                                "حجم ملف PDF يتجاوز الحد الأقصى المسموح به للتفريغ (10 ميغابايت)."
+                            )
+                            return@launch
+                        }
+                        localPendingPdfBytes = pdfBytes
+                        localPendingPdfName = fileInfo.name
+                        localPendingPdfSize = fileInfo.sizeBytes
+                        if (!GeminiAiService.hasValidApiKey(localCustomApiKey)) {
+                            localExtractionState = ExtractionState.Error(GeminiAiService.MSG_PDF_NEEDS_KEY)
+                            localShowPdfKeyDialog = true
+                        } else {
+                            localExtractionState = ExtractionState.Idle
+                            localShowPdfConfirmDialog = true
+                        }
+                        return@launch
+                    }
+
+                    localUploadedFileName = fileInfo.name
+                    localUploadedFileSize = fileInfo.sizeBytes
+                    val cleanedFromName = DocumentFileReader.cleanTopicFromFilename(fileInfo.name)
+                    if (cleanedFromName.isNotBlank() && cleanedFromName.length in 2..60) {
+                        localTopicName = cleanedFromName
+                    }
+                    localIsAiTranscribed = false
+                    localAutoDelegateAi = true
+                    localRawInputText = fileInfo.textContent
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: DocumentReadException) {
+                    localExtractionState = ExtractionState.Error(e.arabicMessage)
+                } catch (_: Exception) {
+                    localExtractionState = ExtractionState.Error(DocumentFileReader.MSG_FILE_CORRUPTED_OR_PROTECTED)
+                }
+            }
+        }
+    }
+
+    fun confirmPdfUpload() {
+        if (viewModel != null) {
+            viewModel.confirmPdfTranscription()
+        } else {
+            val bytes = localPendingPdfBytes ?: return
+            val name = localPendingPdfName ?: "ملف.pdf"
+            val size = localPendingPdfSize
+            localShowPdfConfirmDialog = false
+            localJob?.cancel()
+            localExtractionState = ExtractionState.Reading(name)
+            localJob = coroutineScope.launch {
+                try {
+                    val res = GeminiAiService.transcribeDocument(
+                        bytes = bytes,
+                        mimeType = "application/pdf",
+                        customKey = localCustomApiKey
+                    )
+                    res.onSuccess { text ->
+                        localUploadedFileName = name
+                        localUploadedFileSize = size
+                        val cleaned = DocumentFileReader.cleanTopicFromFilename(name)
+                        if (cleaned.isNotBlank() && cleaned.length in 2..60) {
+                            localTopicName = cleaned
+                        }
+                        localIsAiTranscribed = true
+                        localAutoDelegateAi = true
+                        localRawInputText = text
+                    }.onFailure { err ->
+                        localExtractionState = ExtractionState.Error(
+                            err.message ?: "تعذر تفريغ ملف PDF عبر Gemini."
+                        )
+                    }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                    localExtractionState = ExtractionState.Error("تعذر تفريغ ملف PDF عبر Gemini.")
+                }
+            }
+        }
+    }
+
+    // Call site 1: File picker launcher supporting Word .docx, PDF, text
     val filePickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri: Uri? ->
         if (uri != null) {
-            coroutineScope.launch {
-                try {
-                    isParsing = true
-                    val fileInfo = withContext(Dispatchers.Default) {
-                        DocumentFileReader.readUploadedFile(context, uri)
-                    }
-                    uploadedFileName = fileInfo.name
-                    uploadedFileSize = fileInfo.sizeBytes
+            launchFileExtraction(uri)
+        }
+    }
 
-                    val cleanedFromName = DocumentFileReader.cleanTopicFromFilename(fileInfo.name)
-                    if (cleanedFromName.isNotBlank() && cleanedFromName.length in 2..60) {
-                        topicName = cleanedFromName
+    // PDF Confirmation Dialog: «سيُرسل هذا الملف إلى خوادم Google لتفريغه» (موافق/إلغاء)
+    if (showPdfConfirmDialog) {
+        AlertDialog(
+            onDismissRequest = {
+                if (viewModel != null) viewModel.dismissPdfDialogs() else localShowPdfConfirmDialog = false
+            },
+            title = {
+                Text(
+                    text = "تأكيد تفريغ ملف PDF",
+                    fontWeight = FontWeight.Bold
+                )
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = "سيُرسل هذا الملف إلى خوادم Google لتفريغه",
+                        style = MaterialTheme.typography.bodyLarge,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.testTag("pdf_confirm_dialog_message")
+                    )
+                    pendingPdfFileName?.let { fname ->
+                        Text(
+                            text = "الملف: $fname",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     }
-
-                    autoDelegateAiOnFileUpload = true
-                    rawInputText = fileInfo.textContent
-                    if (fileInfo.textContent.isNotBlank()) {
-                        Toast.makeText(
-                            context,
-                            "تم رفع الملف وإسناد التصنيف والتنقيح إلى الذكاء الاصطناعي المدمج بنجاح!",
-                            Toast.LENGTH_SHORT
-                        ).show()
-                    } else {
-                        isParsing = false
-                        autoDelegateAiOnFileUpload = false
-                        Toast.makeText(context, "الملف المرفوع فارغ أو تعذر استخراج النص منه.", Toast.LENGTH_LONG).show()
-                    }
-                } catch (e: Exception) {
-                    isParsing = false
-                    autoDelegateAiOnFileUpload = false
-                    Toast.makeText(context, "حدث خطأ أثناء قراءة الملف: ${e.message}", Toast.LENGTH_LONG).show()
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = { confirmPdfUpload() },
+                    modifier = Modifier.testTag("pdf_confirm_accept_button")
+                ) {
+                    Text("موافق", fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                OutlinedButton(
+                    onClick = {
+                        if (viewModel != null) viewModel.dismissPdfDialogs() else localShowPdfConfirmDialog = false
+                    },
+                    modifier = Modifier.testTag("pdf_confirm_cancel_button")
+                ) {
+                    Text("إلغاء")
                 }
             }
-        }
+        )
+    }
+
+    // Missing Gemini API Key Dialog for PDF: «تفريغ PDF يحتاج مفتاح Gemini؛ أدخله أو حوّل الملف إلى docx»
+    if (showPdfKeyDialog) {
+        var keyDraft by remember(currentApiKey) { mutableStateOf(currentApiKey) }
+        AlertDialog(
+            onDismissRequest = {
+                if (viewModel != null) viewModel.dismissPdfDialogs() else localShowPdfKeyDialog = false
+            },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Default.Key,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "مفتاح Gemini مطلوب لتفريغ PDF",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        text = GeminiAiService.MSG_PDF_NEEDS_KEY,
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.testTag("pdf_missing_key_dialog_message")
+                    )
+                    OutlinedTextField(
+                        value = keyDraft,
+                        onValueChange = { keyDraft = it },
+                        label = { Text("مفتاح Gemini API (AIza...)") },
+                        placeholder = { Text("الصق مفتاح Gemini هنا...") },
+                        singleLine = true,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("pdf_api_key_input")
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        if (viewModel != null) {
+                            viewModel.submitPdfApiKey(keyDraft)
+                        } else {
+                            localCustomApiKey = keyDraft.trim()
+                            localShowPdfKeyDialog = false
+                            if (GeminiAiService.hasValidApiKey(localCustomApiKey) && localPendingPdfBytes != null) {
+                                localExtractionState = ExtractionState.Idle
+                                localShowPdfConfirmDialog = true
+                            }
+                        }
+                    },
+                    enabled = keyDraft.trim().isNotBlank(),
+                    modifier = Modifier.testTag("pdf_api_key_save_button")
+                ) {
+                    Text("حفظ ومتابعة", fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        if (viewModel != null) viewModel.dismissPdfDialogs() else localShowPdfKeyDialog = false
+                    },
+                    modifier = Modifier.testTag("pdf_api_key_cancel_button")
+                ) {
+                    Text("إلغاء")
+                }
+            }
+        )
     }
 
     val scrollState = rememberScrollState()
@@ -225,7 +490,7 @@ fun ExtractorScreen(
                 }
                 Spacer(modifier = Modifier.height(6.dp))
                 Text(
-                    text = "ارفع ملف الجذاذة المصدر (مثل جذاذات المختار .docx) أو الصق مسودتها، وسيتولى نموذج الذكاء الاصطناعي المدمج تصنيف الأسطر والجداول الفرعية وتنقيح المراحل مع الحفاظ التام على تنسيق الجذاذة النموذجية (خط Sakkal Majalla 10pt عريض والألوان الرسمية) في جميع المكونات.",
+                    text = "ارفع ملف الجذاذة المصدر (.docx أو PDF أو نص عربي) أو الصق مسودتها، وسيتولى نموذج الذكاء الاصطناعي المدمج تصنيف الأسطر والجداول الفرعية وتنقيح المراحل مع الحفاظ التام على تنسيق الجذاذة النموذجية (خط Sakkal Majalla 10pt عريض والألوان الرسمية) في جميع المكونات.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.85f)
                 )
@@ -330,14 +595,26 @@ fun ExtractorScreen(
             ) {
                 FilterChip(
                     selected = selectedComponentFilter == null,
-                    onClick = { selectedComponentFilter = null },
+                    onClick = {
+                        if (viewModel != null) {
+                            viewModel.updateExtractorComponentFilter(null)
+                        } else {
+                            localComponentFilter = null
+                        }
+                    },
                     label = { Text("كشف تلقائي") },
                     modifier = Modifier.testTag("chip_component_auto")
                 )
                 PedagogicalComponent.entries.forEach { comp ->
                     FilterChip(
                         selected = selectedComponentFilter == comp,
-                        onClick = { selectedComponentFilter = comp },
+                        onClick = {
+                            if (viewModel != null) {
+                                viewModel.updateExtractorComponentFilter(comp)
+                            } else {
+                                localComponentFilter = comp
+                            }
+                        },
                         label = { Text(comp.title) },
                         modifier = Modifier.testTag("chip_component_${comp.name.lowercase()}")
                     )
@@ -366,7 +643,7 @@ fun ExtractorScreen(
                 )
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    text = "تُحفظ الجذاذات المصدّرة تلقائياً في مجلد «التنزيلات / Downloads» على هاتفك. يمكنك اختيار ملف الجذاذة المصدر من الهاتف أو Google Drive أو الضغط على أحد ملفات Word الجاهزة أسفله:",
+                    text = "تُحفظ الجذاذات المصدّرة تلقائياً في مجلد «التنزيلات / Downloads» على هاتفك. يمكنك اختيار ملف الجذاذة المصدر (.docx أو PDF أو نص) من الهاتف أو Google Drive أو الضغط على أحد ملفات Word الجاهزة أسفله:",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -377,6 +654,7 @@ fun ExtractorScreen(
                         filePickerLauncher.launch(
                             arrayOf(
                                 "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                                "application/pdf",
                                 "text/plain",
                                 "application/json",
                                 "application/msword",
@@ -405,6 +683,7 @@ fun ExtractorScreen(
                     )
                 }
 
+                // Call site 2: Quick-load available .docx files using readUploadedFile on Dispatchers.IO
                 if (availableDocxFiles.isNotEmpty()) {
                     Spacer(modifier = Modifier.height(12.dp))
                     Text(
@@ -421,32 +700,7 @@ fun ExtractorScreen(
                         availableDocxFiles.forEach { docxFile ->
                             OutlinedButton(
                                 onClick = {
-                                    coroutineScope.launch {
-                                        runCatching {
-                                            isParsing = true
-                                            val extracted = withContext(Dispatchers.Default) {
-                                                java.io.FileInputStream(docxFile).use { stream ->
-                                                    DocumentFileReader.extractTextFromDocx(stream)
-                                                }
-                                            }
-                                            uploadedFileName = docxFile.name
-                                            uploadedFileSize = docxFile.length()
-                                            val cleanBase = DocumentFileReader.cleanTopicFromFilename(docxFile.name)
-                                            if (cleanBase.isNotBlank()) {
-                                                topicName = cleanBase
-                                            }
-                                            autoDelegateAiOnFileUpload = true
-                                            rawInputText = extracted
-                                            Toast.makeText(
-                                                context,
-                                                "تم رفع وتفريغ ملف ${docxFile.name} بنجاح!",
-                                                Toast.LENGTH_SHORT
-                                            ).show()
-                                        }.onFailure {
-                                            isParsing = false
-                                            autoDelegateAiOnFileUpload = false
-                                        }
-                                    }
+                                    launchFileExtraction(Uri.fromFile(docxFile), docxFile.name)
                                 }
                             ) {
                                 Icon(
@@ -506,22 +760,168 @@ fun ExtractorScreen(
 
                                 IconButton(
                                     onClick = {
-                                        uploadedFileName = null
-                                        uploadedFileSize = 0L
-                                        rawInputText = ""
-                                        parseResult = null
+                                        if (viewModel != null) {
+                                            viewModel.clearExtractedFile()
+                                        } else {
+                                            localUploadedFileName = null
+                                            localUploadedFileSize = 0L
+                                            localRawInputText = ""
+                                            localParseResult = null
+                                            localIsAiTranscribed = false
+                                            localExtractionState = ExtractionState.Idle
+                                        }
                                     },
-                                    modifier = Modifier.size(28.dp)
+                                    modifier = Modifier.size(48.dp)
                                 ) {
                                     Icon(
                                         imageVector = Icons.Default.Close,
                                         contentDescription = "إلغاء الملف",
                                         tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        modifier = Modifier.size(16.dp)
+                                        modifier = Modifier.size(18.dp)
                                     )
                                 }
                             }
                         }
+                    }
+                }
+            }
+        }
+
+        // Prominent Arabic Error Alert Card when extractionState is ExtractionState.Error
+        if (extractionState is ExtractionState.Error) {
+            Card(
+                shape = RoundedCornerShape(12.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.errorContainer
+                ),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .border(1.dp, MaterialTheme.colorScheme.error, RoundedCornerShape(12.dp))
+                    .testTag("extractor_error_card")
+            ) {
+                Column(modifier = Modifier.padding(14.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.ErrorOutline,
+                                contentDescription = "تنبيه خطأ",
+                                tint = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.size(22.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = extractionState.message,
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onErrorContainer,
+                                modifier = Modifier.testTag("extractor_error_text")
+                            )
+                        }
+                        IconButton(
+                            onClick = {
+                                if (viewModel != null) {
+                                    viewModel.clearExtractionError()
+                                } else {
+                                    localExtractionState = ExtractionState.Idle
+                                }
+                            },
+                            modifier = Modifier
+                                .size(48.dp)
+                                .testTag("dismiss_error_card_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "إغلاق التنبيه",
+                                tint = MaterialTheme.colorScheme.onErrorContainer
+                            )
+                        }
+                    }
+                    if (extractionState.message == GeminiAiService.MSG_PDF_NEEDS_KEY) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        FilledTonalButton(
+                            onClick = {
+                                if (viewModel != null) {
+                                    viewModel.submitPdfApiKey(currentApiKey)
+                                }
+                                localShowPdfKeyDialog = true
+                            },
+                            modifier = Modifier.testTag("open_pdf_key_dialog_button")
+                        ) {
+                            Icon(imageVector = Icons.Default.Key, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("إدخال مفتاح Gemini الآن", fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+            }
+        }
+
+        // Progress Indicator with «إلغاء» (Cancel) button during Reading or Parsing
+        if (extractionState is ExtractionState.Reading || extractionState is ExtractionState.Parsing) {
+            val statusLabel = when (extractionState) {
+                is ExtractionState.Reading -> "جارٍ قراءة الملف «${extractionState.fileName}»..."
+                is ExtractionState.Parsing -> "جارٍ تحليل الجذاذة وتصنيف الخانات بالذكاء الاصطناعي المدمج..."
+                else -> "جارٍ المعالجة..."
+            }
+            Surface(
+                color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.7f),
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("extractor_loading_indicator")
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 14.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(22.dp),
+                            strokeWidth = 2.5.dp,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Text(
+                            text = statusLabel,
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSecondaryContainer
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
+                    OutlinedButton(
+                        onClick = {
+                            if (viewModel != null) {
+                                viewModel.cancelExtraction()
+                            } else {
+                                localJob?.cancel()
+                                localJob = null
+                                localExtractionState = ExtractionState.Idle
+                            }
+                            Toast.makeText(context, "تم إلغاء عملية القراءة والتفريغ.", Toast.LENGTH_SHORT).show()
+                        },
+                        modifier = Modifier.testTag("cancel_extraction_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = "إلغاء",
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("إلغاء", fontWeight = FontWeight.Bold)
                     }
                 }
             }
@@ -543,8 +943,13 @@ fun ExtractorScreen(
                     onClick = {
                         val clip = clipboardManager.getText()?.text
                         if (!clip.isNullOrBlank()) {
-                            rawInputText = clip
-                            uploadedFileName = null
+                            if (viewModel != null) {
+                                viewModel.updateExtractorRawText(clip, clearUploadedFile = true)
+                            } else {
+                                localRawInputText = clip
+                                localUploadedFileName = null
+                                localIsAiTranscribed = false
+                            }
                             Toast.makeText(context, "تم لصق المحتوى من الحافظة", Toast.LENGTH_SHORT).show()
                         }
                     },
@@ -557,10 +962,20 @@ fun ExtractorScreen(
 
                 OutlinedButton(
                     onClick = {
-                        selectedComponentFilter = PedagogicalComponent.READING
-                        topicName = "أنا والمدينة"
-                        rawInputText = SAMPLE_READING_TEXT
-                        uploadedFileName = null
+                        if (viewModel != null) {
+                            viewModel.updateExtractorRawText(
+                                newText = SAMPLE_READING_TEXT,
+                                newTopic = "أنا والمدينة",
+                                newComponentFilter = PedagogicalComponent.READING,
+                                clearUploadedFile = true
+                            )
+                        } else {
+                            localComponentFilter = PedagogicalComponent.READING
+                            localTopicName = "أنا والمدينة"
+                            localRawInputText = SAMPLE_READING_TEXT
+                            localUploadedFileName = null
+                            localIsAiTranscribed = false
+                        }
                     }
                 ) {
                     Text("مسودة قراءة")
@@ -568,10 +983,20 @@ fun ExtractorScreen(
 
                 OutlinedButton(
                     onClick = {
-                        selectedComponentFilter = PedagogicalComponent.LANGUAGE
-                        topicName = "أسلوب الاختصاص"
-                        rawInputText = SAMPLE_LANGUAGE_TEXT
-                        uploadedFileName = null
+                        if (viewModel != null) {
+                            viewModel.updateExtractorRawText(
+                                newText = SAMPLE_LANGUAGE_TEXT,
+                                newTopic = "أسلوب الاختصاص",
+                                newComponentFilter = PedagogicalComponent.LANGUAGE,
+                                clearUploadedFile = true
+                            )
+                        } else {
+                            localComponentFilter = PedagogicalComponent.LANGUAGE
+                            localTopicName = "أسلوب الاختصاص"
+                            localRawInputText = SAMPLE_LANGUAGE_TEXT
+                            localUploadedFileName = null
+                            localIsAiTranscribed = false
+                        }
                     }
                 ) {
                     Text("مسودة درس لغوي")
@@ -579,10 +1004,20 @@ fun ExtractorScreen(
 
                 OutlinedButton(
                     onClick = {
-                        selectedComponentFilter = PedagogicalComponent.EXPRESSION
-                        topicName = "كتابة حكاية عجيبة"
-                        rawInputText = SAMPLE_EXPRESSION_TEXT
-                        uploadedFileName = null
+                        if (viewModel != null) {
+                            viewModel.updateExtractorRawText(
+                                newText = SAMPLE_EXPRESSION_TEXT,
+                                newTopic = "كتابة حكاية عجيبة",
+                                newComponentFilter = PedagogicalComponent.EXPRESSION,
+                                clearUploadedFile = true
+                            )
+                        } else {
+                            localComponentFilter = PedagogicalComponent.EXPRESSION
+                            localTopicName = "كتابة حكاية عجيبة"
+                            localRawInputText = SAMPLE_EXPRESSION_TEXT
+                            localUploadedFileName = null
+                            localIsAiTranscribed = false
+                        }
                     }
                 ) {
                     Text("مسودة تعبير وإنشاء")
@@ -593,7 +1028,13 @@ fun ExtractorScreen(
         // Inputs
         OutlinedTextField(
             value = topicName,
-            onValueChange = { topicName = it },
+            onValueChange = {
+                if (viewModel != null) {
+                    viewModel.updateExtractorTopic(it)
+                } else {
+                    localTopicName = it
+                }
+            },
             label = { Text("عنوان الدرس / المهارة (اختياري، يمكن استخراجه آليا)") },
             placeholder = { Text("مثال: اسما الزمان والمكان / أنا والمدينة / كتابة حكاية عجيبة...") },
             modifier = Modifier
@@ -604,7 +1045,13 @@ fun ExtractorScreen(
 
         OutlinedTextField(
             value = rawInputText,
-            onValueChange = { rawInputText = it },
+            onValueChange = {
+                if (viewModel != null) {
+                    viewModel.updateExtractorRawText(it)
+                } else {
+                    localRawInputText = it
+                }
+            },
             label = { Text("محتوى الجذاذة المستخرج أو الملصق") },
             placeholder = {
                 Text(
@@ -617,65 +1064,61 @@ fun ExtractorScreen(
                 .testTag("raw_text_input")
         )
 
-        // Loading indicator when parsing in Dispatchers.Default
-        if (isParsing) {
-            Surface(
-                color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.6f),
-                shape = RoundedCornerShape(10.dp),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .testTag("extractor_loading_indicator")
-            ) {
-                Row(
-                    modifier = Modifier.padding(12.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.Center
-                ) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(20.dp),
-                        strokeWidth = 2.5.dp,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                    Spacer(modifier = Modifier.width(10.dp))
-                    Text(
-                        text = "جارٍ تحليل الجذاذة وتصنيف الخانات بالذكاء الاصطناعي المدمج...",
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-            }
-        }
-
         // Extraction Review Card («مراجعة التفريغ») BEFORE applying
         parseResult?.let { currentResult ->
             ExtractionReviewCard(
                 parseResult = currentResult,
+                isAiTranscribed = isAiTranscribed,
                 onDelegateToBuiltInAi = {
-                    coroutineScope.launch {
-                        isParsing = true
-                        val refined = GeminiAiService.classifyAndRefineExtraction(
-                            rawText = rawInputText,
-                            initialResult = currentResult
-                        )
-                        parseResult = refined
-                        isParsing = false
+                    if (viewModel != null) {
+                        viewModel.delegateExtractorToBuiltInAi()
                         Toast.makeText(
                             context,
                             "تم إسناد المهمة إلى الذكاء الاصطناعي المدمج: صُنّفت جميع الأسطر ونُقّحت المراحل بنجاح ✨",
                             Toast.LENGTH_LONG
                         ).show()
+                    } else {
+                        coroutineScope.launch {
+                            localExtractionState = ExtractionState.Parsing
+                            val refined = withContext(Dispatchers.Default) {
+                                GeminiAiService.classifyAndRefineExtraction(
+                                    rawText = rawInputText,
+                                    initialResult = currentResult,
+                                    customKey = currentApiKey
+                                )
+                            }
+                            localParseResult = refined
+                            localExtractionState = ExtractionState.Done(
+                                fileName = uploadedFileName,
+                                extractedText = rawInputText,
+                                isAiTranscribed = isAiTranscribed
+                            )
+                            Toast.makeText(
+                                context,
+                                "تم إسناد المهمة إلى الذكاء الاصطناعي المدمج: صُنّفت جميع الأسطر ونُقّحت المراحل بنجاح ✨",
+                                Toast.LENGTH_LONG
+                            ).show()
+                        }
                     }
                 },
                 onChangeComponentAndReparse = { newComp ->
-                    selectedComponentFilter = newComp
+                    if (viewModel != null) {
+                        viewModel.updateExtractorComponentFilter(newComp)
+                    } else {
+                        localComponentFilter = newComp
+                    }
                 },
                 onAssignUnclassifiedLine = { line, stageKey, field ->
-                    parseResult = JadhadhaParser.assignUnclassifiedLine(
-                        currentResult = currentResult,
-                        line = line,
-                        targetStageKey = stageKey,
-                        targetField = field
-                    )
+                    if (viewModel != null) {
+                        viewModel.assignExtractorUnclassifiedLine(line, stageKey, field)
+                    } else {
+                        localParseResult = JadhadhaParser.assignUnclassifiedLine(
+                            currentResult = currentResult,
+                            line = line,
+                            targetStageKey = stageKey,
+                            targetField = field
+                        )
+                    }
                     Toast.makeText(
                         context,
                         "تم إسناد السطر (${line.lineNumber}) إلى الخانة المختارة بنجاح (المصدر: من الملف ✓)",
@@ -683,7 +1126,11 @@ fun ExtractorScreen(
                     ).show()
                 },
                 onIgnoreUnclassifiedLine = { line ->
-                    parseResult = JadhadhaParser.ignoreUnclassifiedLine(currentResult, line)
+                    if (viewModel != null) {
+                        viewModel.ignoreExtractorUnclassifiedLine(line)
+                    } else {
+                        localParseResult = JadhadhaParser.ignoreUnclassifiedLine(currentResult, line)
+                    }
                 }
             )
         }
@@ -695,7 +1142,7 @@ fun ExtractorScreen(
                     onApplyExtractedPlan(rawInputText, topicName, selectedComponentFilter, parseResult)
                 }
             },
-            enabled = rawInputText.isNotBlank() && !isParsing,
+            enabled = rawInputText.isNotBlank() && !isBusy,
             modifier = Modifier
                 .fillMaxWidth()
                 .height(52.dp)
@@ -719,6 +1166,7 @@ fun ExtractorScreen(
 @Composable
 fun ExtractionReviewCard(
     parseResult: ParseResult,
+    isAiTranscribed: Boolean = false,
     onDelegateToBuiltInAi: () -> Unit,
     onChangeComponentAndReparse: (PedagogicalComponent) -> Unit,
     onAssignUnclassifiedLine: (UnclassifiedLine, stageKey: String, field: String) -> Unit,
@@ -773,6 +1221,37 @@ fun ExtractionReviewCard(
                         fontWeight = FontWeight.Bold,
                         modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
                     )
+                }
+            }
+
+            // AI PDF Transcription Notice Banner: «فُرِّغ هذا الملف بالذكاء الاصطناعي، راجع النص»
+            if (isAiTranscribed) {
+                Surface(
+                    color = Color(0xFFFEF3C7),
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .border(1.dp, Color(0xFFD97706), RoundedCornerShape(10.dp))
+                        .testTag("ai_transcribed_review_notice")
+                ) {
+                    Row(
+                        modifier = Modifier.padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.WarningAmber,
+                            contentDescription = null,
+                            tint = Color(0xFFB45309),
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "فُرِّغ هذا الملف بالذكاء الاصطناعي، راجع النص",
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFF92400E)
+                        )
+                    }
                 }
             }
 

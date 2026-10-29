@@ -26,13 +26,17 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Article
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Book
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.FileDownload
+import androidx.compose.material.icons.filled.FontDownload
 import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.TableChart
 import androidx.compose.material.icons.filled.Widgets
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -84,6 +88,7 @@ import com.example.ui.screens.ModelEditorScreen
 import com.example.ui.screens.PythonToolkitScreen
 import com.example.ui.screens.QuickToolsModalSheet
 import com.example.ui.screens.SamplesScreen
+import com.example.ui.theme.AppUiFont
 import com.example.ui.theme.MyApplicationTheme
 import kotlinx.coroutines.launch
 
@@ -105,7 +110,10 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             val uiState by viewModel.uiState.collectAsState()
-            MyApplicationTheme(darkTheme = uiState.isDarkMode) {
+            MyApplicationTheme(
+                darkTheme = uiState.isDarkMode,
+                appFont = uiState.appUiFont
+            ) {
                 CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Rtl) {
                     JadhadhaMainApp(viewModel = viewModel)
                 }
@@ -121,6 +129,7 @@ fun JadhadhaMainApp(viewModel: JadhadhaViewModel) {
     val snackbarHostState = remember { SnackbarHostState() }
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var showToolsSheet by remember { mutableStateOf(false) }
+    var showAppFontMenu by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
 
@@ -190,6 +199,53 @@ fun JadhadhaMainApp(viewModel: JadhadhaViewModel) {
                         }
                     },
                     actions = {
+                        // App UI Font Switcher (changes application interface font only, not Jadhadha .docx files)
+                        Box {
+                            IconButton(
+                                onClick = { showAppFontMenu = true },
+                                modifier = Modifier.testTag("action_app_font_selector")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.FontDownload,
+                                    contentDescription = "تغيير خط واجهة التطبيق (${uiState.appUiFont.shortLabel})",
+                                    tint = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                            DropdownMenu(
+                                expanded = showAppFontMenu,
+                                onDismissRequest = { showAppFontMenu = false }
+                            ) {
+                                AppUiFont.entries.forEach { fontOption ->
+                                    val isSelected = uiState.appUiFont == fontOption
+                                    DropdownMenuItem(
+                                        text = {
+                                            Text(
+                                                text = fontOption.label,
+                                                fontFamily = fontOption.headingFamily,
+                                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                                                color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                                            )
+                                        },
+                                        trailingIcon = if (isSelected) {
+                                            {
+                                                Icon(
+                                                    imageVector = Icons.Default.Check,
+                                                    contentDescription = null,
+                                                    tint = MaterialTheme.colorScheme.primary,
+                                                    modifier = Modifier.size(18.dp)
+                                                )
+                                            }
+                                        } else null,
+                                        onClick = {
+                                            showAppFontMenu = false
+                                            viewModel.setAppUiFont(fontOption)
+                                        },
+                                        modifier = Modifier.testTag("app_font_option_${fontOption.name.lowercase()}")
+                                    )
+                                }
+                            }
+                        }
+
                         // Night / Day Mode Toggle
                         IconButton(
                             onClick = { viewModel.toggleTheme() },
@@ -408,7 +464,8 @@ fun JadhadhaMainApp(viewModel: JadhadhaViewModel) {
                         initialComponent = uiState.activeComponent,
                         onApplyExtractedPlan = { raw, topic, comp, preParsed ->
                             viewModel.parseAndApplyText(raw, topic, comp, preParsed)
-                        }
+                        },
+                        viewModel = viewModel
                     )
 
                     AppTab.AI_GENERATOR -> AiGeneratorScreen(
