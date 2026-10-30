@@ -840,6 +840,73 @@ class ExampleRobolectricTest {
         assertEquals(8f, padding.calculateTopPadding().value, 0.01f)
         assertEquals(8f, padding.calculateBottomPadding().value, 0.01f)
     }
+
+    @Test
+    fun `test DocxGenerator bidiVisual bidi column widths 15-35-35-15 and F3F4F6 header shading`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val file = DocxGenerator.generateDocx(context, SamplePlans.MANFA_PLAN, saveToDownloads = false)
+        val docXml = ZipFile(file).use { zip ->
+            zip.getInputStream(zip.getEntry("word/document.xml")).bufferedReader().readText()
+        }
+
+        // Verify <w:bidiVisual/> inside <w:tblPr>, <w:bidi/> inside <w:pPr> and <w:rPr>
+        assertTrue(docXml.contains("<w:bidiVisual/>"))
+        assertTrue(docXml.contains("<w:bidi/>"))
+        assertTrue(docXml.contains("<w:pPr>\n              <w:bidi/>"))
+        assertTrue(docXml.contains("<w:bidi/>\n                <w:rtl/>"))
+
+        // Verify 15% / 35% / 35% / 15% column widths (1666, 3887, 3887, 1666 dxa = 11106 dxa)
+        assertTrue(docXml.contains("<w:gridCol w:w=\"1666\"/>"))
+        assertTrue(docXml.contains("<w:gridCol w:w=\"3887\"/>"))
+
+        // Verify header background #F3F4F6 and black text #000000
+        assertTrue(docXml.contains("w:fill=\"F3F4F6\""))
+        assertTrue(docXml.contains("<w:color w:val=\"000000\"/>"))
+    }
+
+    @Test
+    fun `test JadhadhaParser extracts table columns accurately in both RTL and LTR directions`() {
+        val rtlTable = """
+            المكون: النصوص القرائية
+            الموضوع: حب الوطن
+            المراحل | أنشطة الأستاذ | أنشطة المتعلم | التقويم
+            تشخيص المكتسبات | يطرح أسئلة تمهيدية حول الوطن | يستحضر المتعلم مكتسباته السابقة | تقويم تشخيصي للمكتسبات
+            ملاحظة النص | يوجه المتعلمين لملاحظة العنوان | يصوغ المتعلم فرضيات القراءة | فحص وجاهة الفرضيات
+        """.trimIndent()
+
+        val ltrTable = """
+            المكون: النصوص القرائية
+            الموضوع: حب الوطن
+            التقويم | أنشطة المتعلم | أنشطة الأستاذ | المراحل
+            تقويم تشخيصي للمكتسبات | يستحضر المتعلم مكتسباته السابقة | يطرح أسئلة تمهيدية حول الوطن | تشخيص المكتسبات
+            فحص وجاهة الفرضيات | يصوغ المتعلم فرضيات القراءة | يوجه المتعلمين لملاحظة العنوان | ملاحظة النص
+        """.trimIndent()
+
+        val rtlPlan = com.example.extractor.JadhadhaParser.parseRawText(rtlTable, "حب الوطن")
+        val ltrPlan = com.example.extractor.JadhadhaParser.parseRawText(ltrTable, "حب الوطن")
+
+        assertEquals(rtlPlan.stages["diagnostic"]?.teacher, ltrPlan.stages["diagnostic"]?.teacher)
+        assertEquals(rtlPlan.stages["diagnostic"]?.content, ltrPlan.stages["diagnostic"]?.content)
+        assertEquals(rtlPlan.stages["diagnostic"]?.eval, ltrPlan.stages["diagnostic"]?.eval)
+        assertTrue(ltrPlan.stages["diagnostic"]?.teacher?.any { it.contains("يطرح أسئلة تمهيدية") } == true)
+        assertTrue(ltrPlan.stages["diagnostic"]?.content?.any { it.contains("يستحضر المتعلم") } == true)
+        assertTrue(ltrPlan.stages["diagnostic"]?.eval?.any { it.contains("تقويم تشخيصي") } == true)
+    }
+
+    @Test
+    fun `test GeminiAiService saves and retrieves API key in SharedPreferences`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        com.example.ai.GeminiAiService.clearSavedApiKey(context)
+        assertEquals("", com.example.ai.GeminiAiService.getSavedApiKey(context))
+
+        com.example.ai.GeminiAiService.saveApiKey(context, "AIzaSyTestKey12345")
+        assertEquals("AIzaSyTestKey12345", com.example.ai.GeminiAiService.getSavedApiKey(context))
+        assertEquals("AIzaSyTestKey12345", com.example.ai.GeminiAiService.getEffectiveApiKey(null))
+
+        com.example.ai.GeminiAiService.clearSavedApiKey(context)
+        assertEquals("", com.example.ai.GeminiAiService.getSavedApiKey(context))
+    }
 }
+
 
 

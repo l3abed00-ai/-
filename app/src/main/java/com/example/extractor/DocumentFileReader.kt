@@ -1391,15 +1391,18 @@ object DocumentFileReader {
         val combinedActivities = mutableListOf<String>()
         combinedActivities.addAll(teacherLines)
         combinedActivities.addAll(genericActLines)
-        // Include learner activities cleanly under teacher/didactic activities so they are never lost or unclassified
-        combinedActivities.addAll(learnerLines)
+        if (contentLines.isNotEmpty()) {
+            // When a separate content column exists, include learner activities under teacher/didactic activities
+            combinedActivities.addAll(learnerLines)
+        }
         if (combinedActivities.isNotEmpty()) {
             result.add("أنشطة المدرس:")
             combinedActivities.forEach { result.add(it) }
         }
-        if (contentLines.isNotEmpty()) {
+        val effectiveContentLines = if (contentLines.isNotEmpty()) contentLines else learnerLines
+        if (effectiveContentLines.isNotEmpty()) {
             result.add("المحتوى الديداكتيكي:")
-            contentLines.forEach { result.add(it) }
+            effectiveContentLines.forEach { result.add(it) }
         }
         if (evalLines.isNotEmpty()) {
             result.add("التقويم والدعم:")

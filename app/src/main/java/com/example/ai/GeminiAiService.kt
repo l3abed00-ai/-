@@ -1,5 +1,6 @@
 package com.example.ai
 
+import android.content.Context
 import android.util.Base64
 import com.example.BuildConfig
 import com.example.extractor.DocumentFileReader
@@ -40,11 +41,49 @@ object GeminiAiService {
     private val API_MODELS = listOf("gemini-3.8-flash", "gemini-2.5-flash", "gemini-2.0-flash")
     const val MAX_PDF_INLINE_BYTES = 10 * 1024 * 1024 // 10 MB
     const val MSG_PDF_NEEDS_KEY = "تفريغ PDF يحتاج مفتاح Gemini؛ أدخله أو حوّل الملف إلى docx"
+    const val PREFS_NAME = "jadhadha_gemini_prefs"
+    const val PREF_KEY_GEMINI_API_KEY = "gemini_api_key"
+
+    @Volatile
+    private var cachedSavedApiKey: String = ""
+
+    fun saveApiKey(context: Context, apiKey: String) {
+        val trimmed = apiKey.trim()
+        cachedSavedApiKey = trimmed
+        context.applicationContext
+            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putString(PREF_KEY_GEMINI_API_KEY, trimmed)
+            .apply()
+    }
+
+    fun getSavedApiKey(context: Context): String {
+        val saved = context.applicationContext
+            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getString(PREF_KEY_GEMINI_API_KEY, "")
+            ?.trim()
+            .orEmpty()
+        cachedSavedApiKey = saved
+        return saved
+    }
+
+    fun clearSavedApiKey(context: Context) {
+        cachedSavedApiKey = ""
+        context.applicationContext
+            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .remove(PREF_KEY_GEMINI_API_KEY)
+            .apply()
+    }
 
     fun getEffectiveApiKey(customKey: String?): String {
         val trimmedCustom = customKey?.trim().orEmpty()
         if (trimmedCustom.isNotBlank() && !trimmedCustom.equals("MY_GEMINI_API_KEY", ignoreCase = true)) {
             return trimmedCustom
+        }
+        val saved = cachedSavedApiKey.trim()
+        if (saved.isNotBlank() && !saved.equals("MY_GEMINI_API_KEY", ignoreCase = true)) {
+            return saved
         }
         val buildConfigKey = runCatching { BuildConfig.GEMINI_API_KEY }.getOrDefault("")
         if (buildConfigKey.isNotBlank() && !buildConfigKey.equals("MY_GEMINI_API_KEY", ignoreCase = true)) {

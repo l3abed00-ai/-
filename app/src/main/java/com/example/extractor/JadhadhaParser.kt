@@ -530,55 +530,179 @@ object JadhadhaParser {
      */
     private fun preprocessTabularText(raw: String): String {
         val rawLines = raw.lines()
-        val tabLinesCount = rawLines.count { it.count { ch -> ch == '\t' } >= 3 }
-        if (tabLinesCount < 2) return raw
+        val tabLinesCount = rawLines.count { it.count { ch -> ch == '\t' } >= 2 }
+        val pipeLinesCount = rawLines.count { line ->
+            val trimmed = line.trim()
+            !trimmed.startsWith("[جدول:") && trimmed.count { ch -> ch == '|' } >= 2
+        }
+        if (tabLinesCount < 2 && pipeLinesCount < 2) return raw
 
+        val delimiter = if (tabLinesCount >= 2) '\t' else '|'
         val sb = StringBuilder()
+
+        // Active column role mapping by column index: "stage", "abil", "teacher", "content", "eval"
+        var colRoleMap: Map<Int, String>? = null
+
         for (line in rawLines) {
-            val cols = line.split('\t').map { it.trim() }
-            if (cols.size >= 4) {
-                if (cols[0].contains("المقاطع") || cols[0].contains("المراحل")) {
+            val trimmedLine = line.trim()
+            if (trimmedLine.startsWith("[جدول:")) {
+                sb.appendLine(line)
+                continue
+            }
+
+            val rawCols = if (delimiter == '|') {
+                trimmedLine.removePrefix("|").removeSuffix("|").split('|').map { it.trim() }
+            } else {
+                line.split('\t').map { it.trim() }
+            }
+
+            if (rawCols.size >= 3) {
+                // Skip markdown table separator rows like |---|---|---|
+                if (rawCols.all { col -> col.isEmpty() || col.all { ch -> ch == '-' || ch == ':' || ch == ' ' } }) {
                     continue
                 }
-                if (cols[0].isNotBlank()) {
-                    sb.appendLine("[مرحلة: ${cols[0]}]")
+
+                // Check if this row is a table header row by matching column header titles in any order (RTL or LTR)
+                val detectedHeaderMap = matchHeaderColumns(rawCols)
+                if (detectedHeaderMap.size >= 2 && detectedHeaderMap.containsValue("stage")) {
+                    colRoleMap = detectedHeaderMap
+                    continue
                 }
-                if (cols.size >= 5) {
-                    if (cols[1].isNotBlank()) {
-                        sb.appendLine("القدرات المستهدفة:")
-                        sb.appendLine(cols[1])
-                    }
-                    if (cols[2].isNotBlank()) {
-                        sb.appendLine("أنشطة المدرس:")
-                        sb.appendLine(cols[2])
-                    }
-                    if (cols[3].isNotBlank()) {
-                        sb.appendLine("المحتوى الديداكتيكي:")
-                        sb.appendLine(cols[3])
-                    }
-                    if (cols[4].isNotBlank()) {
-                        sb.appendLine("التقويم والدعم:")
-                        sb.appendLine(cols[4])
-                    }
-                } else {
-                    if (cols[1].isNotBlank()) {
-                        sb.appendLine("القدرات المستهدفة:")
-                        sb.appendLine(cols[1])
-                    }
-                    if (cols[2].isNotBlank()) {
-                        sb.appendLine("المحتوى الديداكتيكي:")
-                        sb.appendLine(cols[2])
-                    }
-                    if (cols[3].isNotBlank()) {
-                        sb.appendLine("التقويم والدعم:")
-                        sb.appendLine(cols[3])
+
+                val effectiveMap = colRoleMap ?: inferFallbackColumnMap(rawCols)
+                val stageIdx = effectiveMap.entries.firstOrNull { it.value == "stage" }?.key
+                val abilIdx = effectiveMap.entries.firstOrNull { it.value == "abil" }?.key
+                val teacherIdx = effectiveMap.entries.firstOrNull { it.value == "teacher" }?.key
+                val contentIdx = effectiveMap.entries.firstOrNull { it.value == "content" }?.key
+                val evalIdx = effectiveMap.entries.firstOrNull { it.value == "eval" }?.key
+
+                fun appendCellLines(headerLabel: String, rawCellText: String) {
+                    if (rawCellText.isBlank()) return
+                    sb.appendLine(headerLabel)
+                    rawCellText.lines().map { it.trim() }.filter { it.isNotEmpty() }.forEach { cellLine ->
+                        val formatted = if (
+                            cellLine.startsWith("-") ||
+                            cellLine.startsWith("+") ||
+                            cellLine.startsWith("•") ||
+                            cellLine.startsWith("*") ||
+                            cellLine.startsWith("<u>") ||
+                            cellLine.startsWith("[جدول:")
+                        ) {
+                            cellLine
+                        } else {
+                            "- $cellLine"
+                        }
+                        sb.appendLine(formatted)
                     }
                 }
+
+                val stageVal = stageIdx?.let { rawCols.getOrNull(it) }.orEmpty()
+                if (stageVal.isNotBlank()) {
+                    sb.appendLine("[مرحلة: $stageVal]")
+                }
+                appendCellLines("القدرات المستهدفة:", abilIdx?.let { rawCols.getOrNull(it) }.orEmpty())
+                appendCellLines("أنشطة الأستاذ:", teacherIdx?.let { rawCols.getOrNull(it) }.orEmpty())
+                appendCellLines("أنشطة المتعلم:", contentIdx?.let { rawCols.getOrNull(it) }.orEmpty())
+                appendCellLines("التقويم:", evalIdx?.let { rawCols.getOrNull(it) }.orEmpty())
             } else {
                 sb.appendLine(line)
             }
         }
         return sb.toString()
+    }
+
+    /**
+     * Matches column header titles ("المراحل", "أنشطة الأستاذ", "أنشطة المتعلم", "التقويم", "القدرات المستهدفة")
+     * regardless of whether the table direction is RTL or LTR.
+     */
+    internal fun matchHeaderColumns(cols: List<String>): Map<Int, String> {
+        val result = mutableMapOf<Int, String>()
+        val assignedRoles = mutableSetOf<String>()
+
+        for ((idx, rawHeader) in cols.withIndex()) {
+            val norm = normalizeHeaderToken(rawHeader)
+            if (norm.isEmpty()) continue
+            val role = when {
+                "stage" !in assignedRoles && (
+                    norm.contains("المراحل") || norm.contains("مراحل") ||
+                        norm.contains("المقاطع") || norm.contains("مقاطع") ||
+                        norm.contains("الخطوات") || norm.contains("المهارات")
+                    ) -> "stage"
+
+                "eval" !in assignedRoles && (
+                    norm.contains("التقويم") || norm.contains("تقويم") ||
+                        norm.contains("الدعم") || norm.contains("مؤشرات")
+                    ) -> "eval"
+
+                "teacher" !in assignedRoles && (
+                    norm.contains("الاستاذ") || norm.contains("المدرس") ||
+                        norm.contains("التعليميه")
+                    ) -> "teacher"
+
+                "content" !in assignedRoles && (
+                    norm.contains("المتعلم") || norm.contains("التلميذ") ||
+                        norm.contains("المحتوي") || norm.contains("محتوي") ||
+                        norm.contains("التعلميه") || norm.contains("التعلمات") ||
+                        norm.contains("المضامين")
+                    ) -> "content"
+
+                "abil" !in assignedRoles && (
+                    norm.contains("القدرات") || norm.contains("الكفايات") ||
+                        norm.contains("الاهداف")
+                    ) -> "abil"
+
+                else -> null
+            }
+            if (role != null) {
+                result[idx] = role
+                assignedRoles.add(role)
+            }
+        }
+        return result
+    }
+
+    private fun inferFallbackColumnMap(cols: List<String>): Map<Int, String> {
+        val n = cols.size
+        if (n < 3) return emptyMap()
+        // Check if last column is a stage name (LTR table without explicit header row)
+        val firstLooksLikeStage = looksLikeStageCell(cols.first())
+        val lastLooksLikeStage = looksLikeStageCell(cols.last())
+        val isLtr = lastLooksLikeStage && !firstLooksLikeStage
+
+        return if (!isLtr) {
+            when {
+                n >= 5 -> mapOf(0 to "stage", 1 to "abil", 2 to "teacher", 3 to "content", 4 to "eval")
+                n == 4 -> mapOf(0 to "stage", 1 to "teacher", 2 to "content", 3 to "eval")
+                else -> mapOf(0 to "stage", 1 to "content", 2 to "eval")
+            }
+        } else {
+            when {
+                n >= 5 -> mapOf(n - 1 to "stage", n - 2 to "abil", n - 3 to "teacher", n - 4 to "content", 0 to "eval")
+                n == 4 -> mapOf(3 to "stage", 2 to "teacher", 1 to "content", 0 to "eval")
+                else -> mapOf(2 to "stage", 1 to "content", 0 to "eval")
+            }
+        }
+    }
+
+    private fun looksLikeStageCell(text: String): Boolean {
+        val norm = normalizeHeaderToken(text)
+        if (norm.isEmpty() || norm.length > 45) return false
+        return norm.contains("تشخيص") || norm.contains("تمهيد") ||
+            norm.contains("ملاحظه") || norm.contains("تاطير") ||
+            norm.contains("فهم") || norm.contains("تحليل") ||
+            norm.contains("تركيب") || norm.contains("استثمار") ||
+            norm.contains("استنتاج") || norm.contains("تطبيق") ||
+            norm.contains("اكتساب") || norm.contains("انتاج") ||
+            norm.contains("تصحيح")
+    }
+
+    private fun normalizeHeaderToken(s: String): String {
+        return s.replace(Regex("[\u0640\u064B-\u065F\u0670]"), "")
+            .replace(Regex("[أإآٱ]"), "ا")
+            .replace("ى", "ي")
+            .replace("ة", "ه")
+            .replace(Regex("[^\\w\\p{L}]+"), " ")
+            .trim()
     }
 
     private fun isStrictHeaderPrefix(s: String): Boolean {
@@ -603,8 +727,11 @@ object JadhadhaParser {
     }
 
     private fun isTableHeaderLine(s: String): Boolean {
-        return s == "المقاطع والمراحل" ||
-                (s.contains("المقاطع والمراحل") && s.contains("القدرات المستهدفة"))
+        val norm = normalizeHeaderToken(s)
+        val hasStage = norm.contains("المراحل") || norm.contains("المقاطع")
+        val hasOtherCol = norm.contains("القدرات") || norm.contains("الاستاذ") ||
+            norm.contains("المتعلم") || norm.contains("التقويم")
+        return s == "المقاطع والمراحل" || s == "المراحل" || (hasStage && hasOtherCol)
     }
 
     private fun addClassifiedItem(

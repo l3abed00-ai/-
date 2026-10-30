@@ -498,7 +498,9 @@ fun JadhadhaMainApp(viewModel: JadhadhaViewModel) {
                 onSelectTab = { tab ->
                     showToolsSheet = false
                     viewModel.selectTab(tab)
-                }
+                },
+                currentApiKey = uiState.customApiKey,
+                onSaveApiKey = { viewModel.setApiKey(it) }
             )
         }
     }

@@ -24,10 +24,10 @@ object DocxGenerator {
     const val FONT_NAME = "Sakkal Majalla"
     const val FONT_SIZE_HALF_PT = 20 // 10pt (20 half-points) as in Model Jadhadha
     private const val FONT_TITLE_SIZE = 22 // 11pt bold for main lesson title
-    private const val HEADER_BG_HEX = "D9E2F3" // Model Jadhadha soft blue-grey header shading
-    private const val STAGE_BG_HEX = "F2F4F8"
-    private const val ACCENT_BG_HEX = "E2EFDA" // Model Jadhadha soft green accent shading
-    private const val TABLE_HEADER_BG_HEX = "1F4E79" // Official deep navy-emerald table header
+    const val HEADER_BG_HEX = "F3F4F6" // Very light grey header shading (#F3F4F6) for clear printing
+    private const val STAGE_BG_HEX = "F3F4F6"
+    private const val ACCENT_BG_HEX = "F3F4F6"
+    const val TABLE_HEADER_BG_HEX = "F3F4F6" // Very light grey table header (#F3F4F6) with black text
     private const val BORDER_COLOR_HEX = "2F5597"
     const val DOCX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
@@ -297,6 +297,7 @@ object DocxGenerator {
         <w:bCs/>
         <w:sz w:val="$FONT_SIZE_HALF_PT"/>
         <w:szCs w:val="$FONT_SIZE_HALF_PT"/>
+        <w:bidi/>
         <w:rtl/>
       </w:rPr>
     </w:rPrDefault>
@@ -434,9 +435,10 @@ object DocxGenerator {
     }
 
     private fun appendStagesTable(sb: StringBuilder, plan: JadhadhaPlan) {
-        // Table columns in RTL visual order:
-        // المقاطع/المراحل | القدرات المستهدفة | أنشطة المدرس والمتعلم | المحتوى الديداكتيكي | التقويم والدعم
-        val colWidths = listOf(1400, 1700, 2600, 3806, 1600) // Total: 11106 dxa
+        // Table columns in RTL visual order (<w:bidiVisual/> places column 0 on far right and column 3 on far left):
+        // المراحل (15%) | أنشطة الأستاذ (35%) | أنشطة المتعلم (35%) | التقويم (15%)
+        // 15% = 1666 dxa, 35% = 3887 dxa, 35% = 3887 dxa, 15% = 1666 dxa (Total: 11106 dxa)
+        val colWidths = listOf(1666, 3887, 3887, 1666)
 
         val borders = """<w:tblBorders>
       <w:top w:val="single" w:sz="8" w:space="0" w:color="$BORDER_COLOR_HEX"/>
@@ -460,14 +462,13 @@ object DocxGenerator {
         colWidths.forEach { w -> sb.append("        <w:gridCol w:w=\"$w\"/>\n") }
         sb.append("      </w:tblGrid>\n")
 
-        // Table Header Row (Model Jadhadha header styling)
+        // Table Header Row (Very light grey #F3F4F6 with black text #000000 for print clarity)
         sb.append("      <w:tr>\n")
         val headers = listOf(
-            "المراحل والمقاطع",
-            "القدرات المستهدفة",
-            "أنشطة المدرس والمتعلم",
-            "المحتوى الديداكتيكي",
-            "التقويم والدعم"
+            "المراحل",
+            "أنشطة الأستاذ",
+            "أنشطة المتعلم",
+            "التقويم"
         )
         headers.forEachIndexed { idx, h ->
             appendCell(
@@ -475,7 +476,7 @@ object DocxGenerator {
                 h,
                 colWidths[idx],
                 bgHex = TABLE_HEADER_BG_HEX,
-                textColorHex = "FFFFFF",
+                textColorHex = "000000",
                 bold = true,
                 isCenter = true
             )
@@ -533,7 +534,7 @@ object DocxGenerator {
         sb.append("        <w:tc>\n")
         sb.append("          <w:tcPr>\n")
         sb.append("            <w:tcW w:w=\"11106\" w:type=\"dxa\"/>\n")
-        sb.append("            <w:gridSpan w:val=\"5\"/>\n")
+        sb.append("            <w:gridSpan w:val=\"4\"/>\n")
         sb.append("            <w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"$HEADER_BG_HEX\"/>\n")
         sb.append("          </w:tcPr>\n")
         sb.append("          <w:p>\n")
@@ -549,8 +550,9 @@ object DocxGenerator {
         sb.append("              <w:rPr>\n")
         sb.append("                <w:rFonts w:ascii=\"$FONT_NAME\" w:hAnsi=\"$FONT_NAME\" w:cs=\"$FONT_NAME\"/>\n")
         sb.append("                <w:b/><w:bCs/>\n")
-        sb.append("                <w:color w:val=\"1F4E79\"/>\n")
+        sb.append("                <w:color w:val=\"000000\"/>\n")
         sb.append("                <w:sz w:val=\"20\"/><w:szCs w:val=\"20\"/>\n")
+        sb.append("                <w:bidi/>\n")
         sb.append("                <w:rtl/>\n")
         sb.append("              </w:rPr>\n")
         sb.append("              <w:t>${escapeXml(title)}</w:t>\n")
@@ -567,23 +569,30 @@ object DocxGenerator {
 
         sb.append("      <w:tr>\n")
 
-        // 1. Stage Name (Centered, Sakkal Majalla 10pt bold, soft stage shading)
-        appendCell(sb, stageTitle, widths[0], bgHex = STAGE_BG_HEX, bold = true, isCenter = true)
+        // 1. المراحل (15%, far right)
+        appendCell(sb, stageTitle, widths[0], bgHex = STAGE_BG_HEX, textColorHex = "000000", bold = true, isCenter = true)
 
-        // 2. Abilities (prefixed with - , Sakkal Majalla 10pt bold, centered as in Model Jadhadha)
-        val abilItems = data.abil.map { formatItem(it, "- ") }
-        appendCellWithLines(sb, abilItems, widths[1], isCenter = true)
+        // 2. أنشطة الأستاذ (35%, includes target abilities + teacher activities)
+        val teacherLines = buildList {
+            if (data.abil.isNotEmpty()) {
+                add("القدرات المستهدفة:")
+                addAll(data.abil.map { formatItem(it, "- ") })
+            }
+            if (data.teacher.isNotEmpty()) {
+                if (data.abil.isNotEmpty()) {
+                    add("أنشطة الأستاذ:")
+                }
+                addAll(data.teacher.map { formatItem(it, "+ ") })
+            }
+        }
+        appendCellWithLines(sb, teacherLines, widths[1], isCenter = true)
 
-        // 3. Teacher & Learner Activities (prefixed with + , underlined sub-label if present)
-        val teacherItems = data.teacher.map { formatItem(it, "+ ") }
-        appendCellWithLines(sb, teacherItems, widths[2], isCenter = true)
+        // 3. أنشطة المتعلم (35%, supports underlined labels AND nested [جدول: ...] analytical tables)
+        appendContentCell(sb, data.content, widths[2])
 
-        // 4. Content (supports underlined labels AND nested [جدول: ...] analytical tables!)
-        appendContentCell(sb, data.content, widths[3])
-
-        // 5. Evaluation (prefixed with + , Sakkal Majalla 10pt bold, centered)
+        // 4. التقويم (15%, far left)
         val evalItems = data.eval.map { formatItem(it, "+ ") }
-        appendCellWithLines(sb, evalItems, widths[4], isCenter = true)
+        appendCellWithLines(sb, evalItems, widths[3], isCenter = true)
 
         sb.append("      </w:tr>\n")
     }
@@ -775,8 +784,9 @@ object DocxGenerator {
             sb.append("              <w:rPr>\n")
             sb.append("                <w:rFonts w:ascii=\"$FONT_NAME\" w:hAnsi=\"$FONT_NAME\" w:cs=\"$FONT_NAME\"/>\n")
             if (bold) sb.append("                <w:b/><w:bCs/>\n")
-            if (textColorHex != "000000") sb.append("                <w:color w:val=\"$textColorHex\"/>\n")
+            sb.append("                <w:color w:val=\"$textColorHex\"/>\n")
             sb.append("                <w:sz w:val=\"$sz\"/><w:szCs w:val=\"$sz\"/>\n")
+            sb.append("                <w:bidi/>\n")
             sb.append("                <w:rtl/>\n")
             sb.append("              </w:rPr>\n")
             sb.append("              <w:t xml:space=\"preserve\">${escapeXml(text)}</w:t>\n")
@@ -803,7 +813,9 @@ object DocxGenerator {
         sb.append("                <w:rFonts w:ascii=\"$FONT_NAME\" w:hAnsi=\"$FONT_NAME\" w:cs=\"$FONT_NAME\"/>\n")
         sb.append("                <w:b/><w:bCs/>\n")
         sb.append("                <w:u w:val=\"single\"/>\n")
+        sb.append("                <w:color w:val=\"000000\"/>\n")
         sb.append("                <w:sz w:val=\"$FONT_SIZE_HALF_PT\"/><w:szCs w:val=\"$FONT_SIZE_HALF_PT\"/>\n")
+        sb.append("                <w:bidi/>\n")
         sb.append("                <w:rtl/>\n")
         sb.append("              </w:rPr>\n")
         sb.append("              <w:t xml:space=\"preserve\">${escapeXml(label)} </w:t>\n")
@@ -813,7 +825,9 @@ object DocxGenerator {
             sb.append("              <w:rPr>\n")
             sb.append("                <w:rFonts w:ascii=\"$FONT_NAME\" w:hAnsi=\"$FONT_NAME\" w:cs=\"$FONT_NAME\"/>\n")
             sb.append("                <w:b/><w:bCs/>\n")
+            sb.append("                <w:color w:val=\"000000\"/>\n")
             sb.append("                <w:sz w:val=\"$FONT_SIZE_HALF_PT\"/><w:szCs w:val=\"$FONT_SIZE_HALF_PT\"/>\n")
+            sb.append("                <w:bidi/>\n")
             sb.append("                <w:rtl/>\n")
             sb.append("              </w:rPr>\n")
             sb.append("              <w:t xml:space=\"preserve\">${escapeXml(rest)}</w:t>\n")

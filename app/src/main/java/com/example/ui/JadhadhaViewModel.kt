@@ -150,6 +150,10 @@ class JadhadhaViewModel(
     private var reparseJob: Job? = null
 
     init {
+        val persistedKey = GeminiAiService.getSavedApiKey(application)
+        if (persistedKey.isNotBlank()) {
+            _uiState.value = _uiState.value.copy(customApiKey = persistedKey)
+        }
         viewModelScope.launch {
             repository.prepopulateSamplesIfEmpty()
         }
@@ -509,6 +513,7 @@ class JadhadhaViewModel(
 
     fun submitPdfApiKey(key: String) {
         val trimmed = key.trim()
+        GeminiAiService.saveApiKey(getApplication(), trimmed)
         val hasPendingPdf = _uiState.value.pendingPdfBytes != null
         val isValid = GeminiAiService.hasValidApiKey(trimmed)
         _uiState.value = _uiState.value.copy(
@@ -877,8 +882,10 @@ class JadhadhaViewModel(
     }
 
     fun setApiKey(key: String) {
+        val trimmed = key.trim()
+        GeminiAiService.saveApiKey(getApplication(), trimmed)
         _uiState.value = _uiState.value.copy(
-            customApiKey = key.trim(),
+            customApiKey = trimmed,
             successMessage = "تم حفظ مفتاح ${ltr("Gemini")} بنجاح."
         )
     }
