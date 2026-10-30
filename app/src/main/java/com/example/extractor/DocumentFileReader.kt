@@ -542,7 +542,15 @@ object DocumentFileReader {
             }
         }
 
-        return decoded
+        return stripFormattingTags(decoded)
+    }
+
+    /**
+     * Strips all HTML/XML formatting tags such as <u>, </u>, <b>, </b> from extracted text.
+     */
+    internal fun stripFormattingTags(text: String): String {
+        if (!text.contains('<')) return text
+        return text.replace(Regex("</?(?:u|b|i|strong|em)\\b[^>]*>", RegexOption.IGNORE_CASE), "")
     }
 
     /**
@@ -571,6 +579,8 @@ object DocumentFileReader {
 
     private class RowBuilder {
         val cells = mutableListOf<TableCell>()
+        var gridBefore: Int = 0
+        var inTrPr: Boolean = false
     }
 
     private class CellBuilder {
@@ -595,7 +605,7 @@ object DocumentFileReader {
             if (runText.isNotEmpty()) {
                 val target = paraBuilder.parts.last()
                 if (isUnderlined && runText.trim().endsWith(":")) {
-                    target.append("<u>${runText.trim()}</u> ")
+                    target.append("${runText.trim()} ")
                 } else {
                     target.append(runText)
                 }
@@ -611,13 +621,13 @@ object DocumentFileReader {
         for (element in elements) {
             when (element) {
                 is DocElement.ParaItem -> {
-                    val t = element.para.text.trim()
+                    val t = stripFormattingTags(element.para.text).trim()
                     if (t.isNotEmpty()) {
                         outputLines.add(t)
                     }
                 }
                 is DocElement.TableItem -> {
-                    outputLines.addAll(parseTableXml(element.table))
+                    outputLines.addAll(parseTableXml(element.table).map { stripFormattingTags(it) })
                 }
             }
         }
@@ -675,6 +685,17 @@ object DocumentFileReader {
                             "tr" -> {
                                 if (tableStack.isNotEmpty()) {
                                     rowStack.addLast(RowBuilder())
+                                }
+                            }
+                            "trPr" -> {
+                                if (rowStack.isNotEmpty()) {
+                                    rowStack.last().inTrPr = true
+                                }
+                            }
+                            "gridBefore" -> {
+                                if (rowStack.isNotEmpty() && rowStack.last().inTrPr) {
+                                    val beforeVal = getLocalAttributeValue(parser, "val")?.toIntOrNull()?.coerceAtLeast(0) ?: 0
+                                    rowStack.last().gridBefore = beforeVal
                                 }
                             }
                             "tc" -> {
@@ -828,11 +849,24 @@ object DocumentFileReader {
                                     }
                                 }
                             }
+                            "trPr" -> {
+                                if (rowStack.isNotEmpty()) {
+                                    rowStack.last().inTrPr = false
+                                }
+                            }
                             "tr" -> {
                                 if (rowStack.isNotEmpty()) {
                                     val finishedRow = rowStack.removeLast()
                                     if (tableStack.isNotEmpty() && finishedRow.cells.isNotEmpty()) {
-                                        tableStack.last().rows.add(finishedRow.cells.toList())
+                                        val rowCells = if (finishedRow.gridBefore > 0) {
+                                            val leadingEmpty = List(finishedRow.gridBefore) {
+                                                TableCell(paragraphs = emptyList(), gridSpan = 1, vMerge = null)
+                                            }
+                                            leadingEmpty + finishedRow.cells
+                                        } else {
+                                            finishedRow.cells.toList()
+                                        }
+                                        tableStack.last().rows.add(rowCells)
                                     }
                                 }
                             }
@@ -840,7 +874,8 @@ object DocumentFileReader {
                                 if (tableStack.isNotEmpty()) {
                                     val finishedTable = Table(tableStack.removeLast().rows.toList())
                                     if (cellStack.isNotEmpty()) {
-                                        // Nested table inside a cell: append its cells' paragraphs in order to the parent cell
+                                        // Nested table inside a cell: do NOT treat as independent table;
+                                        // extract its texts as merged paragraphs inside the parent cell.
                                         val parentCell = cellStack.last()
                                         for (row in finishedTable.rows) {
                                             for (cell in row) {
@@ -852,6 +887,7 @@ object DocumentFileReader {
                                             }
                                         }
                                     } else {
+                                        // Top-level table
                                         topElements.add(DocElement.TableItem(finishedTable))
                                     }
                                 }
@@ -877,7 +913,7 @@ object DocumentFileReader {
     }
 
     private fun normalizeParagraphPart(raw: String): String {
-        return raw
+        return stripFormattingTags(raw)
             .replace("\u0640", "")
             .replace("\u00a0", " ")
             .replace(Regex("[ \\t]+"), " ")
@@ -913,7 +949,7 @@ object DocumentFileReader {
      * Extracts non-blank paragraph strings from a [TableCell].
      */
     internal fun extractCellParagraphs(cell: TableCell): List<String> {
-        return cell.paragraphs.map { it.text.trim() }.filter { it.isNotEmpty() }
+        return cell.paragraphs.map { stripFormattingTags(it.text).trim() }.filter { it.isNotEmpty() }
     }
 
     /**
@@ -924,7 +960,7 @@ object DocumentFileReader {
         val blocks = mutableListOf<MutableList<String>>()
         var afterBlank = true
         for (para in cell.paragraphs) {
-            val t = para.text.trim()
+            val t = stripFormattingTags(para.text).trim()
             if (t.isEmpty()) {
                 afterBlank = true
                 continue
@@ -941,18 +977,22 @@ object DocumentFileReader {
 
     /**
      * Parses a [Table] model into structured stage lines (`[مرحلة: ...]`, field headers, `[نهاية الجدول]`)
-     * or header/metadata lines (`عنوان: عنصر - عنصر`), preserving column classification and resolution logic.
+     * or header/metadata lines (`عنوان: عنصر - عنصر`), respecting `<w:gridSpan>` and `<w:vMerge>`
+     * so column indices never shift in rows containing merged cells.
      */
     internal fun parseTableXml(table: Table): List<String> {
         val result = mutableListOf<String>()
         if (table.rows.isEmpty()) return result
 
-        // Build 2D grid supporting gridSpan and vMerge
+        // Build 2D grid supporting gridSpan and vMerge without column index drift
         val grid = mutableListOf<List<CellNode?>>()
         var nextCellId = 1
 
         for (tableRow in table.rows) {
             val row = mutableListOf<CellNode?>()
+            val prevRow = grid.lastOrNull()
+            val explicitRowCols = tableRow.sumOf { it.gridSpan.coerceAtLeast(1) }
+
             for (tc in tableRow) {
                 val pBlocks = extractCellParagraphBlocks(tc)
                 val flatParas = extractCellParagraphs(tc)
@@ -964,10 +1004,31 @@ object DocumentFileReader {
                     contentLinesWithTables = flatParas
                 )
 
-                val span = tc.gridSpan.coerceAtLeast(1)
+                var span = tc.gridSpan.coerceAtLeast(1)
+                if (tc.vMerge == "continue" && span == 1 && prevRow != null && explicitRowCols < prevRow.size && row.size < prevRow.size) {
+                    val aboveCell = prevRow[row.size]
+                    if (aboveCell != null) {
+                        var aboveSpan = 0
+                        var c = row.size
+                        while (c < prevRow.size && prevRow[c]?.id == aboveCell.id) {
+                            aboveSpan++
+                            c++
+                        }
+                        if (aboveSpan > 1) {
+                            span = aboveSpan
+                        }
+                    }
+                }
+
                 for (s in 0 until span) {
-                    if (tc.vMerge == "continue" && grid.isNotEmpty() && row.size < grid.last().size) {
-                        row.add(grid.last()[row.size])
+                    val colIdx = row.size
+                    if (tc.vMerge == "continue" && prevRow != null && colIdx < prevRow.size) {
+                        val continued = prevRow[colIdx]
+                        if (continued != null && flatParas.isEmpty()) {
+                            row.add(continued)
+                        } else {
+                            row.add(node)
+                        }
                     } else {
                         row.add(node)
                     }
@@ -991,9 +1052,9 @@ object DocumentFileReader {
 
         for ((isTable, blockXml) in topBlocks) {
             if (isTable) {
-                outputLines.addAll(parseTableXmlLegacy(blockXml))
+                outputLines.addAll(parseTableXmlLegacy(blockXml).map { stripFormattingTags(it) })
             } else {
-                val pText = extractParagraphText(blockXml)
+                val pText = stripFormattingTags(extractParagraphText(blockXml))
                 if (pText.isNotEmpty()) {
                     pText.lines().map { it.trim() }.filter { it.isNotEmpty() }.forEach {
                         outputLines.add(it)
@@ -1115,32 +1176,54 @@ object DocumentFileReader {
         val trList = extractDirectChildrenIgnoreNestedTables(tblXml, "tr", stripOuterTableTag = true)
         if (trList.isEmpty()) return result
 
-        // Build 2D grid supporting gridSpan and vMerge (matching build_grid in reference Python scripts)
+        // Build 2D grid supporting gridSpan and vMerge
         val grid = mutableListOf<List<CellNode?>>()
         var nextCellId = 1
 
         for (trXml in trList) {
             val row = mutableListOf<CellNode?>()
+            val prevRow = grid.lastOrNull()
             val tcList = extractDirectChildrenIgnoreNestedTables(trXml, "tc", stripOuterTableTag = false)
-            for (tcXml in tcList) {
+            val spans = tcList.map { extractGridSpan(extractFirstTagBlock(it, "tcPr")) }
+            val explicitRowCols = spans.sum()
+
+            for ((tcIdx, tcXml) in tcList.withIndex()) {
                 val tcPrXml = extractFirstTagBlock(tcXml, "tcPr")
-                val span = extractGridSpan(tcPrXml)
+                var span = spans[tcIdx]
                 val vMerge = extractVMerge(tcPrXml)
 
                 val pBlocks = extractCellParagraphBlocksLegacy(tcXml)
                 val flatParas = pBlocks.flatten()
-                val contentWithTables = extractCellContentWithNestedTables(tcXml)
                 val node = CellNode(
                     id = nextCellId++,
                     rawXml = tcXml,
                     paragraphBlocks = pBlocks,
                     flatParagraphs = flatParas,
-                    contentLinesWithTables = contentWithTables
+                    contentLinesWithTables = flatParas
                 )
 
+                if (vMerge == "continue" && span == 1 && prevRow != null && explicitRowCols < prevRow.size && row.size < prevRow.size) {
+                    val aboveCell = prevRow[row.size]
+                    if (aboveCell != null) {
+                        var aboveSpan = 0
+                        var c = row.size
+                        while (c < prevRow.size && prevRow[c]?.id == aboveCell.id) {
+                            aboveSpan++
+                            c++
+                        }
+                        if (aboveSpan > 1) span = aboveSpan
+                    }
+                }
+
                 for (s in 0 until span) {
-                    if (vMerge == "continue" && grid.isNotEmpty() && row.size < grid.last().size) {
-                        row.add(grid.last()[row.size])
+                    val colIdx = row.size
+                    if (vMerge == "continue" && prevRow != null && colIdx < prevRow.size) {
+                        val continued = prevRow[colIdx]
+                        if (continued != null && flatParas.isEmpty()) {
+                            row.add(continued)
+                        } else {
+                            row.add(node)
+                        }
                     } else {
                         row.add(node)
                     }
@@ -1154,15 +1237,59 @@ object DocumentFileReader {
         return formatTableGridToLines(grid, result)
     }
 
+    private fun isPreLessonHeaderGrid(grid: List<List<CellNode?>>): Boolean {
+        val firstRowsText = grid.take(2)
+            .flatten()
+            .filterNotNull()
+            .distinctBy { it.id }
+            .joinToString(" ") { it.flatParagraphs.joinToString(" ") }
+        val normFirst = normalizeArabicForMatch(firstRowsText)
+
+        val hasExplicitStageCol = normFirst.contains("المراحل") ||
+            normFirst.contains("الخطوات") ||
+            normFirst.contains("خطواتالقراءه") ||
+            normFirst.contains("انشطهالمدرس") ||
+            normFirst.contains("انشطهالاستاذ") ||
+            normFirst.contains("انشطهالمتعلم")
+
+        if (hasExplicitStageCol) return false
+
+        val allTableText = grid.flatten()
+            .filterNotNull()
+            .distinctBy { it.id }
+            .joinToString(" ") { it.flatParagraphs.joinToString(" ") }
+        val normAll = normalizeArabicForMatch(allTableText)
+
+        val headerHits = listOf(
+            "جذاذهتربويه",
+            "الفئهالمستهدفه",
+            "المكون",
+            "الموضوع",
+            "الوسائلالديدكتيكيه",
+            "الوسائلالديداكتيكيه",
+            "الوسائلالتعليميه",
+            "الكفايهالتواصليه",
+            "الكفايهالمنهجيه",
+            "الكفايهالثقافيه"
+        ).count { normAll.contains(it) }
+
+        return headerHits >= 2
+    }
+
     private fun formatTableGridToLines(
         grid: List<List<CellNode?>>,
         result: MutableList<String>
     ): List<String> {
         if (grid.isEmpty()) return result
 
-        // Detect header rows (1..3) and column mapping
+        // Isolate header/metadata tables that precede the lesson table
+        if (isPreLessonHeaderGrid(grid)) {
+            return formatHeaderGridToLines(grid, result)
+        }
+
+        // Detect header rows (1..3, inspecting row 1 and row 2 together for split headers) and multi-column mapping
         var bestHeaderRows = -1
-        var bestColMap = mapOf<TableColType, Int>()
+        var bestMultiColMap = mapOf<TableColType, List<Int>>()
         var bestScore = -1
 
         for (hRows in listOf(1, 2, 3)) {
@@ -1172,24 +1299,33 @@ object DocumentFileReader {
                 val prevRowHasSpan = prevRowCells.size > prevRowCells.distinctBy { it.id }.size
                 val currRowDistinct = grid[hRows - 1].filterNotNull().distinctBy { it.id }
                 val sharesVerticalMerge = currRowDistinct.any { cell -> prevRowCells.any { it.id == cell.id } }
-                if (currRowDistinct.size <= 1 || (!prevRowHasSpan && !sharesVerticalMerge)) {
+                val currRowHasSubHeaders = currRowDistinct.any { cell ->
+                    val norm = normalizeArabicForMatch(cell.flatParagraphs.joinToString(" "))
+                    norm.contains("انشطهالمدرس") || norm.contains("انشطهالاستاذ") ||
+                        norm.contains("انشطهالمتعلم") || norm.contains("مهامالمدرس") ||
+                        norm.contains("مهامالمتعلم") || norm.contains("مؤشراتالتقويم")
+                }
+                if (currRowDistinct.size <= 1 || (!prevRowHasSpan && !sharesVerticalMerge && !currRowHasSubHeaders)) {
                     break
                 }
             }
-            val candidateMap = detectColumnsFromGrid(grid, hRows)
-            val hasStageOrAbil = candidateMap.containsKey(TableColType.STAGE) ||
-                candidateMap.containsKey(TableColType.SEGMENT) ||
-                candidateMap.containsKey(TableColType.ABIL)
-            val hasContentOrAct = candidateMap.containsKey(TableColType.CONTENT) ||
-                candidateMap.containsKey(TableColType.TEACHER) ||
-                candidateMap.containsKey(TableColType.LEARNER) ||
-                candidateMap.containsKey(TableColType.ACTIVITIES)
+            val candidateMultiMap = detectMultiColumnsFromGrid(grid, hRows)
+            val hasStageOrAbil = candidateMultiMap.containsKey(TableColType.STAGE) ||
+                candidateMultiMap.containsKey(TableColType.SEGMENT) ||
+                candidateMultiMap.containsKey(TableColType.ABIL)
+            val hasContentOrAct = candidateMultiMap.containsKey(TableColType.CONTENT) ||
+                candidateMultiMap.containsKey(TableColType.TEACHER) ||
+                candidateMultiMap.containsKey(TableColType.LEARNER) ||
+                candidateMultiMap.containsKey(TableColType.ACTIVITIES) ||
+                candidateMultiMap.containsKey(TableColType.EVAL)
 
-            if (hasStageOrAbil && hasContentOrAct && candidateMap.size >= 2) {
-                if (candidateMap.size > bestScore) {
-                    bestScore = candidateMap.size
+            val totalMappedCols = candidateMultiMap.values.sumOf { it.size }
+            if (hasStageOrAbil && hasContentOrAct && candidateMultiMap.size >= 2) {
+                val score = candidateMultiMap.size * 10 + totalMappedCols
+                if (score > bestScore) {
+                    bestScore = score
                     bestHeaderRows = hRows
-                    bestColMap = candidateMap
+                    bestMultiColMap = candidateMultiMap
                 }
             }
         }
@@ -1197,6 +1333,8 @@ object DocumentFileReader {
         if (bestHeaderRows != -1) {
             val seenIds = mutableSetOf<Int>()
             var lastSegmentStageText = ""
+            var lastMergedStageCellId = -1
+            var lastMergedStageText = ""
 
             for (rIdx in bestHeaderRows until grid.size) {
                 val row = grid[rIdx]
@@ -1223,26 +1361,35 @@ object DocumentFileReader {
                     continue
                 }
 
-                fun takeCell(type: TableColType): CellNode? {
-                    val colIdx = bestColMap[type] ?: return null
-                    val cell = row.getOrNull(colIdx) ?: return null
-                    if (cell.id in seenIds) return null
-                    seenIds.add(cell.id)
-                    return cell
+                fun takeCells(type: TableColType): List<CellNode> {
+                    val colIndices = bestMultiColMap[type].orEmpty()
+                    val taken = mutableListOf<CellNode>()
+                    for (colIdx in colIndices) {
+                        val cell = row.getOrNull(colIdx) ?: continue
+                        if (cell.id !in seenIds) {
+                            seenIds.add(cell.id)
+                            taken.add(cell)
+                        }
+                    }
+                    return taken
                 }
 
-                val stageCell = takeCell(TableColType.STAGE)
-                val segmentCell = takeCell(TableColType.SEGMENT)
-                val timeCell = takeCell(TableColType.TIME)
-                val abilCell = takeCell(TableColType.ABIL)
-                val teacherCell = takeCell(TableColType.TEACHER)
-                val learnerCell = takeCell(TableColType.LEARNER)
-                val genericActCell = takeCell(TableColType.ACTIVITIES)
-                val contentCell = takeCell(TableColType.CONTENT)
-                val evalCell = takeCell(TableColType.EVAL)
+                // Track vertically merged stage cell across rows
+                val primaryStageColIdx = bestMultiColMap[TableColType.STAGE]?.firstOrNull()
+                val rawStageCellInRow = primaryStageColIdx?.let { row.getOrNull(it) }
+
+                val stageCells = takeCells(TableColType.STAGE)
+                val segmentCells = takeCells(TableColType.SEGMENT)
+                takeCells(TableColType.TIME)
+                val abilCells = takeCells(TableColType.ABIL)
+                val teacherCells = takeCells(TableColType.TEACHER)
+                val learnerCells = takeCells(TableColType.LEARNER)
+                val genericActCells = takeCells(TableColType.ACTIVITIES)
+                val contentCells = takeCells(TableColType.CONTENT)
+                val evalCells = takeCells(TableColType.EVAL)
 
                 // Also collect any unmapped non-empty cells so nothing is ever lost
-                val mappedIndices = bestColMap.values.toSet()
+                val mappedIndices = bestMultiColMap.values.flatten().toSet()
                 val extraContentLines = mutableListOf<String>()
                 for (cIdx in row.indices) {
                     if (cIdx !in mappedIndices) {
@@ -1254,24 +1401,31 @@ object DocumentFileReader {
                     }
                 }
 
-                val rawStageLines = stageCell?.flatParagraphs.orEmpty()
-                val rawSegmentLines = segmentCell?.flatParagraphs.orEmpty()
+                val rawStageLines = stageCells.flatMap { it.flatParagraphs }
+                val rawSegmentLines = segmentCells.flatMap { it.flatParagraphs }
+                if (rawStageLines.isNotEmpty() && rawStageCellInRow != null) {
+                    lastMergedStageCellId = rawStageCellInRow.id
+                    lastMergedStageText = rawStageLines.joinToString(" - ")
+                }
                 if (rawSegmentLines.isNotEmpty()) {
                     lastSegmentStageText = rawSegmentLines.joinToString(" ")
                 }
                 val combinedStageLines = when {
                     rawStageLines.isNotEmpty() -> rawStageLines
+                    rawStageCellInRow != null && rawStageCellInRow.id == lastMergedStageCellId && lastMergedStageText.isNotBlank() ->
+                        listOf(lastMergedStageText)
                     rawSegmentLines.isNotEmpty() -> rawSegmentLines
                     lastSegmentStageText.isNotBlank() -> listOf(lastSegmentStageText)
                     else -> emptyList()
                 }
 
-                val abilBlocks = abilCell?.paragraphBlocks.orEmpty()
-                val teacherBlocks = teacherCell?.paragraphBlocks.orEmpty()
-                val learnerBlocks = learnerCell?.paragraphBlocks.orEmpty()
-                val genericBlocks = genericActCell?.paragraphBlocks.orEmpty()
-                val evalBlocks = evalCell?.paragraphBlocks.orEmpty()
-                val contentLines = (contentCell?.contentLinesWithTables.orEmpty() + extraContentLines).filter { it.isNotBlank() }
+                val abilBlocks = abilCells.flatMap { it.paragraphBlocks }
+                val teacherBlocks = teacherCells.flatMap { it.paragraphBlocks }
+                val learnerBlocks = learnerCells.flatMap { it.paragraphBlocks }
+                val genericBlocks = genericActCells.flatMap { it.paragraphBlocks }
+                // Merge multiple evaluation/indicator columns together into evalBlocks
+                val evalBlocks = evalCells.flatMap { it.paragraphBlocks }
+                val contentLines = (contentCells.flatMap { it.contentLinesWithTables } + extraContentLines).filter { it.isNotBlank() }
 
                 val hasAnyData = combinedStageLines.isNotEmpty() ||
                     abilBlocks.isNotEmpty() ||
@@ -1330,44 +1484,51 @@ object DocumentFileReader {
             }
             result.add("[نهاية الجدول]")
         } else {
-            // Parse as Header / Metadata Table (handling RTL value-before-label or label-before-value cells)
-            val seenHeaderCells = mutableSetOf<Int>()
-            for (row in grid) {
-                val distinctRowCells = row.filterNotNull().filter { seenHeaderCells.add(it.id) }.map { it.flatParagraphs }
-                var cIdx = 0
-                while (cIdx < distinctRowCells.size) {
-                    val cellParas = distinctRowCells[cIdx].filter { it.isNotBlank() }
-                    if (cellParas.size == 1 && !cellParas[0].contains(":") && cellParas[0].length <= 35 && cIdx + 1 < distinctRowCells.size) {
-                        val nextParas = distinctRowCells[cIdx + 1].filter { it.isNotBlank() }
-                        if (nextParas.isNotEmpty() && !nextParas[0].contains(":")) {
-                            // Check which one is the known header label (in RTL tables, sometimes value cell comes before label cell)
-                            val firstIsLabel = isKnownHeaderFieldLabel(cellParas[0])
-                            val secondIsLabel = nextParas.size == 1 && isKnownHeaderFieldLabel(nextParas[0])
-                            if (secondIsLabel && !firstIsLabel) {
-                                result.add("${nextParas[0]}: ${cellParas.joinToString(" - ")}")
-                            } else {
-                                result.add("${cellParas[0]}: ${nextParas.joinToString(" - ")}")
-                            }
-                            cIdx += 2
-                            continue
-                        }
-                    }
-                    result.addAll(cellParas)
-                    cIdx++
-                }
-            }
+            return formatHeaderGridToLines(grid, result)
         }
 
+        return result
+    }
+
+    private fun formatHeaderGridToLines(
+        grid: List<List<CellNode?>>,
+        result: MutableList<String>
+    ): List<String> {
+        val seenHeaderCells = mutableSetOf<Int>()
+        for (row in grid) {
+            val distinctRowCells = row.filterNotNull().filter { seenHeaderCells.add(it.id) }.map { it.flatParagraphs }
+            var cIdx = 0
+            while (cIdx < distinctRowCells.size) {
+                val cellParas = distinctRowCells[cIdx].filter { it.isNotBlank() }
+                if (cellParas.size == 1 && !cellParas[0].contains(":") && cellParas[0].length <= 35 && cIdx + 1 < distinctRowCells.size) {
+                    val nextParas = distinctRowCells[cIdx + 1].filter { it.isNotBlank() }
+                    if (nextParas.isNotEmpty() && !nextParas[0].contains(":")) {
+                        val firstIsLabel = isKnownHeaderFieldLabel(cellParas[0])
+                        val secondIsLabel = nextParas.size == 1 && isKnownHeaderFieldLabel(nextParas[0])
+                        if (secondIsLabel && !firstIsLabel) {
+                            result.add("${nextParas[0]}: ${cellParas.joinToString(" - ")}")
+                        } else {
+                            result.add("${cellParas[0]}: ${nextParas.joinToString(" - ")}")
+                        }
+                        cIdx += 2
+                        continue
+                    }
+                }
+                result.addAll(cellParas)
+                cIdx++
+            }
+        }
         return result
     }
 
     private fun isKnownHeaderFieldLabel(text: String): Boolean {
         val norm = normalizeArabicForMatch(text)
         return norm in setOf(
-            "المستوي", "المستويالدراسي", "الفئهالمستهدفه", "الوحده", "المجال",
+            "جذاذهتربويه", "المستوي", "المستويالدراسي", "الفئهالمستهدفه", "الوحده", "المجال",
             "المكون", "الموضوع", "موضوعالدرس", "عنوانالدرس", "المهارهالمستهدفه",
             "مدهالانجاز", "الحصيصالزمني", "المده", "الغلافالزمني",
-            "الوسائلالتعليميه", "الوسائلالديداكتيكيه", "المرجع", "القدرهالخاصهبالدرس"
+            "الوسائلالتعليميه", "الوسائلالديداكتيكيه", "الوسائلالديدكتيكيه", "المرجع",
+            "القدرهالخاصهبالدرس", "الكفايهالتواصليه", "الكفايهالمنهجيه", "الكفايهالثقافيه", "الهدف"
         )
     }
 
@@ -1388,21 +1549,30 @@ object DocumentFileReader {
             result.add("القدرات المستهدفة:")
             abilLines.forEach { result.add(it) }
         }
-        val combinedActivities = mutableListOf<String>()
-        combinedActivities.addAll(teacherLines)
-        combinedActivities.addAll(genericActLines)
-        if (contentLines.isNotEmpty()) {
-            // When a separate content column exists, include learner activities under teacher/didactic activities
-            combinedActivities.addAll(learnerLines)
-        }
-        if (combinedActivities.isNotEmpty()) {
+        if (teacherLines.isNotEmpty()) {
             result.add("أنشطة المدرس:")
-            combinedActivities.forEach { result.add(it) }
+            teacherLines.forEach { result.add(it) }
         }
-        val effectiveContentLines = if (contentLines.isNotEmpty()) contentLines else learnerLines
-        if (effectiveContentLines.isNotEmpty()) {
+        if (genericActLines.isNotEmpty()) {
+            if (teacherLines.isEmpty() && contentLines.isNotEmpty()) {
+                result.add("أنشطة المدرس:")
+                genericActLines.forEach { result.add(it) }
+            } else {
+                result.add("الأنشطة التعليمية التعلمية:")
+                genericActLines.forEach { result.add(it) }
+            }
+        }
+        if (contentLines.isNotEmpty()) {
             result.add("المحتوى الديداكتيكي:")
-            effectiveContentLines.forEach { result.add(it) }
+            contentLines.forEach { result.add(it) }
+        }
+        if (learnerLines.isNotEmpty()) {
+            if (contentLines.isEmpty()) {
+                result.add("المحتوى الديداكتيكي:")
+            } else {
+                result.add("أنشطة المتعلم:")
+            }
+            learnerLines.forEach { result.add(it) }
         }
         if (evalLines.isNotEmpty()) {
             result.add("التقويم والدعم:")
@@ -1454,8 +1624,6 @@ object DocumentFileReader {
         }
         return if (splitIdx > 0) {
             lines.subList(0, splitIdx) to lines.subList(splitIdx, lines.size)
-        } else if (splitIdx == 0) {
-            emptyList<String>() to lines
         } else {
             emptyList<String>() to lines
         }
@@ -1467,16 +1635,16 @@ object DocumentFileReader {
     ): TableColType {
         val rules = listOf(
             TableColType.TIME to listOf("الحصيص", "الزمني", "المده"),
-            TableColType.EVAL to listOf("التقويم", "الدعم", "مؤشرات"),
-            TableColType.CONTENT to listOf("محتوي", "التعلمات", "المضامين", "الدعامات"),
-            TableColType.TEACHER to listOf("المدرس", "الاستاذ"),
-            TableColType.LEARNER to listOf("المتعلم", "التلميذ"),
-            TableColType.STAGE to listOf("المراحل", "المهارات", "الخطوات"),
+            TableColType.EVAL to listOf("التقويم", "الدعم", "مؤشراتالتقويم", "مؤشرات"),
+            TableColType.TEACHER to listOf("انشطهالمدرس", "انشطهالاستاذ", "مهامالمدرس", "توجيهات", "المدرس", "الاستاذ"),
+            TableColType.LEARNER to listOf("انشطهالمتعلم", "انشطهالمتعلمين", "مهامالمتعلم", "المتعلمين", "المتعلم", "التلميذ"),
+            TableColType.CONTENT to listOf("محتوي", "مضامين", "سيرالدرس", "الامثله", "النصوص", "التعلمات", "الدعامات"),
+            TableColType.STAGE to listOf("المراحل", "الخطوات", "خطواتالقراءه", "المقاطع", "المقطع"),
             TableColType.SEGMENT to listOf("مقاطع", "المقطع"),
-            TableColType.ABIL to listOf("القدرات", "الكفايات", "الاهداف")
+            TableColType.ABIL to listOf("القدرات", "الكفايات", "الاهداف", "المهارات")
         )
         for ((colType, keywords) in rules) {
-            if (colType in alreadyAssigned) continue
+            if (colType in alreadyAssigned && colType != TableColType.EVAL) continue
             if (keywords.any { kw -> normalizedHeader.contains(kw) }) {
                 return colType
             }
@@ -1498,9 +1666,25 @@ object DocumentFileReader {
         }
     }
 
-    private fun detectColumnsFromGrid(grid: List<List<CellNode?>>, headerRows: Int): Map<TableColType, Int> {
+    /**
+     * Inspects the first [headerRows] rows (especially row 1 and row 2 together for split headers
+     * such as "الأنشطة التعليمية التعلمية" split into "أنشطة المدرس" and "أنشطة المتعلمين")
+     * and maps each column role to all matching column indices (allowing multiple EVAL columns
+     * such as "مؤشرات التقويم" and "التقويم والدعم" to be merged).
+     */
+    private fun detectMultiColumnsFromGrid(
+        grid: List<List<CellNode?>>,
+        headerRows: Int
+    ): Map<TableColType, List<Int>> {
         val nCols = grid.maxOfOrNull { it.size } ?: 0
         if (nCols == 0) return emptyMap()
+
+        // For each column, examine both the deepest header row (row 2 if split) and the combined header text
+        val perColSpecificHeader = (0 until nCols).map { c ->
+            val deepestCell = (minOf(headerRows, grid.size) - 1 downTo 0)
+                .firstNotNullOfOrNull { r -> grid[r].getOrNull(c) }
+            normalizeArabicForMatch(deepestCell?.flatParagraphs?.joinToString(" ").orEmpty())
+        }
 
         val colHeaders = (0 until nCols).map { c ->
             val seen = mutableSetOf<Int>()
@@ -1514,33 +1698,67 @@ object DocumentFileReader {
             parts.joinToString(" ")
         }
 
-        val cols = mutableMapOf<TableColType, Int>()
+        val result = mutableMapOf<TableColType, MutableList<Int>>()
+        val assignedIndices = mutableSetOf<Int>()
+
+        fun assignRole(role: TableColType, colIdx: Int) {
+            result.getOrPut(role) { mutableListOf() }.add(colIdx)
+            assignedIndices.add(colIdx)
+        }
+
+        // Pass 1: Match using the most specific (deepest) header cell first so split headers in row 2
+        // ("أنشطة المدرس" vs "أنشطة المتعلمين") win over the spanned parent cell ("الأنشطة التعليمية التعلمية").
         val rules = listOf(
             TableColType.TIME to listOf("الحصيص", "الزمني", "المده"),
-            TableColType.EVAL to listOf("التقويم", "الدعم", "مؤشرات"),
-            TableColType.CONTENT to listOf("محتوي", "التعلمات", "المضامين", "الدعامات"),
-            TableColType.TEACHER to listOf("المدرس", "الاستاذ"),
-            TableColType.LEARNER to listOf("المتعلم", "التلميذ"),
-            TableColType.STAGE to listOf("المراحل", "المهارات", "الخطوات"),
-            TableColType.SEGMENT to listOf("مقاطع", "المقطع"),
-            TableColType.ABIL to listOf("القدرات", "الكفايات", "الاهداف")
+            TableColType.EVAL to listOf("التقويم", "الدعم", "مؤشراتالتقويم", "مؤشرات"),
+            TableColType.TEACHER to listOf("انشطهالمدرس", "انشطهالاستاذ", "مهامالمدرس", "توجيهات", "المدرس", "الاستاذ"),
+            TableColType.LEARNER to listOf("انشطهالمتعلم", "انشطهالمتعلمين", "مهامالمتعلم", "المتعلمين", "المتعلم", "التلميذ"),
+            TableColType.CONTENT to listOf("محتوي", "مضامين", "سيرالدرس", "الامثله", "النصوص", "التعلمات", "الدعامات"),
+            TableColType.STAGE to listOf("المراحل", "الخطوات", "خطواتالقراءه"),
+            TableColType.SEGMENT to listOf("المقاطع", "مقاطع", "المقطع"),
+            TableColType.ABIL to listOf("القدرات", "الكفايات", "الاهداف", "المهارات")
         )
 
         for ((colType, keywords) in rules) {
-            for (kw in keywords) {
-                val hit = colHeaders.indices.firstOrNull { idx ->
-                    idx !in cols.values && colHeaders[idx].contains(kw)
-                }
-                if (hit != null) {
-                    cols[colType] = hit
-                    break
+            for (idx in 0 until nCols) {
+                if (idx in assignedIndices) continue
+                val spec = perColSpecificHeader[idx]
+                if (keywords.any { kw -> spec.contains(kw) }) {
+                    assignRole(colType, idx)
+                    if (colType != TableColType.EVAL) break
                 }
             }
         }
 
-        resolveUnknownColumns(cols, colHeaders)
+        // Pass 2: Match using combined row 1 + row 2 headers for any remaining unassigned columns
+        for ((colType, keywords) in rules) {
+            if (colType != TableColType.EVAL && result.containsKey(colType)) continue
+            for (idx in 0 until nCols) {
+                if (idx in assignedIndices) continue
+                val comb = colHeaders[idx]
+                if (keywords.any { kw -> comb.contains(kw) }) {
+                    assignRole(colType, idx)
+                    if (colType != TableColType.EVAL) break
+                }
+            }
+        }
 
-        return cols
+        // If SEGMENT was matched and STAGE was not, STAGE can use SEGMENT
+        // Resolve generic ACTIVITIES column if neither TEACHER nor LEARNER was matched
+        if (!result.containsKey(TableColType.TEACHER) && !result.containsKey(TableColType.LEARNER)) {
+            val actHit = colHeaders.indices.firstOrNull { idx ->
+                idx !in assignedIndices && (colHeaders[idx].contains("الانشطه") || colHeaders[idx].contains("التعليميه"))
+            }
+            if (actHit != null) {
+                assignRole(TableColType.ACTIVITIES, actHit)
+            }
+        }
+
+        return result
+    }
+
+    private fun detectColumnsFromGrid(grid: List<List<CellNode?>>, headerRows: Int): Map<TableColType, Int> {
+        return detectMultiColumnsFromGrid(grid, headerRows).mapValues { it.value.first() }
     }
 
     private fun normalizeArabicForMatch(s: String): String {
@@ -1571,19 +1789,18 @@ object DocumentFileReader {
     }
 
     /**
-     * Legacy helper: Extracts paragraph blocks from a <w:tc> (ignoring nested tables), grouping paragraphs separated by blank lines
-     * and re-joining single-word broken lines.
+     * Legacy helper: Extracts paragraph blocks from a <w:tc>, including any nested <w:tbl> paragraphs
+     * merged in order into the parent cell.
      */
     private fun extractCellParagraphBlocksLegacy(tcXml: String): List<List<String>> {
-        val directParas = extractDirectChildrenIgnoreNestedTables(tcXml, "p", stripOuterTableTag = false)
-        val rawTexts = directParas.map { extractParagraphText(it) }
+        val rawTexts = extractCellMergedParagraphsLegacy(tcXml)
         val blocks = mutableListOf<MutableList<String>>()
         var afterBlank = true
 
         for (raw in rawTexts) {
             val subLines = raw.split("\n")
             for (sub in subLines) {
-                val t = sub.trim()
+                val t = stripFormattingTags(sub).trim()
                 if (t.isEmpty()) {
                     afterBlank = true
                     continue
@@ -1606,30 +1823,25 @@ object DocumentFileReader {
     }
 
     /**
-     * Legacy helper: Extracts both direct paragraphs and any nested <w:tbl> tables inside a <w:tc>.
+     * Legacy helper: Extracts direct paragraphs and merges any nested <w:tbl> cell paragraphs
+     * directly into the parent cell's paragraph list.
      */
-    private fun extractCellContentWithNestedTables(tcXml: String): List<String> {
+    private fun extractCellMergedParagraphsLegacy(tcXml: String): List<String> {
         val out = mutableListOf<String>()
         val innerBlocks = extractCellChildParagraphsAndTables(tcXml)
-        val pendingParagraphs = mutableListOf<String>()
-
-        fun flushParagraphs() {
-            if (pendingParagraphs.isEmpty()) return
-            val reflowed = reflowParagraphStrings(pendingParagraphs)
-            out.addAll(reflowed)
-            pendingParagraphs.clear()
-        }
-
         for ((isTbl, blockXml) in innerBlocks) {
             if (!isTbl) {
-                pendingParagraphs.add(extractParagraphText(blockXml))
+                out.add(extractParagraphText(blockXml))
             } else {
-                flushParagraphs()
-                val nestedRows = extractNestedTableRows(blockXml)
-                out.addAll(nestedRows)
+                val trList = extractDirectChildrenIgnoreNestedTables(blockXml, "tr", stripOuterTableTag = true)
+                for (trXml in trList) {
+                    val tcList = extractDirectChildrenIgnoreNestedTables(trXml, "tc", stripOuterTableTag = false)
+                    for (nestedTcXml in tcList) {
+                        out.addAll(extractCellMergedParagraphsLegacy(nestedTcXml))
+                    }
+                }
             }
         }
-        flushParagraphs()
         return out
     }
 
@@ -1644,53 +1856,10 @@ object DocumentFileReader {
         return extractTopLevelBlocks(inner)
     }
 
-    private fun extractNestedTableRows(nestedTblXml: String): List<String> {
-        val rowsOut = mutableListOf<String>()
-        val trList = extractDirectChildrenIgnoreNestedTables(nestedTblXml, "tr", stripOuterTableTag = true)
-        for (trXml in trList) {
-            val tcList = extractDirectChildrenIgnoreNestedTables(trXml, "tc", stripOuterTableTag = false)
-            val cellsText = tcList.map { tc ->
-                val pBlocks = extractCellParagraphBlocksLegacy(tc)
-                pBlocks.flatten().joinToString(" ").trim()
-            }
-            if (cellsText.any { it.isNotEmpty() }) {
-                rowsOut.add("[جدول: ${cellsText.joinToString(" | ")}]")
-            }
-        }
-        return rowsOut
-    }
-
-    private fun reflowParagraphStrings(rawParas: List<String>): List<String> {
-        val blocks = mutableListOf<MutableList<String>>()
-        var afterBlank = true
-        for (raw in rawParas) {
-            for (sub in raw.split("\n")) {
-                val t = sub.trim()
-                if (t.isEmpty()) {
-                    afterBlank = true
-                    continue
-                }
-                if (afterBlank || blocks.isEmpty()) {
-                    blocks.add(mutableListOf(t))
-                } else {
-                    val lastBlock = blocks.last()
-                    val prev = lastBlock.last()
-                    if (startsNewItem(t) || endsWithTerminal(prev)) {
-                        lastBlock.add(t)
-                    } else {
-                        lastBlock[lastBlock.lastIndex] = "$prev $t"
-                    }
-                }
-                afterBlank = false
-            }
-        }
-        return blocks.flatten()
-    }
-
     private fun startsNewItem(t: String): Boolean {
         val trimmed = t.trim()
         if (trimmed.startsWith("-") || trimmed.startsWith("+") || trimmed.startsWith("•") ||
-            trimmed.startsWith("*") || trimmed.startsWith("<u>")
+            trimmed.startsWith("*")
         ) return true
         if (Regex("^\\(?\\d{1,2}\\s*[-–.)/]").containsMatchIn(trimmed)) return true
         val norm = normalizeArabicForMatch(trimmed)
@@ -1733,7 +1902,7 @@ object DocumentFileReader {
                 val runText = runTextBuilder.toString()
                 if (runText.isNotEmpty()) {
                     if (isUnderlined && runText.trim().endsWith(":")) {
-                        sb.append("<u>${runText.trim()}</u> ")
+                        sb.append("${runText.trim()} ")
                     } else {
                         sb.append(runText)
                     }
@@ -1745,7 +1914,7 @@ object DocumentFileReader {
             }
         }
 
-        return sb.toString()
+        return stripFormattingTags(sb.toString())
             .replace("\u0640", "")
             .replace("\u00a0", " ")
             .replace(Regex("[ \\t]+"), " ")

@@ -1147,6 +1147,66 @@ fun ExtractorScreen(
             )
         }
 
+        // Comprehensive Smart AI Extraction Button ("تفريغ ذكي شامل (AI)")
+        AppTonalButton(
+            onClick = {
+                if (rawInputText.isNotBlank()) {
+                    if (viewModel != null) {
+                        viewModel.runComprehensiveAiExtraction(applyImmediately = false)
+                        Toast.makeText(
+                            context,
+                            "جارٍ التفريغ الذكي الشامل (AI) وتوزيع عناصر الجذاذة على جميع المراحل...",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    } else {
+                        coroutineScope.launch {
+                            localExtractionState = ExtractionState.Parsing
+                            val compId = (selectedComponentFilter ?: parseResult?.plan?.componentType ?: PedagogicalComponent.READING).id
+                            val aiRes = GeminiAiService.parseRawJadhadhaWithAi(
+                                rawText = rawInputText,
+                                componentType = compId,
+                                customKey = currentApiKey
+                            )
+                            aiRes.onSuccess { aiPlan ->
+                                val updatedReport = JadhadhaParser.buildReport(
+                                    plan = aiPlan,
+                                    isComponentDefaulted = false,
+                                    unclassifiedLines = emptyList(),
+                                    isAiDelegated = true
+                                )
+                                localParseResult = ParseResult(plan = aiPlan, report = updatedReport)
+                                localExtractionState = ExtractionState.Done(
+                                    fileName = uploadedFileName,
+                                    extractedText = rawInputText,
+                                    isAiTranscribed = isAiTranscribed
+                                )
+                                Toast.makeText(
+                                    context,
+                                    "تم التفريغ الذكي الشامل (AI) وتوزيع 100% من عناصر الجذاذة بنجاح ✨",
+                                    Toast.LENGTH_LONG
+                                ).show()
+                            }.onFailure { err ->
+                                localExtractionState = ExtractionState.Error(
+                                    err.message ?: "تعذر إتمام التفريغ الذكي الشامل."
+                                )
+                            }
+                        }
+                    }
+                }
+            },
+            enabled = rawInputText.isNotBlank() && !isBusy,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(50.dp)
+                .testTag("comprehensive_ai_extract_button")
+        ) {
+            ButtonLabel(
+                text = "تفريغ ذكي شامل (${ltr("AI")})",
+                icon = Icons.Default.AutoAwesome,
+                style = MaterialTheme.typography.bodyLarge
+            )
+        }
+
         // Action Button
         AppButton(
             onClick = {

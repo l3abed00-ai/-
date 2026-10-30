@@ -704,6 +704,85 @@ class JadhadhaViewModel(
         }
     }
 
+    /**
+     * Runs comprehensive AI extraction ("تفريغ ذكي شامل (AI)") via [GeminiAiService.parseRawJadhadhaWithAi]
+     * to reorganize and distribute 100% of any complex or non-standard jadhadha across all stages and fields.
+     */
+    fun runComprehensiveAiExtraction(applyImmediately: Boolean = false) {
+        val rawText = _uiState.value.extractorRawText
+        if (rawText.isBlank()) return
+        val activeComp = _uiState.value.extractorComponentFilter
+            ?: _uiState.value.extractorParseResult?.plan?.componentType
+            ?: _uiState.value.activeComponent
+        val unclassifiedBefore = _uiState.value.extractorParseResult?.report?.unclassifiedLines?.size ?: 0
+
+        reparseJob?.cancel()
+        reparseJob = viewModelScope.launch {
+            _uiState.value = _uiState.value.copy(
+                extraction = ExtractionState.Parsing,
+                isParsing = true,
+                errorMessage = null
+            )
+            try {
+                val result = GeminiAiService.parseRawJadhadhaWithAi(
+                    rawText = rawText,
+                    componentType = activeComp.id,
+                    customKey = _uiState.value.customApiKey
+                )
+                ensureActive()
+                result.onSuccess { aiPlan ->
+                    val aiFieldsCount = aiPlan.stages.values.sumOf { st ->
+                        listOf("abil", "teacher", "content", "eval").count { f -> st.sourceFor(f) == com.example.model.FieldSource.AI }
+                    }
+                    val updatedReport = JadhadhaParser.buildReport(
+                        plan = aiPlan,
+                        isComponentDefaulted = false,
+                        unclassifiedLines = emptyList(),
+                        aiClassifiedLinesCount = unclassifiedBefore,
+                        aiRefinedFieldsCount = aiFieldsCount,
+                        isAiDelegated = true
+                    )
+                    val updatedParseResult = ParseResult(plan = aiPlan, report = updatedReport)
+                    if (applyImmediately) {
+                        repository.savePlan(aiPlan, isCustom = true)
+                        _uiState.value = _uiState.value.copy(
+                            currentPlan = aiPlan,
+                            activeComponent = aiPlan.componentType,
+                            extractorParseResult = updatedParseResult,
+                            extraction = ExtractionState.Done(
+                                fileName = _uiState.value.extractorFileName,
+                                extractedText = rawText,
+                                isAiTranscribed = _uiState.value.extractorIsAiTranscribed
+                            ),
+                            lastParseReport = updatedReport,
+                            isParsing = false,
+                            selectedTab = AppTab.MODEL_EDITOR,
+                            successMessage = "تم التفريغ الذكي الشامل (${ltr("AI")}) وتوزيع عناصر الجذاذة بالكامل بنجاح!"
+                        )
+                    } else {
+                        _uiState.value = _uiState.value.copy(
+                            extractorParseResult = updatedParseResult,
+                            extraction = ExtractionState.Done(
+                                fileName = _uiState.value.extractorFileName,
+                                extractedText = rawText,
+                                isAiTranscribed = _uiState.value.extractorIsAiTranscribed
+                            ),
+                            isParsing = false,
+                            successMessage = "تم التفريغ الذكي الشامل (${ltr("AI")}) وتوزيع 100% من عناصر الجذاذة!"
+                        )
+                    }
+                }.onFailure { err ->
+                    _uiState.value = _uiState.value.copy(
+                        isParsing = false,
+                        errorMessage = err.message ?: "تعذر إتمام التفريغ الذكي الشامل."
+                    )
+                }
+            } catch (e: CancellationException) {
+                throw e
+            }
+        }
+    }
+
     fun assignExtractorUnclassifiedLine(line: UnclassifiedLine, stageKey: String, field: String) {
         val currentResult = _uiState.value.extractorParseResult ?: return
         val updated = JadhadhaParser.assignUnclassifiedLine(

@@ -657,7 +657,8 @@ class ExampleRobolectricTest {
             </w:document>
         """.trimIndent()
         val shiftEnterLines = com.example.extractor.DocumentFileReader.parseDocumentXml(shiftEnterXml).lines()
-        assertTrue(shiftEnterLines.contains("<u>عنوان مسطر:</u> غير مسطر: كلمة1 كلمة2-مركب مضاف"))
+        assertTrue(shiftEnterLines.contains("عنوان مسطر: غير مسطر: كلمة1 كلمة2-مركب مضاف"))
+        assertTrue(!shiftEnterLines.any { it.contains("<u>") || it.contains("<b>") })
         assertTrue(!shiftEnterLines.any { it.contains("محذوف1") })
         assertTrue(shiftEnterLines.contains("السطر الأول في الخلية"))
         assertTrue(shiftEnterLines.contains("السطر الثاني بعد Shift+Enter"))
@@ -906,7 +907,111 @@ class ExampleRobolectricTest {
         com.example.ai.GeminiAiService.clearSavedApiKey(context)
         assertEquals("", com.example.ai.GeminiAiService.getSavedApiKey(context))
     }
+
+    @Test
+    fun `test hybrid architecture - gridSpan vMerge split headers intra-cell stage splitting semantic verbs and AI extraction`() = kotlinx.coroutines.runBlocking {
+        // 1. DocumentFileReader: 2-row split header with gridSpan + vMerge + dual evaluation columns + pre-lesson header table
+        val complexDocxXml = """
+            <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <w:body>
+                <w:tbl>
+                  <w:tr>
+                    <w:tc><w:p><w:r><w:t>جذاذة تربوية</w:t></w:r></w:p></w:tc>
+                    <w:tc><w:p><w:r><w:t>الفئة المستهدفة: الثالثة ثانوي إعدادي</w:t></w:r></w:p></w:tc>
+                    <w:tc><w:p><w:r><w:t>المكون: النصوص القرائية</w:t></w:r></w:p></w:tc>
+                  </w:tr>
+                  <w:tr>
+                    <w:tc><w:p><w:r><w:t>الموضوع: التضامن الإنساني</w:t></w:r></w:p></w:tc>
+                    <w:tc><w:p><w:r><w:t>الوسائل الديدكتيكية: الكتاب المدرسي والسبورة</w:t></w:r></w:p></w:tc>
+                    <w:tc><w:p><w:r><w:t>الكفاية التواصلية: التواصل السليم باللغة العربية</w:t></w:r></w:p></w:tc>
+                  </w:tr>
+                </w:tbl>
+                <w:tbl>
+                  <w:tr>
+                    <w:tc><w:tcPr><w:vMerge w:val="restart"/></w:tcPr><w:p><w:r><w:t>المراحل</w:t></w:r></w:p></w:tc>
+                    <w:tc><w:tcPr><w:vMerge w:val="restart"/></w:tcPr><w:p><w:r><w:t>القدرات</w:t></w:r></w:p></w:tc>
+                    <w:tc><w:tcPr><w:gridSpan w:val="2"/></w:tcPr><w:p><w:r><w:t>الأنشطة التعليمية التعلمية</w:t></w:r></w:p></w:tc>
+                    <w:tc><w:tcPr><w:gridSpan w:val="2"/></w:tcPr><w:p><w:r><w:t>التقويم والدعم</w:t></w:r></w:p></w:tc>
+                  </w:tr>
+                  <w:tr>
+                    <w:tc><w:tcPr><w:vMerge/></w:tcPr><w:p/></w:tc>
+                    <w:tc><w:tcPr><w:vMerge/></w:tcPr><w:p/></w:tc>
+                    <w:tc><w:p><w:r><w:t>أنشطة المدرس</w:t></w:r></w:p></w:tc>
+                    <w:tc><w:p><w:r><w:t>أنشطة المتعلمين</w:t></w:r></w:p></w:tc>
+                    <w:tc><w:p><w:r><w:t>التقويم</w:t></w:r></w:p></w:tc>
+                    <w:tc><w:p><w:r><w:t>مؤشرات التقويم</w:t></w:r></w:p></w:tc>
+                  </w:tr>
+                  <w:tr>
+                    <w:tc><w:p><w:r><w:t>الحصة الثانية: القراءة التحليلية</w:t></w:r></w:p></w:tc>
+                    <w:tc><w:p><w:r><w:t>القدرة على تحليل الحقول الدلالية وتركيب خلاصة النص</w:t></w:r></w:p></w:tc>
+                    <w:tc><w:p><w:r><w:t>يساعد المتعلمين على جرد المعجم المهيمن</w:t></w:r></w:p></w:tc>
+                    <w:tc>
+                      <w:p><w:r><w:t>الحقول الدلالية: حقل التضامن وحقل المجتمع</w:t></w:r></w:p>
+                      <w:p><w:r><w:t>التركيب: خلاصة تركيبية تبرز قيمة التضامن الإنساني</w:t></w:r></w:p>
+                      <w:p><w:r><w:t>الاستثمار: ابحث عن نماذج للعمل الجمعوي التضامني</w:t></w:r></w:p>
+                    </w:tc>
+                    <w:tc><w:p><w:r><w:t>تقويم تكويني وإجمالي</w:t></w:r></w:p></w:tc>
+                    <w:tc><w:p><w:r><w:t>مشاركة أغلب المتعلمين في التحليل والتركيب</w:t></w:r></w:p></w:tc>
+                  </w:tr>
+                </w:tbl>
+              </w:body>
+            </w:document>
+        """.trimIndent()
+
+        val extracted = com.example.extractor.DocumentFileReader.parseDocumentXml(complexDocxXml)
+        assertTrue(!extracted.contains("<u>") && !extracted.contains("<b>"))
+
+        val parseResult = com.example.extractor.JadhadhaParser.parseWithReport(extracted, "درس افتراضي")
+        val plan = parseResult.plan
+
+        // Verify Header Isolation populated JadhadhaInfo and did NOT leak into unclassifiedLines
+        assertEquals("التضامن الإنساني", plan.topic)
+        assertEquals("الثالثة ثانوي إعدادي", plan.info.level)
+        assertEquals("الكتاب المدرسي والسبورة", plan.info.materials)
+        assertEquals("التواصل السليم باللغة العربية", plan.info.communicativeComp)
+        assertEquals(0, parseResult.report.unclassifiedLines.size)
+
+        // Verify Dual Evaluation Columns merged into analysis.eval
+        val analysisStage = plan.stages["analysis"]!!
+        assertTrue(analysisStage.eval.any { it.contains("تقويم تكويني وإجمالي") })
+        assertTrue(analysisStage.eval.any { it.contains("مشاركة أغلب المتعلمين") })
+
+        // Verify Intra-Cell Stage Splitting distributed lines across analysis, synthesis, and investment
+        assertTrue(analysisStage.content.any { it.contains("حقل التضامن وحقل المجتمع") })
+        assertTrue(plan.stages["synthesis"]!!.content.any { it.contains("خلاصة تركيبية تبرز قيمة التضامن الإنساني") })
+        assertTrue(plan.stages["investment"]!!.content.any { it.contains("ابحث عن نماذج للعمل الجمعوي التضامني") })
+
+        // 2. Verify Semantic Verb-Prefix Fallback on unstructured stage paragraphs
+        val semanticRaw = """
+            المكون: النصوص القرائية
+            الموضوع: القيم الوطنية
+            ملاحظة النص وتأطيره
+            قدرة المتعلم على تأطير النص وصياغة فرضياته
+            يطالب المتعلمين بملاحظة العنوان والصورة المرفقة
+            يؤطرون النص انطلاقاً من العتبات الخارجية
+            يصوغ المتعلمون فرضيات القراءة
+        """.trimIndent()
+        val semanticPlan = com.example.extractor.JadhadhaParser.parseRawText(semanticRaw, "القيم الوطنية")
+        val obsStage = semanticPlan.stages["observation"]!!
+        assertTrue(obsStage.abil.any { it.contains("قدرة المتعلم على تأطير النص") })
+        assertTrue(obsStage.teacher.any { it.contains("يطالب المتعلمين بملاحظة العنوان") })
+        assertTrue(obsStage.content.any { it.contains("يؤطرون النص") })
+        assertTrue(obsStage.content.any { it.contains("يصوغ المتعلمون فرضيات القراءة") })
+
+        // 3. Verify GeminiAiService.parseRawJadhadhaWithAi distributes 100% of information
+        val aiResult = com.example.ai.GeminiAiService.parseRawJadhadhaWithAi(
+            rawText = extracted,
+            componentType = "READING"
+        )
+        assertTrue(aiResult.isSuccess)
+        val aiPlan = aiResult.getOrThrow()
+        assertEquals("التضامن الإنساني", aiPlan.topic)
+        assertEquals(6, aiPlan.stages.size)
+        assertTrue(aiPlan.stages["synthesis"]!!.content.any { it.contains("خلاصة تركيبية") })
+        assertTrue(aiPlan.stages["investment"]!!.content.any { it.contains("ابحث عن نماذج") })
+    }
 }
+
 
 
 

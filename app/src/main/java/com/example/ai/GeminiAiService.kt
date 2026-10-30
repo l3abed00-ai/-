@@ -522,6 +522,243 @@ object GeminiAiService {
         return stageKey to field
     }
 
+    /**
+     * Comprehensive Smart AI Extraction (`تفريغ ذكي شامل (AI)`):
+     * Takes the full text extracted from a Word (.docx) or text file, analyzes it with Gemini,
+     * and returns a structured [JadhadhaPlan] distributing 100% of the jadhadha information
+     * accurately across the stages of the active component (المحتوى، أنشطة المدرس، أنشطة المتعلم، القدرات، التقويم)
+     * without dropping any sentence.
+     */
+    suspend fun parseRawJadhadhaWithAi(
+        rawText: String,
+        componentType: String,
+        customKey: String? = null
+    ): Result<JadhadhaPlan> = withContext(Dispatchers.IO) {
+        coroutineContext.ensureActive()
+        val resolvedComponent = resolvePedagogicalComponent(componentType)
+        val structuralResult = com.example.extractor.JadhadhaParser.parseWithReport(
+            raw = rawText,
+            fallbackTopic = "درس تطبيقي",
+            forcedComponent = resolvedComponent
+        )
+        val activeComponent = resolvedComponent ?: structuralResult.plan.componentType
+        val initialTopic = DocumentFileReader.cleanTopicFromFilename(structuralResult.plan.topic)
+            .ifBlank { structuralResult.plan.topic }
+
+        val apiKey = getEffectiveApiKey(customKey)
+        if (apiKey.isNotBlank() && !apiKey.startsWith("AQ.", ignoreCase = true) && rawText.isNotBlank()) {
+            val prompt = buildRawJadhadhaAiExtractionPrompt(rawText, activeComponent, initialTopic)
+            for (model in API_MODELS) {
+                coroutineContext.ensureActive()
+                try {
+                    val extractedPlan = callModelForRawExtraction(
+                        model = model,
+                        apiKey = apiKey,
+                        prompt = prompt,
+                        rawText = rawText,
+                        component = activeComponent,
+                        structuralBaseline = structuralResult.plan
+                    )
+                    return@withContext Result.success(extractedPlan)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                    // Try next model or fallback to hybrid structural + built-in AI classifier
+                }
+            }
+        }
+
+        val refinedResult = classifyAndRefineExtraction(
+            rawText = rawText,
+            initialResult = structuralResult,
+            customKey = customKey
+        )
+        Result.success(refinedResult.plan)
+    }
+
+    private fun resolvePedagogicalComponent(componentType: String): PedagogicalComponent? {
+        val norm = componentType.trim().lowercase()
+        if (norm.isEmpty()) return null
+        return when {
+            norm == "reading" || norm.contains("قرائي") || norm.contains("قراءة") || norm.contains("نصوص") ->
+                PedagogicalComponent.READING
+            norm == "language" || norm.contains("لغوي") || norm.contains("لغة") || norm.contains("ظاهرة") ->
+                PedagogicalComponent.LANGUAGE
+            norm == "expression" || norm.contains("تعبير") || norm.contains("إنشاء") || norm.contains("انشاء") ->
+                PedagogicalComponent.EXPRESSION
+            else -> runCatching { PedagogicalComponent.valueOf(componentType.trim().uppercase()) }.getOrNull()
+        }
+    }
+
+    private fun buildRawJadhadhaAiExtractionPrompt(
+        rawText: String,
+        component: PedagogicalComponent,
+        fallbackTopic: String
+    ): String {
+        val stagesMeta = StageCatalog.getStagesForComponent(component)
+        val stagesSchema = stagesMeta.joinToString(",\n") { sm ->
+            """    "${sm.key}": {
+      "abil": ["القدرات والأهداف المستهدفة الخاصة بـ ${sm.title}"],
+      "teacher": ["أنشطة المدرس وتوجيهاته الخاصة بـ ${sm.title}"],
+      "learner": ["أنشطة المتعلم وإجاباته الخاصة بـ ${sm.title}"],
+      "content": ["المحتوى الديداكتيكي والمضامين والأمثلة الخاصة بـ ${sm.title}"],
+      "eval": ["مؤشرات التقويم والدعم الخاصة بـ ${sm.title}"]
+    }"""
+        }
+
+        return """
+أنت مفتش تربوي ومحلل بيداغوجي خبير في تدريس اللغة العربية بالتعليم الثانوي بالمغرب (نموذج $PRIMARY_MODEL).
+المهمة: تحليل النص الكامل المستخرج من ملف جذاذة درس (مكون: ${component.title}) وإرجاع كائن JSON مهيكل يوزع 100% من معلومات الجذاذة بدقة تامة على الترويسة ومراحل المكون النشط (المحتوى، أنشطة المدرس، أنشطة المتعلم، القدرات، التقويم) دون إسقاط أو حذف أي جملة أو جدول فرعي.
+
+قواعد التوزيع الصارمة:
+1. عزل الترويسة: ضع بيانات الترويسة (الموضوع، الفئة المستهدفة/المستوى، الوحدة، المجال، المكون، الغلاف الزمني، الوسائل الديدكتيكية، الكفايات التواصلية والمنهجية والثقافية) في كائن "info" و"topic"، ولا تُدخلها في المراحل.
+2. عدم إسقاط أي جملة (100% حفظ للمحتوى): وزّع كل جملة أو فقرة أو مثال أو سؤال أو جدول تحليلي ورد في النص المستخرج على المرحلة والخليّة المناسبة له:
+   - "abil": القدرات المستهدفة والأهداف التعلمية.
+   - "teacher": أنشطة المدرس ومهامه وتوجيهاته وأسئلته.
+   - "learner": أنشطة المتعلم ومهامه وإجاباته.
+   - "content": المحتوى الديداكتيكي والمضامين والشواهد والأمثلة والاستنتاجات.
+   - "eval": التقويم والدعم ومؤشرات التقويم.
+3. التقسيم المرحلي الداخلي: إذا وردت عدة مراحل مدمجة في فقرة أو خلية واحدة (مثل التحليل والتركيب والاستثمار)، افصلها بدقة في مراحلها المستقلة المقابلة.
+
+النص المستخرج من ملف الجذاذة:
+<<<
+$rawText
+>>>
+
+أرجع النتيجة بصيغة JSON حصراً دون أي نص خارجي أو علامات markdown، وفق الهيكل التالي:
+{
+  "topic": "$fallbackTopic",
+  "component": "${component.id}",
+  "info": {
+    "level": "الثالثة ثانوي إعدادي",
+    "unit": "الوحدة...",
+    "domain": "المجال...",
+    "component": "${component.title}",
+    "duration": "${component.defaultDuration}",
+    "materials": "${component.defaultMaterials}",
+    "communicative": "الكفاية التواصلية...",
+    "methodological": "الكفاية المنهجية...",
+    "cultural": "الكفاية الثقافية..."
+  },
+  "stages": {
+$stagesSchema
+  }
+}
+""".trimIndent()
+    }
+
+    private fun callModelForRawExtraction(
+        model: String,
+        apiKey: String,
+        prompt: String,
+        rawText: String,
+        component: PedagogicalComponent,
+        structuralBaseline: JadhadhaPlan
+    ): JadhadhaPlan {
+        val url = "$API_BASE/models/$model:generateContent"
+        val bodyJson = JSONObject().apply {
+            put("contents", JSONArray().apply {
+                put(JSONObject().apply {
+                    put("role", "user")
+                    put("parts", JSONArray().apply {
+                        put(JSONObject().apply { put("text", prompt) })
+                    })
+                })
+            })
+            put("generationConfig", JSONObject().apply {
+                put("responseMimeType", "application/json")
+                put("temperature", 0.2)
+            })
+        }
+
+        val request = Request.Builder()
+            .url(url)
+            .addHeader("x-goog-api-key", apiKey)
+            .addHeader("Content-Type", "application/json")
+            .post(bodyJson.toString().toRequestBody("application/json".toMediaType()))
+            .build()
+
+        val response = client.newCall(request).execute()
+        val responseBody = response.body?.string().orEmpty()
+        if (!response.isSuccessful) {
+            val errMsg = runCatching {
+                JSONObject(responseBody).getJSONObject("error").getString("message")
+            }.getOrDefault(response.message)
+            throw RuntimeException("خطأ في الخادم ($model): $errMsg")
+        }
+
+        val respJson = JSONObject(responseBody)
+        val candidates = respJson.optJSONArray("candidates")
+        if (candidates == null || candidates.length() == 0) {
+            throw RuntimeException("استجابة فارغة من النموذج ($model)")
+        }
+
+        val parts = candidates.getJSONObject(0)
+            .getJSONObject("content")
+            .getJSONArray("parts")
+        val rawJsonText = parts.getJSONObject(0).getString("text")
+            .trim()
+            .removePrefix("```json")
+            .removePrefix("```")
+            .removeSuffix("```")
+            .trim()
+
+        val json = JSONObject(rawJsonText)
+        val parsed = parsePlanFromJson(json, structuralBaseline.topic, rawText, component)
+
+        // Merge any learner array items into content and preserve FILE items from structuralBaseline
+        val stagesObj = json.optJSONObject("stages") ?: JSONObject()
+        val mergedStages = parsed.stages.mapValues { (stageKey, aiStage) ->
+            val stObj = stagesObj.optJSONObject(stageKey) ?: JSONObject()
+            val learnerItems = jsonArrayToList(stObj.optJSONArray("learner"))
+            val baselineStage = structuralBaseline.stages[stageKey]
+
+            val combinedContent = buildList {
+                addAll(aiStage.content)
+                addAll(learnerItems)
+                if (baselineStage?.sourceFor("content") == FieldSource.FILE) {
+                    addAll(baselineStage.content)
+                }
+            }.distinct()
+
+            val combinedTeacher = buildList {
+                addAll(aiStage.teacher)
+                if (baselineStage?.sourceFor("teacher") == FieldSource.FILE) {
+                    addAll(baselineStage.teacher)
+                }
+            }.distinct()
+
+            val combinedAbil = buildList {
+                addAll(aiStage.abil)
+                if (baselineStage?.sourceFor("abil") == FieldSource.FILE) {
+                    addAll(baselineStage.abil)
+                }
+            }.distinct()
+
+            val combinedEval = buildList {
+                addAll(aiStage.eval)
+                if (baselineStage?.sourceFor("eval") == FieldSource.FILE) {
+                    addAll(baselineStage.eval)
+                }
+            }.distinct()
+
+            aiStage.copy(
+                content = combinedContent,
+                teacher = combinedTeacher,
+                abil = combinedAbil,
+                eval = combinedEval,
+                sources = mapOf(
+                    "content" to if (baselineStage?.sourceFor("content") == FieldSource.FILE) FieldSource.FILE else FieldSource.AI,
+                    "teacher" to if (baselineStage?.sourceFor("teacher") == FieldSource.FILE) FieldSource.FILE else FieldSource.AI,
+                    "abil" to if (baselineStage?.sourceFor("abil") == FieldSource.FILE) FieldSource.FILE else FieldSource.AI,
+                    "eval" to if (baselineStage?.sourceFor("eval") == FieldSource.FILE) FieldSource.FILE else FieldSource.AI
+                )
+            )
+        }
+
+        return parsed.copy(stages = mergedStages)
+    }
+
     suspend fun generateJadhadha(
         topic: String,
         lessonText: String = "",
