@@ -30,14 +30,11 @@ import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Verified
-import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -54,6 +51,11 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
 import com.example.docx.DocxGenerator
 import com.example.model.JadhadhaPlan
+import com.example.ui.components.AppButton
+import com.example.ui.components.AppOutlinedButton
+import com.example.ui.components.AppTonalButton
+import com.example.ui.components.ButtonLabel
+import com.example.ui.components.ltr
 import java.io.File
 
 @Composable
@@ -117,13 +119,13 @@ fun DocxExportScreen(
 
                     Column {
                         Text(
-                            text = "تصدير وحفظ ملف Word (.docx)",
+                            text = "تصدير وحفظ ملف ${ltr("Word")} (${ltr(".docx")})",
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold,
                             color = MaterialTheme.colorScheme.onPrimaryContainer
                         )
                         Text(
-                            text = "يُحفظ تلقائياً في مجلد التنزيلات (Downloads) بهاتفك",
+                            text = "يُحفظ تلقائياً في مجلد التنزيلات (${ltr("Downloads")}) بهاتفك",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.primary
                         )
@@ -157,18 +159,18 @@ fun DocxExportScreen(
                     com.example.model.PedagogicalComponent.LANGUAGE -> "مراحل الدرس اللغوي الخمس مع الجداول التحليلية"
                     com.example.model.PedagogicalComponent.EXPRESSION -> "الحصص الأربع (الاكتساب، التطبيق، الإنتاج، التصحيح)"
                 })
-                DetailItem("مكان الحفظ بالهاتف:", "مجلد التنزيلات (Downloads / التنزيلات)")
+                DetailItem("مكان الحفظ بالهاتف:", "مجلد التنزيلات (${ltr("Downloads")} / التنزيلات)")
             }
         }
 
         // Primary Action: Generate / Export DOCX to Downloads
-        Button(
+        AppButton(
             onClick = {
                 val file = onExportDocx(context)
                 currentFile = file
                 Toast.makeText(
                     context,
-                    "تم حفظ الجذاذة في مجلد التنزيلات (Downloads): ${file.name}",
+                    "تم حفظ الجذاذة في مجلد التنزيلات (${ltr("Downloads")}): ${ltr(file.name)}",
                     Toast.LENGTH_LONG
                 ).show()
             },
@@ -180,17 +182,16 @@ fun DocxExportScreen(
                 containerColor = MaterialTheme.colorScheme.primary
             )
         ) {
-            Icon(imageVector = Icons.Default.Download, contentDescription = null)
-            Spacer(modifier = Modifier.width(8.dp))
-            Text(
-                "حفظ في مجلد التنزيلات (Downloads) بصيغة Word",
-                fontWeight = FontWeight.Bold,
-                style = MaterialTheme.typography.bodyLarge
+            ButtonLabel(
+                text = "حفظ في مجلد التنزيلات (${ltr("Downloads")}) بصيغة ${ltr("Word")}",
+                icon = Icons.Default.Download,
+                style = MaterialTheme.typography.bodyLarge,
+                fontWeight = FontWeight.Bold
             )
         }
 
         // Secondary Action: Save As (Choose Folder on Phone)
-        FilledTonalButton(
+        AppTonalButton(
             onClick = {
                 val file = currentFile ?: onExportDocx(context).also { currentFile = it }
                 saveAsLauncher.launch(file.name)
@@ -200,10 +201,9 @@ fun DocxExportScreen(
                 .height(48.dp)
                 .testTag("save_as_docx_button")
         ) {
-            Icon(imageVector = Icons.Default.Folder, contentDescription = null)
-            Spacer(modifier = Modifier.width(8.dp))
-            Text(
-                "حفظ في الهاتف باسم... (اختيار مجلد آخر)",
+            ButtonLabel(
+                text = "حفظ في الهاتف باسم... (اختيار مجلد آخر)",
+                icon = Icons.Default.Folder,
                 fontWeight = FontWeight.Bold
             )
         }
@@ -227,12 +227,12 @@ fun DocxExportScreen(
                         Spacer(modifier = Modifier.width(8.dp))
                         Column {
                             Text(
-                                text = "الملف جاهز: ${file.name}",
+                                text = "الملف جاهز: ${ltr(file.name)}",
                                 style = MaterialTheme.typography.titleSmall,
                                 fontWeight = FontWeight.Bold
                             )
                             Text(
-                                text = "تجدها على هاتفك في: تطبيق الملفات ← التنزيلات (Downloads)",
+                                text = "تجدها على هاتفك في: تطبيق الملفات ← التنزيلات (${ltr("Downloads")})",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -245,7 +245,7 @@ fun DocxExportScreen(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Button(
+                        AppButton(
                             onClick = { openDocxFile(context, file) },
                             modifier = Modifier
                                 .weight(1f)
@@ -254,20 +254,24 @@ fun DocxExportScreen(
                                 containerColor = MaterialTheme.colorScheme.primary
                             )
                         ) {
-                            Icon(imageVector = Icons.AutoMirrored.Filled.OpenInNew, contentDescription = null, modifier = Modifier.size(18.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("فتح في Word")
+                            ButtonLabel(
+                                text = "فتح في ${ltr("Word")}",
+                                icon = Icons.AutoMirrored.Filled.OpenInNew,
+                                iconSize = 18.dp
+                            )
                         }
 
-                        OutlinedButton(
+                        AppOutlinedButton(
                             onClick = { shareDocxFile(context, file) },
                             modifier = Modifier
                                 .weight(1f)
                                 .testTag("share_docx_button")
                         ) {
-                            Icon(imageVector = Icons.Default.Share, contentDescription = null, modifier = Modifier.size(18.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("مشاركة")
+                            ButtonLabel(
+                                text = "مشاركة",
+                                icon = Icons.Default.Share,
+                                iconSize = 18.dp
+                            )
                         }
                     }
                 }
@@ -289,12 +293,15 @@ fun DocxExportScreen(
                     fontWeight = FontWeight.Bold
                 )
                 Spacer(modifier = Modifier.height(8.dp))
-                FeatureCheckItem("تُحفظ ملفات Word تلقائياً في مجلد «التنزيلات / Downloads» على هاتفك.")
+                FeatureCheckItem("تُحفظ ملفات ${ltr("Word")} تلقائياً في مجلد «التنزيلات / ${ltr("Downloads")}» على هاتفك.")
                 FeatureCheckItem("يمكنك اختيار أي مجلد آخر في هاتفك عبر زر «حفظ في الهاتف باسم...».")
-                FeatureCheckItem("يمكنك إرسال الجذاذة عبر واتساب أو تيليجرام أو Google Drive عبر زر «مشاركة».")
+                FeatureCheckItem("يمكنك إرسال الجذاذة عبر واتساب أو تيليجرام أو ${ltr("Google Drive")} عبر زر «مشاركة».")
                 FeatureCheckItem("في قسم «تفريغ الجذاذات» ستجد قائمة مباشرة بجميع الجذاذات المحفوظة لرفعها بضغطة واحدة.")
             }
         }
+
+        // Bottom space so FloatingQuickBar never covers the last card
+        Spacer(modifier = Modifier.height(88.dp))
     }
 }
 
@@ -372,7 +379,7 @@ fun shareDocxFile(context: Context, file: File) {
         val intent = Intent(Intent.ACTION_SEND).apply {
             type = DocxGenerator.DOCX_MIME_TYPE
             putExtra(Intent.EXTRA_STREAM, uri)
-            putExtra(Intent.EXTRA_SUBJECT, "جذاذة ${file.name}")
+            putExtra(Intent.EXTRA_SUBJECT, "جذاذة ${ltr(file.name)}")
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
         context.startActivity(Intent.createChooser(intent, "مشاركة الجذاذة عبر..."))

@@ -25,7 +25,7 @@ import com.example.model.StageData
 import com.example.model.SuggestedObjectives
 import com.example.model.UnclassifiedLine
 import com.example.python.PythonToolkit
-import com.example.ui.theme.AppUiFont
+import com.example.ui.components.ltr
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -40,10 +40,10 @@ import java.io.File
 enum class AppTab(val title: String) {
     COMPONENTS_HUB("ركن المكونات"),
     MODEL_EDITOR("المحرر"),
-    WORD_PREVIEW("معاينة Word"),
+    WORD_PREVIEW("معاينة ${ltr("Word")}"),
     EXTRACTOR("تفريغ وتحويل"),
     AI_GENERATOR("الذكاء الاصطناعي"),
-    EXPORT_DOCX("تصدير Word"),
+    EXPORT_DOCX("تصدير ${ltr("Word")}"),
     PYTHON_TOOLKIT("أداة بايثون"),
     SAMPLES("بنك النماذج")
 }
@@ -71,7 +71,6 @@ data class JadhadhaUiState(
     val isSuggestingContent: Boolean = false,
     val suggestedObjectives: SuggestedObjectives? = null,
     val isDarkMode: Boolean = false,
-    val appUiFont: AppUiFont = AppUiFont.READEX_PRO,
     val errorMessage: String? = null,
     val successMessage: String? = null,
     val lastGeneratedFile: File? = null,
@@ -116,17 +115,14 @@ data class JadhadhaUiState(
         get() = StageCatalog.getStagesForComponent(activeComponent).size
 
     val stagesFilledCount: Int
-        get() {
-            val required = StageCatalog.getStagesForComponent(activeComponent)
-            return required.count { stageMeta ->
-                val data = currentPlan.stages[stageMeta.key]
-                data != null && (
-                    data.content.any { it.isNotBlank() } ||
+        get() = StageCatalog.getStagesForComponent(activeComponent).count { stageMeta ->
+            val data = currentPlan.stages[stageMeta.key]
+            data != null && (
+                data.content.any { it.isNotBlank() } ||
                     data.eval.any { it.isNotBlank() } ||
                     data.teacher.any { it.isNotBlank() } ||
                     data.abil.any { it.isNotBlank() }
                 )
-            }
         }
 
     val completionPercentage: Int
@@ -147,16 +143,7 @@ class JadhadhaViewModel(
         JadhadhaRepository(AppDatabase.getDatabase(application).jadhadhaDao())
     )
 
-    private val uiPrefs = application.getSharedPreferences("jadhadha_ui_prefs", Context.MODE_PRIVATE)
-
-    private val _uiState = MutableStateFlow(
-        JadhadhaUiState(
-            appUiFont = runCatching {
-                val savedName = uiPrefs.getString("app_ui_font", AppUiFont.READEX_PRO.name)
-                AppUiFont.valueOf(savedName ?: AppUiFont.READEX_PRO.name)
-            }.getOrDefault(AppUiFont.READEX_PRO)
-        )
-    )
+    private val _uiState = MutableStateFlow(JadhadhaUiState())
     val uiState: StateFlow<JadhadhaUiState> = _uiState.asStateFlow()
 
     private var extractionJob: Job? = null
@@ -185,14 +172,6 @@ class JadhadhaViewModel(
 
     fun setDarkMode(dark: Boolean) {
         _uiState.value = _uiState.value.copy(isDarkMode = dark)
-    }
-
-    fun setAppUiFont(font: AppUiFont) {
-        uiPrefs.edit().putString("app_ui_font", font.name).apply()
-        _uiState.value = _uiState.value.copy(
-            appUiFont = font,
-            successMessage = "تم تغيير خط واجهة التطبيق إلى: ${font.label}"
-        )
     }
 
     fun setActiveComponent(component: PedagogicalComponent) {
@@ -348,7 +327,7 @@ class JadhadhaViewModel(
                     }
                     if (pdfBytes.size > GeminiAiService.MAX_PDF_INLINE_BYTES) {
                         _uiState.value = _uiState.value.copy(
-                            extraction = ExtractionState.Error("حجم ملف PDF يتجاوز الحد الأقصى المسموح به للتفريغ (10 ميغابايت)."),
+                            extraction = ExtractionState.Error("حجم ملف ${ltr("PDF")} يتجاوز الحد الأقصى المسموح به للتفريغ (10 ميغابايت)."),
                             isParsing = false
                         )
                         return@launch
@@ -512,7 +491,7 @@ class JadhadhaViewModel(
                 }.onFailure { err ->
                     _uiState.value = _uiState.value.copy(
                         extraction = ExtractionState.Error(
-                            err.message ?: "تعذر تفريغ ملف PDF عبر Gemini."
+                            err.message ?: "تعذر تفريغ ملف ${ltr("PDF")} عبر ${ltr("Gemini")}."
                         ),
                         isParsing = false
                     )
@@ -521,7 +500,7 @@ class JadhadhaViewModel(
                 throw e
             } catch (_: Exception) {
                 _uiState.value = _uiState.value.copy(
-                    extraction = ExtractionState.Error("تعذر تفريغ ملف PDF عبر Gemini."),
+                    extraction = ExtractionState.Error("تعذر تفريغ ملف ${ltr("PDF")} عبر ${ltr("Gemini")}."),
                     isParsing = false
                 )
             }
@@ -537,7 +516,7 @@ class JadhadhaViewModel(
             showPdfApiKeyDialog = false,
             showPdfConfirmationDialog = hasPendingPdf && isValid,
             extraction = if (isValid) ExtractionState.Idle else ExtractionState.Error(GeminiAiService.MSG_PDF_NEEDS_KEY),
-            successMessage = if (trimmed.isNotBlank()) "تم حفظ مفتاح Gemini بنجاح." else null
+            successMessage = if (trimmed.isNotBlank()) "تم حفظ مفتاح ${ltr("Gemini")} بنجاح." else null
         )
     }
 
@@ -851,7 +830,7 @@ class JadhadhaViewModel(
                 _uiState.value = _uiState.value.copy(
                     isSuggestingContent = false,
                     suggestedObjectives = suggestions,
-                    successMessage = "تم اقتراح الأهداف التعليمية بنموذج Gemini 3.8 Flash بنجاح!"
+                    successMessage = "تم اقتراح الأهداف التعليمية بنموذج ${ltr("Gemini 3.8 Flash")} بنجاح!"
                 )
                 onResult?.invoke(suggestions)
             }.onFailure { err ->
@@ -900,7 +879,7 @@ class JadhadhaViewModel(
     fun setApiKey(key: String) {
         _uiState.value = _uiState.value.copy(
             customApiKey = key.trim(),
-            successMessage = "تم حفظ مفتاح Gemini بنجاح."
+            successMessage = "تم حفظ مفتاح ${ltr("Gemini")} بنجاح."
         )
     }
 
@@ -912,7 +891,7 @@ class JadhadhaViewModel(
         val file = DocxGenerator.generateDocx(context, _uiState.value.currentPlan, saveToDownloads = true)
         _uiState.value = _uiState.value.copy(
             lastGeneratedFile = file,
-            successMessage = "تم حفظ ملف Word في مجلد التنزيلات (Downloads) بالهاتف: ${file.name}"
+            successMessage = "تم حفظ ملف ${ltr("Word")} في مجلد التنزيلات (${ltr("Downloads")}) بالهاتف: ${ltr(file.name)}"
         )
         return file
     }
@@ -921,7 +900,7 @@ class JadhadhaViewModel(
         val file = PythonToolkit.exportJsonFile(context, _uiState.value.currentPlan)
         _uiState.value = _uiState.value.copy(
             lastGeneratedFile = file,
-            successMessage = "تم تصدير ملف JSON بنجاح: ${file.name}"
+            successMessage = "تم تصدير ملف ${ltr("JSON")} بنجاح: ${ltr(file.name)}"
         )
         return file
     }
@@ -931,7 +910,7 @@ class JadhadhaViewModel(
         val file = PythonToolkit.exportPythonScript(context, comp)
         _uiState.value = _uiState.value.copy(
             lastGeneratedFile = file,
-            successMessage = "تم تصدير سكريبت ${file.name} بنجاح!"
+            successMessage = "تم تصدير سكريبت ${ltr(file.name)} بنجاح!"
         )
         return file
     }

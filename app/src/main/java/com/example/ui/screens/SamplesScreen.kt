@@ -2,6 +2,8 @@ package com.example.ui.screens
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -21,7 +23,6 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FilterChip
@@ -30,7 +31,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -40,11 +41,16 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.model.JadhadhaCategories
 import com.example.model.JadhadhaPlan
-import com.example.model.PedagogicalComponent
+import com.example.ui.components.AppButton
+import com.example.ui.components.AppTextButton
+import com.example.ui.components.ButtonLabel
+import com.example.ui.components.ltr
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun SamplesScreen(
     savedPlans: List<JadhadhaPlan>,
@@ -101,7 +107,7 @@ fun SamplesScreen(
                                 shape = RoundedCornerShape(4.dp)
                             ) {
                                 Text(
-                                    text = "حفظ محلي وتصنيف منظم عبر Room Database",
+                                    text = "حفظ محلي وتصنيف منظم عبر ${ltr("Room Database")}",
                                     style = MaterialTheme.typography.labelSmall,
                                     color = MaterialTheme.colorScheme.primary,
                                     fontWeight = FontWeight.Bold,
@@ -112,7 +118,7 @@ fun SamplesScreen(
                     }
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
-                        text = "كافة الجذاذات المدخلة والمعدلة محفوظة ومصنفة (نصوص قرائية، درس لغوي، تعبير وإنشاء) في قاعدة بيانات Room المحلية لهاتفك، ويمكنك تصفيتها والرجوع إليها وتعديلها بسهولة.",
+                        text = "كافة الجذاذات المدخلة والمعدلة محفوظة ومصنفة (نصوص قرائية، درس لغوي، تعبير وإنشاء) في قاعدة بيانات ${ltr("Room")} المحلية لهاتفك، ويمكنك تصفيتها والرجوع إليها وتعديلها بسهولة.",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.85f)
                     )
@@ -134,27 +140,42 @@ fun SamplesScreen(
                         tint = MaterialTheme.colorScheme.primary
                     )
                     Text(
-                        text = "تصفية الجذاذات حسب التصنيف (Category):",
+                        text = "تصفية الجذاذات حسب التصنيف (${ltr("Category")}):",
                         style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.Bold
                     )
                 }
                 Spacer(modifier = Modifier.height(8.dp))
-                Row(
+                FlowRow(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
                     FilterChip(
                         selected = selectedCategoryFilter == null,
                         onClick = { selectedCategoryFilter = null },
-                        label = { Text("الكل (${savedPlans.size})") }
+                        label = {
+                            Text(
+                                text = "الكل (${savedPlans.size})",
+                                maxLines = 1,
+                                softWrap = false,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
                     )
                     allCategories.forEach { cat ->
                         val count = savedPlans.count { it.category == cat }
                         FilterChip(
                             selected = selectedCategoryFilter == cat,
                             onClick = { selectedCategoryFilter = cat },
-                            label = { Text("$cat ($count)") }
+                            label = {
+                                Text(
+                                    text = "$cat ($count)",
+                                    maxLines = 1,
+                                    softWrap = false,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
                         )
                     }
                 }
@@ -168,7 +189,7 @@ fun SamplesScreen(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = "الجذاذات المحفوظة في Room (${filteredPlans.size}):",
+                    text = "الجذاذات المحفوظة في ${ltr("Room")} (${filteredPlans.size}):",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold
                 )
@@ -272,14 +293,19 @@ fun SamplesScreen(
                                                 JadhadhaCategories.EXPRESSION -> MaterialTheme.colorScheme.onTertiaryContainer
                                                 else -> MaterialTheme.colorScheme.onSurfaceVariant
                                             },
-                                            fontWeight = FontWeight.Bold
+                                            fontWeight = FontWeight.Bold,
+                                            maxLines = 1,
+                                            softWrap = false,
+                                            overflow = TextOverflow.Ellipsis
                                         )
                                     }
                                 }
 
                                 IconButton(
                                     onClick = { planToDelete = plan },
-                                    modifier = Modifier.size(32.dp)
+                                    modifier = Modifier
+                                        .size(48.dp)
+                                        .minimumInteractiveComponentSize()
                                 ) {
                                     Icon(
                                         imageVector = Icons.Default.Delete,
@@ -301,19 +327,26 @@ fun SamplesScreen(
 
                         Spacer(modifier = Modifier.height(12.dp))
 
-                        Button(
+                        AppButton(
                             onClick = { onSelectPlan(plan) },
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .testTag("select_plan_${plan.id}")
                         ) {
-                            Icon(imageVector = Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(18.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("تحميل وتعديل في المحرر")
+                            ButtonLabel(
+                                text = "تحميل وتعديل في المحرر",
+                                icon = Icons.Default.Edit,
+                                iconSize = 18.dp
+                            )
                         }
                     }
                 }
             }
+        }
+
+        // Bottom space so FloatingQuickBar never covers the last card
+        item {
+            Spacer(modifier = Modifier.height(88.dp))
         }
     }
 
@@ -332,18 +365,18 @@ fun SamplesScreen(
                 Text("هل أنت متأكد من رغبتك في حذف جذاذة «${target.topic}» من قاعدة بيانات الهاتف المحلية؟")
             },
             confirmButton = {
-                Button(
+                AppButton(
                     onClick = {
                         onDeletePlan(target.id)
                         planToDelete = null
                     }
                 ) {
-                    Text("نعم، حذف")
+                    ButtonLabel("نعم، حذف")
                 }
             },
             dismissButton = {
-                TextButton(onClick = { planToDelete = null }) {
-                    Text("إلغاء")
+                AppTextButton(onClick = { planToDelete = null }) {
+                    ButtonLabel("إلغاء")
                 }
             }
         )

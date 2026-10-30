@@ -37,24 +37,21 @@ import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.UploadFile
 import androidx.compose.material.icons.filled.WarningAmber
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -72,6 +69,7 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.ai.GeminiAiService
 import com.example.docx.DocxGenerator
@@ -85,6 +83,12 @@ import com.example.model.StageCatalog
 import com.example.model.UnclassifiedLine
 import com.example.ui.ExtractionState
 import com.example.ui.JadhadhaViewModel
+import com.example.ui.components.AppButton
+import com.example.ui.components.AppOutlinedButton
+import com.example.ui.components.AppTextButton
+import com.example.ui.components.AppTonalButton
+import com.example.ui.components.ButtonLabel
+import com.example.ui.components.ltr
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -337,7 +341,7 @@ fun ExtractorScreen(
             },
             title = {
                 Text(
-                    text = "تأكيد تفريغ ملف PDF",
+                    text = "تأكيد تفريغ ملف ${ltr("PDF")}",
                     fontWeight = FontWeight.Bold
                 )
             },
@@ -351,7 +355,7 @@ fun ExtractorScreen(
                     )
                     pendingPdfFileName?.let { fname ->
                         Text(
-                            text = "الملف: $fname",
+                            text = "الملف: ${ltr(fname)}",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -359,21 +363,21 @@ fun ExtractorScreen(
                 }
             },
             confirmButton = {
-                Button(
+                AppButton(
                     onClick = { confirmPdfUpload() },
                     modifier = Modifier.testTag("pdf_confirm_accept_button")
                 ) {
-                    Text("موافق", fontWeight = FontWeight.Bold)
+                    ButtonLabel(text = "موافق")
                 }
             },
             dismissButton = {
-                OutlinedButton(
+                AppOutlinedButton(
                     onClick = {
                         if (viewModel != null) viewModel.dismissPdfDialogs() else localShowPdfConfirmDialog = false
                     },
                     modifier = Modifier.testTag("pdf_confirm_cancel_button")
                 ) {
-                    Text("إلغاء")
+                    ButtonLabel(text = "إلغاء", fontWeight = FontWeight.Medium)
                 }
             }
         )
@@ -395,7 +399,7 @@ fun ExtractorScreen(
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = "مفتاح Gemini مطلوب لتفريغ PDF",
+                        text = "مفتاح ${ltr("Gemini")} مطلوب لتفريغ ${ltr("PDF")}",
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold
                     )
@@ -413,8 +417,8 @@ fun ExtractorScreen(
                     OutlinedTextField(
                         value = keyDraft,
                         onValueChange = { keyDraft = it },
-                        label = { Text("مفتاح Gemini API (AIza...)") },
-                        placeholder = { Text("الصق مفتاح Gemini هنا...") },
+                        label = { Text("مفتاح ${ltr("Gemini API")} (${ltr("AIza...")})") },
+                        placeholder = { Text("الصق مفتاح ${ltr("Gemini")} هنا...") },
                         singleLine = true,
                         modifier = Modifier
                             .fillMaxWidth()
@@ -423,7 +427,7 @@ fun ExtractorScreen(
                 }
             },
             confirmButton = {
-                Button(
+                AppButton(
                     onClick = {
                         if (viewModel != null) {
                             viewModel.submitPdfApiKey(keyDraft)
@@ -439,17 +443,17 @@ fun ExtractorScreen(
                     enabled = keyDraft.trim().isNotBlank(),
                     modifier = Modifier.testTag("pdf_api_key_save_button")
                 ) {
-                    Text("حفظ ومتابعة", fontWeight = FontWeight.Bold)
+                    ButtonLabel(text = "حفظ ومتابعة")
                 }
             },
             dismissButton = {
-                TextButton(
+                AppTextButton(
                     onClick = {
                         if (viewModel != null) viewModel.dismissPdfDialogs() else localShowPdfKeyDialog = false
                     },
                     modifier = Modifier.testTag("pdf_api_key_cancel_button")
                 ) {
-                    Text("إلغاء")
+                    ButtonLabel(text = "إلغاء", fontWeight = FontWeight.Medium)
                 }
             }
         )
@@ -490,7 +494,7 @@ fun ExtractorScreen(
                 }
                 Spacer(modifier = Modifier.height(6.dp))
                 Text(
-                    text = "ارفع ملف الجذاذة المصدر (.docx أو PDF أو نص عربي) أو الصق مسودتها، وسيتولى نموذج الذكاء الاصطناعي المدمج تصنيف الأسطر والجداول الفرعية وتنقيح المراحل مع الحفاظ التام على تنسيق الجذاذة النموذجية (خط Sakkal Majalla 10pt عريض والألوان الرسمية) في جميع المكونات.",
+                    text = "ارفع ملف الجذاذة المصدر (${ltr(".docx")} أو ${ltr("PDF")} أو نص عربي) أو الصق مسودتها، وسيتولى نموذج الذكاء الاصطناعي المدمج تصنيف الأسطر والجداول الفرعية وتنقيح المراحل مع الحفاظ التام على تنسيق الجذاذة النموذجية (خط ${ltr("Sakkal Majalla 10pt")} عريض والألوان الرسمية) في جميع المكونات.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.85f)
                 )
@@ -514,27 +518,31 @@ fun ExtractorScreen(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = "تنسيق الجذاذة النموذجية (مجلد «الملف التربوي» — Google Drive):",
+                        text = "تنسيق الجذاذة النموذجية (مجلد «الملف التربوي» — ${ltr("Google Drive")}):",
                         style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onSecondaryContainer
+                        color = MaterialTheme.colorScheme.onSecondaryContainer,
+                        modifier = Modifier.weight(1f)
                     )
+                    Spacer(modifier = Modifier.width(6.dp))
                     Surface(
                         color = Color(0xFFD1FAE5),
                         shape = RoundedCornerShape(6.dp)
                     ) {
                         Text(
-                            text = "Sakkal Majalla 10pt Bold ✓",
+                            text = "${ltr("Sakkal Majalla 10pt Bold")} ✓",
                             style = MaterialTheme.typography.labelSmall,
                             color = Color(0xFF065F46),
                             fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            softWrap = false,
                             modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
                         )
                     }
                 }
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    text = "يحافظ التطبيق تلقائياً على تنسيق الجذاذات النموذجية في جميع المكونات (الألوان، الإطارات، الجداول التحليلية، وخط Sakkal Majalla بحجم 10pt عريض). كما يمكنك ربط ملف الجذاذة النموذجية من مجلد «الملف التربوي» على Google Drive لأي مكون:",
+                    text = "يحافظ التطبيق تلقائياً على تنسيق الجذاذات النموذجية في جميع المكونات (الألوان، الإطارات، الجداول التحليلية، وخط ${ltr("Sakkal Majalla")} بحجم ${ltr("10pt")} عريض). كما يمكنك ربط ملف الجذاذة النموذجية من مجلد «الملف التربوي» على ${ltr("Google Drive")} لأي مكون:",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -550,7 +558,7 @@ fun ExtractorScreen(
                         val boundName = remember(comp, _tick) {
                             DocxGenerator.getModelTemplateName(context, comp)
                         }
-                        OutlinedButton(
+                        AppOutlinedButton(
                             onClick = {
                                 targetTemplateComponent = comp
                                 modelTemplatePickerLauncher.launch(
@@ -563,17 +571,11 @@ fun ExtractorScreen(
                             },
                             modifier = Modifier.testTag("bind_template_${comp.name.lowercase()}")
                         ) {
-                            Icon(
-                                imageVector = Icons.AutoMirrored.Filled.InsertDriveFile,
-                                contentDescription = null,
-                                modifier = Modifier.size(16.dp),
-                                tint = if (boundName != null) Color(0xFF059669) else MaterialTheme.colorScheme.primary
-                            )
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text(
-                                text = if (boundName != null) "نموذج ${comp.title}: $boundName ✓" else "ربط نموذج ${comp.title} (Google Drive)",
-                                style = MaterialTheme.typography.labelSmall,
-                                fontWeight = FontWeight.Bold
+                            ButtonLabel(
+                                text = if (boundName != null) "نموذج ${comp.title}: ${ltr(boundName)} ✓" else "ربط نموذج ${comp.title} (${ltr("Google Drive")})",
+                                icon = Icons.AutoMirrored.Filled.InsertDriveFile,
+                                iconTint = if (boundName != null) Color(0xFF059669) else MaterialTheme.colorScheme.primary,
+                                style = MaterialTheme.typography.labelSmall
                             )
                         }
                     }
@@ -602,7 +604,14 @@ fun ExtractorScreen(
                             localComponentFilter = null
                         }
                     },
-                    label = { Text("كشف تلقائي") },
+                    label = {
+                        Text(
+                            text = "كشف تلقائي",
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    },
                     modifier = Modifier.testTag("chip_component_auto")
                 )
                 PedagogicalComponent.entries.forEach { comp ->
@@ -615,7 +624,14 @@ fun ExtractorScreen(
                                 localComponentFilter = comp
                             }
                         },
-                        label = { Text(comp.title) },
+                        label = {
+                            Text(
+                                text = comp.title,
+                                maxLines = 1,
+                                softWrap = false,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        },
                         modifier = Modifier.testTag("chip_component_${comp.name.lowercase()}")
                     )
                 }
@@ -637,19 +653,19 @@ fun ExtractorScreen(
         ) {
             Column(modifier = Modifier.padding(14.dp)) {
                 Text(
-                    text = "رفع الجذاذة المصدر من جهازك أو Google Drive:",
+                    text = "رفع الجذاذة المصدر من جهازك أو ${ltr("Google Drive")}:",
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.Bold
                 )
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    text = "تُحفظ الجذاذات المصدّرة تلقائياً في مجلد «التنزيلات / Downloads» على هاتفك. يمكنك اختيار ملف الجذاذة المصدر (.docx أو PDF أو نص) من الهاتف أو Google Drive أو الضغط على أحد ملفات Word الجاهزة أسفله:",
+                    text = "تُحفظ الجذاذات المصدّرة تلقائياً في مجلد «التنزيلات / ${ltr("Downloads")}» على هاتفك. يمكنك اختيار ملف الجذاذة المصدر (${ltr(".docx")} أو ${ltr("PDF")} أو نص) من الهاتف أو ${ltr("Google Drive")} أو الضغط على أحد ملفات ${ltr("Word")} الجاهزة أسفله:",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Spacer(modifier = Modifier.height(10.dp))
 
-                FilledTonalButton(
+                AppTonalButton(
                     onClick = {
                         filePickerLauncher.launch(
                             arrayOf(
@@ -671,15 +687,9 @@ fun ExtractorScreen(
                         contentColor = MaterialTheme.colorScheme.onPrimaryContainer
                     )
                 ) {
-                    Icon(
-                        imageVector = Icons.Default.UploadFile,
-                        contentDescription = null,
-                        modifier = Modifier.size(22.dp)
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = "استعراض ملفات الهاتف / Google Drive (الملف التربوي)",
-                        fontWeight = FontWeight.Bold
+                    ButtonLabel(
+                        text = "استعراض ملفات الهاتف / ${ltr("Google Drive")} (الملف التربوي)",
+                        icon = Icons.Default.UploadFile
                     )
                 }
 
@@ -687,7 +697,7 @@ fun ExtractorScreen(
                 if (availableDocxFiles.isNotEmpty()) {
                     Spacer(modifier = Modifier.height(12.dp))
                     Text(
-                        text = "ملفات Word (.docx) متوفرة في الهاتف/التطبيق (اضغط للرفع الفوري):",
+                        text = "ملفات ${ltr("Word")} (${ltr(".docx")}) متوفرة في الهاتف/التطبيق (اضغط للرفع الفوري):",
                         style = MaterialTheme.typography.labelMedium,
                         fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.primary
@@ -698,18 +708,17 @@ fun ExtractorScreen(
                         verticalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
                         availableDocxFiles.forEach { docxFile ->
-                            OutlinedButton(
+                            AppOutlinedButton(
                                 onClick = {
                                     launchFileExtraction(Uri.fromFile(docxFile), docxFile.name)
                                 }
                             ) {
-                                Icon(
-                                    imageVector = Icons.AutoMirrored.Filled.InsertDriveFile,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(16.dp)
+                                ButtonLabel(
+                                    text = ltr(docxFile.name),
+                                    icon = Icons.AutoMirrored.Filled.InsertDriveFile,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.Medium
                                 )
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text(docxFile.name, style = MaterialTheme.typography.labelMedium)
                             }
                         }
                     }
@@ -744,7 +753,7 @@ fun ExtractorScreen(
                                     Spacer(modifier = Modifier.width(8.dp))
                                     Column {
                                         Text(
-                                            text = fname,
+                                            text = ltr(fname),
                                             style = MaterialTheme.typography.bodyMedium,
                                             fontWeight = FontWeight.Bold
                                         )
@@ -771,7 +780,9 @@ fun ExtractorScreen(
                                             localExtractionState = ExtractionState.Idle
                                         }
                                     },
-                                    modifier = Modifier.size(48.dp)
+                                    modifier = Modifier
+                                        .size(48.dp)
+                                        .minimumInteractiveComponentSize()
                                 ) {
                                     Icon(
                                         imageVector = Icons.Default.Close,
@@ -834,6 +845,7 @@ fun ExtractorScreen(
                             },
                             modifier = Modifier
                                 .size(48.dp)
+                                .minimumInteractiveComponentSize()
                                 .testTag("dismiss_error_card_button")
                         ) {
                             Icon(
@@ -845,7 +857,7 @@ fun ExtractorScreen(
                     }
                     if (extractionState.message == GeminiAiService.MSG_PDF_NEEDS_KEY) {
                         Spacer(modifier = Modifier.height(8.dp))
-                        FilledTonalButton(
+                        AppTonalButton(
                             onClick = {
                                 if (viewModel != null) {
                                     viewModel.submitPdfApiKey(currentApiKey)
@@ -854,9 +866,10 @@ fun ExtractorScreen(
                             },
                             modifier = Modifier.testTag("open_pdf_key_dialog_button")
                         ) {
-                            Icon(imageVector = Icons.Default.Key, contentDescription = null, modifier = Modifier.size(18.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("إدخال مفتاح Gemini الآن", fontWeight = FontWeight.Bold)
+                            ButtonLabel(
+                                text = "إدخال مفتاح ${ltr("Gemini")} الآن",
+                                icon = Icons.Default.Key
+                            )
                         }
                     }
                 }
@@ -902,7 +915,7 @@ fun ExtractorScreen(
                         )
                     }
                     Spacer(modifier = Modifier.width(8.dp))
-                    OutlinedButton(
+                    AppOutlinedButton(
                         onClick = {
                             if (viewModel != null) {
                                 viewModel.cancelExtraction()
@@ -915,13 +928,10 @@ fun ExtractorScreen(
                         },
                         modifier = Modifier.testTag("cancel_extraction_button")
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.Close,
-                            contentDescription = "إلغاء",
-                            modifier = Modifier.size(16.dp)
+                        ButtonLabel(
+                            text = "إلغاء",
+                            icon = Icons.Default.Close
                         )
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("إلغاء", fontWeight = FontWeight.Bold)
                     }
                 }
             }
@@ -939,7 +949,7 @@ fun ExtractorScreen(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                OutlinedButton(
+                AppOutlinedButton(
                     onClick = {
                         val clip = clipboardManager.getText()?.text
                         if (!clip.isNullOrBlank()) {
@@ -955,12 +965,14 @@ fun ExtractorScreen(
                     },
                     modifier = Modifier.testTag("paste_clipboard_button")
                 ) {
-                    Icon(imageVector = Icons.Default.ContentPaste, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text("لصق من الحافظة")
+                    ButtonLabel(
+                        text = "لصق من الحافظة",
+                        icon = Icons.Default.ContentPaste,
+                        fontWeight = FontWeight.Medium
+                    )
                 }
 
-                OutlinedButton(
+                AppOutlinedButton(
                     onClick = {
                         if (viewModel != null) {
                             viewModel.updateExtractorRawText(
@@ -978,10 +990,10 @@ fun ExtractorScreen(
                         }
                     }
                 ) {
-                    Text("مسودة قراءة")
+                    ButtonLabel(text = "مسودة قراءة", fontWeight = FontWeight.Medium)
                 }
 
-                OutlinedButton(
+                AppOutlinedButton(
                     onClick = {
                         if (viewModel != null) {
                             viewModel.updateExtractorRawText(
@@ -999,10 +1011,10 @@ fun ExtractorScreen(
                         }
                     }
                 ) {
-                    Text("مسودة درس لغوي")
+                    ButtonLabel(text = "مسودة درس لغوي", fontWeight = FontWeight.Medium)
                 }
 
-                OutlinedButton(
+                AppOutlinedButton(
                     onClick = {
                         if (viewModel != null) {
                             viewModel.updateExtractorRawText(
@@ -1020,7 +1032,7 @@ fun ExtractorScreen(
                         }
                     }
                 ) {
-                    Text("مسودة تعبير وإنشاء")
+                    ButtonLabel(text = "مسودة تعبير وإنشاء", fontWeight = FontWeight.Medium)
                 }
             }
         }
@@ -1136,7 +1148,7 @@ fun ExtractorScreen(
         }
 
         // Action Button
-        Button(
+        AppButton(
             onClick = {
                 if (rawInputText.isNotBlank()) {
                     onApplyExtractedPlan(rawInputText, topicName, selectedComponentFilter, parseResult)
@@ -1151,14 +1163,14 @@ fun ExtractorScreen(
                 containerColor = MaterialTheme.colorScheme.primary
             )
         ) {
-            Icon(imageVector = Icons.Default.AutoAwesome, contentDescription = null)
-            Spacer(modifier = Modifier.width(8.dp))
-            Text(
-                "نقل المحتوى إلى الجذاذة النموذجية الآن",
-                fontWeight = FontWeight.Bold,
+            ButtonLabel(
+                text = "نقل المحتوى إلى الجذاذة النموذجية الآن",
+                icon = Icons.Default.AutoAwesome,
                 style = MaterialTheme.typography.bodyLarge
             )
         }
+
+        Spacer(modifier = Modifier.height(88.dp))
     }
 }
 
@@ -1317,7 +1329,7 @@ fun ExtractionReviewCard(
                     }
                 }
             } else if (report.unclassifiedLines.isNotEmpty() || report.totalDefaultFields > 0) {
-                FilledTonalButton(
+                AppTonalButton(
                     onClick = onDelegateToBuiltInAi,
                     modifier = Modifier
                         .fillMaxWidth()
@@ -1329,15 +1341,9 @@ fun ExtractionReviewCard(
                     ),
                     shape = RoundedCornerShape(10.dp)
                 ) {
-                    Icon(
-                        imageVector = Icons.Default.AutoAwesome,
-                        contentDescription = null,
-                        modifier = Modifier.size(20.dp)
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
+                    ButtonLabel(
                         text = "إسناد المهمة إلى الذكاء الاصطناعي المدمج (تصنيف الأسطر وتنقيح المراحل) ✨",
-                        fontWeight = FontWeight.Bold,
+                        icon = Icons.Default.AutoAwesome,
                         style = MaterialTheme.typography.labelLarge
                     )
                 }
@@ -1381,14 +1387,13 @@ fun ExtractionReviewCard(
                             verticalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
                             PedagogicalComponent.entries.forEach { comp ->
-                                OutlinedButton(
+                                AppOutlinedButton(
                                     onClick = { onChangeComponentAndReparse(comp) },
                                     modifier = Modifier.testTag("reparse_as_${comp.name.lowercase()}")
                                 ) {
-                                    Text(
+                                    ButtonLabel(
                                         text = "إعادة التفريغ كـ: ${comp.title}",
                                         style = MaterialTheme.typography.labelSmall,
-                                        fontWeight = FontWeight.Bold,
                                         color = Color(0xFF92400E)
                                     )
                                 }
@@ -1587,14 +1592,17 @@ private fun UnclassifiedLineRow(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Box {
-                    FilledTonalButton(
+                    AppTonalButton(
                         onClick = { menuExpanded = true },
                         modifier = Modifier.testTag("assign_dropdown_btn_${line.lineNumber}")
                     ) {
                         Text(
                             text = "إسناد إلى مرحلة وخانة",
                             style = MaterialTheme.typography.labelSmall,
-                            fontWeight = FontWeight.Bold
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
                         )
                         Spacer(modifier = Modifier.width(4.dp))
                         Icon(
@@ -1643,11 +1651,11 @@ private fun UnclassifiedLineRow(
 
                 Spacer(modifier = Modifier.width(8.dp))
 
-                OutlinedButton(
+                AppOutlinedButton(
                     onClick = onIgnore,
                     modifier = Modifier.testTag("ignore_line_btn_${line.lineNumber}")
                 ) {
-                    Text(
+                    ButtonLabel(
                         text = "تجاهل",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.error

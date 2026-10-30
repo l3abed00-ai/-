@@ -23,21 +23,13 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.FileDownload
-import androidx.compose.material.icons.filled.Print
 import androidx.compose.material.icons.filled.Share
-import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.Divider
-import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.VerticalDivider
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -51,25 +43,23 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.model.JadhadhaPlan
 import com.example.model.StageCatalog
-import com.example.ui.theme.AmiriFontFamily
-import com.example.ui.theme.CairoFontFamily
-import com.example.ui.theme.TajawalFontFamily
-import com.example.ui.theme.AlmaraiFontFamily
+import com.example.ui.components.AppButton
+import com.example.ui.components.AppOutlinedButton
+import com.example.ui.components.ButtonLabel
+import com.example.ui.components.ltr
+import com.example.ui.theme.AmiriFont
+import com.example.ui.theme.AppFont
 import com.example.ui.theme.PaperBackground
 import com.example.ui.theme.PaperBorder
-import com.example.ui.theme.PaperHeaderBackground
-import com.example.ui.theme.PaperTableRowAlt
 
 enum class PreviewDocFont(val label: String, val fontFamily: FontFamily) {
-    SAKKAL_MAJALLA("خط صقال مجلة النموذجي (10pt عريض)", AmiriFontFamily),
-    AMIRI("خط النسخ الأميري", AmiriFontFamily),
-    CAIRO("خط القاهرة الحديث", CairoFontFamily),
-    TAJAWAL("خط تجوال المتزن", TajawalFontFamily),
-    ALMARAI("خط المراعي التربوي", AlmaraiFontFamily)
+    AMIRI("الكلاسيكي — الأميري", AmiriFont),
+    PLEX("الحديث — Plex", AppFont)
 }
 
 @Composable
@@ -80,7 +70,7 @@ fun LiveWordPreviewScreen(
 ) {
     val context = LocalContext.current
     var isFullWidthMode by remember { mutableStateOf(false) }
-    var selectedDocFont by remember { mutableStateOf(PreviewDocFont.SAKKAL_MAJALLA) }
+    var selectedDocFont by remember { mutableStateOf(PreviewDocFont.AMIRI) }
     var exportedFile by remember { mutableStateOf<java.io.File?>(null) }
 
     val saveAsLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
@@ -126,28 +116,61 @@ fun LiveWordPreviewScreen(
                             .padding(end = 8.dp)
                     ) {
                         Text(
-                            text = "معاينة وثيقة Word الرسمية",
+                            text = "معاينة وثيقة ${ltr("Word")} الرسمية",
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold,
                             color = MaterialTheme.colorScheme.onSurface
                         )
                         Text(
-                            text = "تُحفظ تلقائياً في: ملفات الهاتف ← التنزيلات (Downloads)",
+                            text = "تُحفظ تلقائياً في: ملفات الهاتف ← التنزيلات (${ltr("Downloads")})",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.primary,
                             fontSize = 11.sp
                         )
                     }
 
-                    OutlinedButton(
+                    AppOutlinedButton(
                         onClick = { isFullWidthMode = !isFullWidthMode },
                         shape = RoundedCornerShape(8.dp),
                         modifier = Modifier.testTag("btn_toggle_full_width")
                     ) {
-                        Text(
-                            text = if (isFullWidthMode) "هوامش A4" else "ملء العرض",
+                        ButtonLabel(
+                            text = if (isFullWidthMode) "هوامش ${ltr("A4")}" else "ملء العرض",
                             style = MaterialTheme.typography.labelSmall,
                             fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                // Preview Font Switcher: Classic (Amiri) vs Modern (Plex)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("preview_font_selector_row"),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    PreviewDocFont.entries.forEach { docFont ->
+                        val isSelected = selectedDocFont == docFont
+                        FilterChip(
+                            selected = isSelected,
+                            onClick = { selectedDocFont = docFont },
+                            label = {
+                                Text(
+                                    text = docFont.label,
+                                    fontFamily = docFont.fontFamily,
+                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                                    fontSize = 12.sp,
+                                    maxLines = 1,
+                                    softWrap = false,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            },
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("preview_font_${docFont.name.lowercase()}")
                         )
                     }
                 }
@@ -155,7 +178,7 @@ fun LiveWordPreviewScreen(
                 Spacer(modifier = Modifier.height(10.dp))
 
                 // Wide Independent Export Button - Never squished on any screen size!
-                Button(
+                AppButton(
                     onClick = {
                         onExportDocx(context)
                         exportedFile = com.example.docx.DocxGenerator.generateDocx(context, plan, saveToDownloads = true)
@@ -170,14 +193,10 @@ fun LiveWordPreviewScreen(
                         .height(48.dp)
                         .testTag("btn_export_from_preview")
                 ) {
-                    Icon(
-                        imageVector = Icons.Default.FileDownload,
-                        contentDescription = null,
-                        modifier = Modifier.size(20.dp)
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = "حفظ وثيقة Word في الهاتف (التنزيلات .docx)",
+                    ButtonLabel(
+                        text = "حفظ وثيقة ${ltr("Word")} في الهاتف (التنزيلات ${ltr(".docx")})",
+                        icon = Icons.Default.FileDownload,
+                        iconSize = 20.dp,
                         style = MaterialTheme.typography.labelLarge,
                         fontWeight = FontWeight.Bold,
                         fontSize = 14.sp
@@ -191,7 +210,7 @@ fun LiveWordPreviewScreen(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    OutlinedButton(
+                    AppOutlinedButton(
                         onClick = {
                             val file = exportedFile ?: com.example.docx.DocxGenerator.generateDocx(context, plan, saveToDownloads = true).also {
                                 exportedFile = it
@@ -201,10 +220,14 @@ fun LiveWordPreviewScreen(
                         modifier = Modifier.weight(1f),
                         shape = RoundedCornerShape(8.dp)
                     ) {
-                        Text("حفظ باسم...", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                        ButtonLabel(
+                            text = "حفظ باسم...",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold
+                        )
                     }
 
-                    OutlinedButton(
+                    AppOutlinedButton(
                         onClick = {
                             val file = exportedFile ?: com.example.docx.DocxGenerator.generateDocx(context, plan, saveToDownloads = true).also {
                                 exportedFile = it
@@ -214,10 +237,14 @@ fun LiveWordPreviewScreen(
                         modifier = Modifier.weight(1f),
                         shape = RoundedCornerShape(8.dp)
                     ) {
-                        Text("فتح في Word", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                        ButtonLabel(
+                            text = "فتح في ${ltr("Word")}",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold
+                        )
                     }
 
-                    OutlinedButton(
+                    AppOutlinedButton(
                         onClick = {
                             val file = exportedFile ?: com.example.docx.DocxGenerator.generateDocx(context, plan, saveToDownloads = true).also {
                                 exportedFile = it
@@ -227,9 +254,13 @@ fun LiveWordPreviewScreen(
                         modifier = Modifier.weight(1f),
                         shape = RoundedCornerShape(8.dp)
                     ) {
-                        Icon(imageVector = Icons.Default.Share, contentDescription = null, modifier = Modifier.size(14.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("مشاركة", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                        ButtonLabel(
+                            text = "مشاركة",
+                            icon = Icons.Default.Share,
+                            iconSize = 14.dp,
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold
+                        )
                     }
                 }
             }

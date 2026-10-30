@@ -20,7 +20,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Psychology
-import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -28,7 +27,6 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.SuggestionChip
 import androidx.compose.material3.Text
@@ -41,8 +39,13 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.model.PedagogicalComponent
+import com.example.ui.components.AppButton
+import com.example.ui.components.AppOutlinedButton
+import com.example.ui.components.ButtonLabel
+import com.example.ui.components.ltr
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -122,7 +125,7 @@ fun AiGeneratorScreen(
                 }
                 Spacer(modifier = Modifier.height(6.dp))
                 Text(
-                    text = "توليد جذاذة تربوية كاملة ومفصلة بواسطة أحدث نموذج ذكاء اصطناعي (Gemini 3.8 Flash) وفق التوجيهات الرسمية لوزارة التربية الوطنية المغربية لمكونات النصوص القرائية، الدرس اللغوي، والتعبير والإنشاء.",
+                    text = "توليد جذاذة تربوية كاملة ومفصلة بواسطة أحدث نموذج ذكاء اصطناعي (${ltr("Gemini 3.8 Flash")}) وفق التوجيهات الرسمية لوزارة التربية الوطنية المغربية لمكونات النصوص القرائية، الدرس اللغوي، والتعبير والإنشاء.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.85f)
                 )
@@ -145,7 +148,14 @@ fun AiGeneratorScreen(
                     FilterChip(
                         selected = selectedComponent == comp,
                         onClick = { selectedComponent = comp },
-                        label = { Text(comp.title) },
+                        label = {
+                            Text(
+                                text = comp.title,
+                                maxLines = 1,
+                                softWrap = false,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        },
                         modifier = Modifier.weight(1f)
                     )
                 }
@@ -167,7 +177,14 @@ fun AiGeneratorScreen(
                 quickTopics.forEach { t ->
                     SuggestionChip(
                         onClick = { topic = t },
-                        label = { Text(t) }
+                        label = {
+                            Text(
+                                text = t,
+                                maxLines = 1,
+                                softWrap = false,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
                     )
                 }
             }
@@ -215,13 +232,15 @@ fun AiGeneratorScreen(
         )
 
         // API Key Settings Toggle
-        OutlinedButton(
+        AppOutlinedButton(
             onClick = { showApiKeySettings = !showApiKeySettings },
             modifier = Modifier.fillMaxWidth()
         ) {
-            Icon(imageVector = Icons.Default.Key, contentDescription = null, modifier = Modifier.size(18.dp))
-            Spacer(modifier = Modifier.width(8.dp))
-            Text(if (showApiKeySettings) "إخفاء إعدادات مفتاح Gemini" else "إعدادات مفتاح Gemini API")
+            ButtonLabel(
+                text = if (showApiKeySettings) "إخفاء إعدادات مفتاح ${ltr("Gemini")}" else "إعدادات مفتاح ${ltr("Gemini API")}",
+                icon = Icons.Default.Key,
+                iconSize = 18.dp
+            )
         }
 
         AnimatedVisibility(visible = showApiKeySettings) {
@@ -232,13 +251,13 @@ fun AiGeneratorScreen(
             ) {
                 Column(modifier = Modifier.padding(14.dp)) {
                     Text(
-                        text = "مفتاح Gemini API الخاص بك:",
+                        text = "مفتاح ${ltr("Gemini API")} الخاص بك:",
                         style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.Bold
                     )
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
-                        text = "يمكنك لصق مفتاح Gemini هنا (من aistudio.google.com/apikey). كما يدعم التطبيق المفتاح المحقون تلقائيا من لوحة Secrets.",
+                        text = "يمكنك لصق مفتاح ${ltr("Gemini")} هنا (من ${ltr("aistudio.google.com/apikey")}). كما يدعم التطبيق المفتاح المحقون تلقائيا من لوحة ${ltr("Secrets")}.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -251,14 +270,14 @@ fun AiGeneratorScreen(
                         OutlinedTextField(
                             value = apiKeyInput,
                             onValueChange = { apiKeyInput = it },
-                            placeholder = { Text("AIzaSy...") },
+                            placeholder = { Text(ltr("AIzaSy...")) },
                             modifier = Modifier.weight(1f),
                             singleLine = true
                         )
-                        Button(
+                        AppButton(
                             onClick = { onSaveApiKey(apiKeyInput) }
                         ) {
-                            Text("حفظ")
+                            ButtonLabel("حفظ")
                         }
                     }
                 }
@@ -284,7 +303,7 @@ fun AiGeneratorScreen(
         }
 
         // Generate Action Button
-        Button(
+        AppButton(
             onClick = { onGenerate(topic, lessonText, selectedComponent) },
             enabled = !isLoading && topic.isNotBlank(),
             modifier = Modifier
@@ -302,16 +321,23 @@ fun AiGeneratorScreen(
                     strokeWidth = 2.dp
                 )
                 Spacer(modifier = Modifier.width(10.dp))
-                Text("جارٍ التوليد بنموذج Gemini 3.8 Flash...")
-            } else {
-                Icon(imageVector = Icons.Default.AutoAwesome, contentDescription = null)
-                Spacer(modifier = Modifier.width(8.dp))
                 Text(
-                    "توليد جذاذة (${selectedComponent.shortName}) بـ Gemini 3.8 Flash",
-                    fontWeight = FontWeight.Bold,
-                    style = MaterialTheme.typography.bodyLarge
+                    text = "جارٍ التوليد بنموذج ${ltr("Gemini 3.8 Flash")}...",
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis
+                )
+            } else {
+                ButtonLabel(
+                    text = "توليد جذاذة (${selectedComponent.shortName}) بـ ${ltr("Gemini 3.8 Flash")}",
+                    icon = Icons.Default.AutoAwesome,
+                    style = MaterialTheme.typography.bodyLarge,
+                    fontWeight = FontWeight.Bold
                 )
             }
         }
+
+        // Bottom space so FloatingQuickBar never covers the Generate button
+        Spacer(modifier = Modifier.height(88.dp))
     }
 }

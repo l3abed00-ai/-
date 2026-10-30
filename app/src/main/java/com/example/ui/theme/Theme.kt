@@ -54,13 +54,12 @@ private val LightColorScheme = lightColorScheme(
 @Composable
 fun MyApplicationTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
-    appFont: AppUiFont = AppUiFont.READEX_PRO,
     content: @Composable () -> Unit
 ) {
     val colorScheme = if (darkTheme) DarkColorScheme else LightColorScheme
     MaterialTheme(
         colorScheme = colorScheme,
-        typography = createAppTypography(appFont),
+        typography = AppTypography,
         content = content
     )
 }

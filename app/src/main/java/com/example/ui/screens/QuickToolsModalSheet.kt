@@ -17,9 +17,7 @@ import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Book
 import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.FileDownload
-import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.SwapHoriz
-import androidx.compose.material.icons.filled.TableChart
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -35,9 +33,11 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.ui.AppTab
+import com.example.ui.components.ltr
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -80,7 +80,7 @@ fun QuickToolsModalSheet(
             ) {
                 QuickToolItemCard(
                     title = "تفريغ وتحويل",
-                    subtitle = "تحويل وثيقة Word أو نص خام",
+                    subtitle = "تحويل وثيقة ${ltr("Word")} أو نص خام",
                     icon = Icons.Default.SwapHoriz,
                     iconColor = MaterialTheme.colorScheme.primary,
                     modifier = Modifier.weight(1f),
@@ -92,7 +92,7 @@ fun QuickToolsModalSheet(
 
                 QuickToolItemCard(
                     title = "الذكاء الاصطناعي",
-                    subtitle = "توليد واقتراح بـ Gemini 3.8 Flash",
+                    subtitle = "توليد واقتراح بـ ${ltr("Gemini 3.8 Flash")}",
                     icon = Icons.Default.AutoAwesome,
                     iconColor = MaterialTheme.colorScheme.tertiary,
                     modifier = Modifier.weight(1f),
@@ -122,8 +122,8 @@ fun QuickToolsModalSheet(
                 )
 
                 QuickToolItemCard(
-                    title = "أداة بايثون (.py)",
-                    subtitle = "تصدير سكربت python-docx و JSON",
+                    title = "أداة بايثون (${ltr(".py")})",
+                    subtitle = "تصدير سكربت ${ltr("python-docx")} و ${ltr("JSON")}",
                     icon = Icons.Default.Code,
                     iconColor = Color(0xFF0284C7),
                     modifier = Modifier.weight(1f),
@@ -141,7 +141,7 @@ fun QuickToolsModalSheet(
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 QuickToolItemCard(
-                    title = "تصدير Word DOCX",
+                    title = "تصدير ${ltr("Word DOCX")}",
                     subtitle = "إنشاء ومشاركة الملف النهائي",
                     icon = Icons.Default.FileDownload,
                     iconColor = MaterialTheme.colorScheme.primary,
@@ -153,8 +153,8 @@ fun QuickToolsModalSheet(
                 )
 
                 QuickToolItemCard(
-                    title = "معاينة Word",
-                    subtitle = "عرض ورقة A4 التفاعلية",
+                    title = "معاينة ${ltr("Word")}",
+                    subtitle = "عرض ورقة ${ltr("A4")} التفاعلية",
                     icon = Icons.Default.Visibility,
                     iconColor = MaterialTheme.colorScheme.secondary,
                     modifier = Modifier.weight(1f),
@@ -214,14 +214,19 @@ private fun QuickToolItemCard(
                     style = MaterialTheme.typography.labelMedium,
                     fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.onSurface,
-                    fontSize = 13.sp
+                    fontSize = 13.sp,
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis
                 )
                 Text(
                     text = subtitle,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     fontSize = 10.sp,
-                    maxLines = 1
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis
                 )
             }
         }

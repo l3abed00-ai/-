@@ -16,7 +16,7 @@ import kotlinx.coroutines.flow.first
 import java.util.zip.ZipFile
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [34])
+@Config(sdk = [36])
 class ExampleRobolectricTest {
 
     @Test
@@ -443,7 +443,8 @@ class ExampleRobolectricTest {
         assertEquals(0, parseResult.report.unclassifiedLines.size)
         val langAnalysis = parseResult.plan.stages["lang_analysis"]!!
         assertEquals(com.example.model.FieldSource.FILE, langAnalysis.sourceFor("content"))
-        assertTrue(langAnalysis.content.any { it.startsWith("[جدول:") })
+        assertTrue(langAnalysis.content.any { it.contains("اسم الزمان / المكان") })
+        assertTrue(langAnalysis.content.any { it.contains("طريقة الصياغة") })
 
         // 4. Test AI delegation on a partial extraction with unclassified lines (like lines 141-142 in user screenshot)
         val partialRaw = """
@@ -559,4 +560,286 @@ class ExampleRobolectricTest {
             resultNoKey.exceptionOrNull()?.message
         )
     }
+
+    @Test
+    fun `test XmlPullParser docx extraction covers all 6 acceptance criteria`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+
+        // Criterion 1: Normal .docx -> output identical to legacy parser
+        val normalDocx = DocxGenerator.generateDocx(context, SamplePlans.ISM_FAIL_PLAN, saveToDownloads = false)
+        val normalDocXml = ZipFile(normalDocx).use { zip ->
+            zip.getInputStream(zip.getEntry("word/document.xml")).bufferedReader().readText()
+        }
+        val pullOutput = com.example.extractor.DocumentFileReader.parseDocumentXml(normalDocXml)
+        val legacyOutput = com.example.extractor.DocumentFileReader.parseDocumentXmlLegacy(normalDocXml)
+        assertEquals("Normal docx output must match legacy output", legacyOutput, pullOutput)
+
+        // Criterion 2: Nested table -> no truncated or duplicated rows; nested cell paragraphs added in order to parent cell
+        val nestedTableXml = """
+            <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <w:body>
+                <w:tbl>
+                  <w:tr>
+                    <w:tc><w:p><w:r><w:t>المراحل</w:t></w:r></w:p></w:tc>
+                    <w:tc><w:p><w:r><w:t>المحتوى الديداكتيكي</w:t></w:r></w:p></w:tc>
+                  </w:tr>
+                  <w:tr>
+                    <w:tc><w:p><w:r><w:t>الوصف والتحليل</w:t></w:r></w:p></w:tc>
+                    <w:tc>
+                      <w:p><w:r><w:t>تمهيد التحليل</w:t></w:r></w:p>
+                      <w:tbl>
+                        <w:tr>
+                          <w:tc><w:p><w:r><w:t>الظاهرة الأولى</w:t></w:r></w:p></w:tc>
+                          <w:tc><w:p><w:r><w:t>حكمها الإعرابي</w:t></w:r></w:p></w:tc>
+                        </w:tr>
+                      </w:tbl>
+                      <w:p><w:r><w:t>خلاصة التحليل</w:t></w:r></w:p>
+                    </w:tc>
+                  </w:tr>
+                  <w:tr>
+                    <w:tc><w:p><w:r><w:t>الاستنتاج</w:t></w:r></w:p></w:tc>
+                    <w:tc><w:p><w:r><w:t>نص القاعدة</w:t></w:r></w:p></w:tc>
+                  </w:tr>
+                </w:tbl>
+              </w:body>
+            </w:document>
+        """.trimIndent()
+        val nestedResult = com.example.extractor.DocumentFileReader.parseDocumentXml(nestedTableXml)
+        val nestedLines = nestedResult.lines()
+        assertEquals(1, nestedLines.count { it == "[مرحلة: الوصف والتحليل]" })
+        assertEquals(1, nestedLines.count { it == "[مرحلة: الاستنتاج]" })
+        val idxIntro = nestedLines.indexOf("تمهيد التحليل")
+        val idxCell1 = nestedLines.indexOf("الظاهرة الأولى")
+        val idxCell2 = nestedLines.indexOf("حكمها الإعرابي")
+        val idxOutro = nestedLines.indexOf("خلاصة التحليل")
+        assertTrue(idxIntro in 0 until idxCell1 && idxCell1 < idxCell2 && idxCell2 < idxOutro)
+
+        // Criterion 3: Cell with Shift+Enter (<w:br/> and <w:cr/>), tab, noBreakHyphen, del/ins, and underline rules
+        val shiftEnterXml = """
+            <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <w:body>
+                <w:p>
+                  <w:r>
+                    <w:rPr><w:u w:val="single"/></w:rPr>
+                    <w:t>عنوان مسطر:</w:t>
+                  </w:r>
+                  <w:r>
+                    <w:rPr><w:u w:val="none"/></w:rPr>
+                    <w:t>غير مسطر: </w:t>
+                  </w:r>
+                  <w:r>
+                    <w:t>كلمة1</w:t><w:tab/><w:t>كلمة2</w:t><w:noBreakHyphen/><w:t>مركب</w:t>
+                  </w:r>
+                  <w:del><w:r><w:delText>محذوف1</w:delText></w:r></w:del>
+                  <w:ins><w:r><w:t> مضاف</w:t></w:r></w:ins>
+                </w:p>
+                <w:tbl>
+                  <w:tr>
+                    <w:tc><w:p><w:r><w:t>المراحل</w:t></w:r></w:p></w:tc>
+                    <w:tc><w:p><w:r><w:t>المحتوى الديداكتيكي</w:t></w:r></w:p></w:tc>
+                  </w:tr>
+                  <w:tr>
+                    <w:tc><w:p><w:r><w:t>التطبيقات</w:t></w:r></w:p></w:tc>
+                    <w:tc>
+                      <w:p>
+                        <w:r>
+                          <w:t>السطر الأول في الخلية</w:t>
+                          <w:br/>
+                          <w:t>السطر الثاني بعد Shift+Enter</w:t>
+                          <w:cr/>
+                          <w:t>السطر الثالث بعد cr</w:t>
+                        </w:r>
+                      </w:p>
+                    </w:tc>
+                  </w:tr>
+                </w:tbl>
+              </w:body>
+            </w:document>
+        """.trimIndent()
+        val shiftEnterLines = com.example.extractor.DocumentFileReader.parseDocumentXml(shiftEnterXml).lines()
+        assertTrue(shiftEnterLines.contains("<u>عنوان مسطر:</u> غير مسطر: كلمة1 كلمة2-مركب مضاف"))
+        assertTrue(!shiftEnterLines.any { it.contains("محذوف1") })
+        assertTrue(shiftEnterLines.contains("السطر الأول في الخلية"))
+        assertTrue(shiftEnterLines.contains("السطر الثاني بعد Shift+Enter"))
+        assertTrue(shiftEnterLines.contains("السطر الثالث بعد cr"))
+
+        // Criterion 4: Text in word/header1.xml & word/footer1.xml -> appears at the END of the output
+        val zipBytesOut = java.io.ByteArrayOutputStream()
+        java.util.zip.ZipOutputStream(zipBytesOut).use { zos ->
+            // Place header1.xml BEFORE document.xml to test arbitrary zip entry order
+            zos.putNextEntry(java.util.zip.ZipEntry("word/header1.xml"))
+            zos.write(
+                """
+                <w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+                  <w:p><w:r><w:t>الأكاديمية الجهوية للتربية والتكوين</w:t></w:r></w:p>
+                </w:hdr>
+                """.trimIndent().toByteArray(java.nio.charset.StandardCharsets.UTF_8)
+            )
+            zos.closeEntry()
+
+            zos.putNextEntry(java.util.zip.ZipEntry("word/document.xml"))
+            zos.write(
+                """
+                <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+                  <w:body>
+                    <w:p><w:r><w:t>المكون: الدرس اللغوي</w:t></w:r></w:p>
+                    <w:p><w:r><w:t>الموضوع: اسم الفاعل</w:t></w:r></w:p>
+                  </w:body>
+                </w:document>
+                """.trimIndent().toByteArray(java.nio.charset.StandardCharsets.UTF_8)
+            )
+            zos.closeEntry()
+
+            zos.putNextEntry(java.util.zip.ZipEntry("word/footer1.xml"))
+            zos.write(
+                """
+                <w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+                  <w:p><w:r><w:t>السنة الدراسية 2025/2026</w:t></w:r></w:p>
+                </w:ftr>
+                """.trimIndent().toByteArray(java.nio.charset.StandardCharsets.UTF_8)
+            )
+            zos.closeEntry()
+        }
+        val headerFooterText = com.example.extractor.DocumentFileReader.extractTextFromDocx(
+            java.io.ByteArrayInputStream(zipBytesOut.toByteArray())
+        )
+        val hfLines = headerFooterText.lines()
+        assertEquals("المكون: الدرس اللغوي", hfLines[0])
+        assertEquals("الموضوع: اسم الفاعل", hfLines[1])
+        assertEquals("الأكاديمية الجهوية للتربية والتكوين", hfLines[2])
+        assertEquals("السنة الدراسية 2025/2026", hfLines[3])
+
+        // Criterion 5: Text box (mc:AlternateContent with Choice and Fallback) -> no duplication
+        val textBoxXml = """
+            <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+                        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+                        xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
+                        xmlns:v="urn:schemas-microsoft-com:vml">
+              <w:body>
+                <w:p>
+                  <w:r>
+                    <mc:AlternateContent>
+                      <mc:Choice Requires="wps">
+                        <wps:txbx>
+                          <w:txbxContent>
+                            <w:p><w:r><w:t>نص داخل مربع النص لا يتكرر</w:t></w:r></w:p>
+                          </w:txbxContent>
+                        </wps:txbx>
+                      </mc:Choice>
+                      <mc:Fallback>
+                        <v:textbox>
+                          <w:txbxContent>
+                            <w:p><w:r><w:t>نص داخل مربع النص لا يتكرر</w:t></w:r></w:p>
+                          </w:txbxContent>
+                        </v:textbox>
+                      </mc:Fallback>
+                    </mc:AlternateContent>
+                  </w:r>
+                </w:p>
+              </w:body>
+            </w:document>
+        """.trimIndent()
+        val textBoxLines = com.example.extractor.DocumentFileReader.parseDocumentXml(textBoxXml).lines()
+        assertEquals(listOf("نص داخل مربع النص لا يتكرر"), textBoxLines)
+
+        // Criterion 6: Corrupted XML -> does not crash, falls back to parseDocumentXmlLegacy
+        val corruptedXml = "<w:document><w:body><w:p><w:r><w:t>سطر سليم قبل التلف</w:t></w:r></w:p><w:p><w:r><w:t>سطر تالف غير مغلق"
+        val fallbackResult = com.example.extractor.DocumentFileReader.parseDocumentXml(corruptedXml)
+        assertEquals("سطر سليم قبل التلف", fallbackResult)
+    }
+
+    @Test
+    fun `test full Arabic fonts AppFont AmiriFont AppTypography and PreviewDocFont`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+
+        // 1. Verify all 6 font resources open and are > 200 KB (> 204,800 bytes)
+        val requiredFontResIds = listOf(
+            com.example.R.font.ibm_plex_sans_arabic_regular,
+            com.example.R.font.ibm_plex_sans_arabic_medium,
+            com.example.R.font.ibm_plex_sans_arabic_semibold,
+            com.example.R.font.ibm_plex_sans_arabic_bold,
+            com.example.R.font.amiri_regular,
+            com.example.R.font.amiri_bold
+        )
+        for (resId in requiredFontResIds) {
+            val bytes = context.resources.openRawResource(resId).use { it.readBytes() }
+            assertTrue(
+                "Font resource $resId must be > 200 KB (was ${bytes.size} bytes)",
+                bytes.size > 200 * 1024
+            )
+        }
+
+        // 2. Verify all 15 Typography slots use AppFont, letterSpacing = 0.sp, and required lineHeight ratios
+        val typo = com.example.ui.theme.AppTypography
+        val headingStyles = listOf(
+            "displayLarge" to typo.displayLarge,
+            "displayMedium" to typo.displayMedium,
+            "displaySmall" to typo.displaySmall,
+            "headlineLarge" to typo.headlineLarge,
+            "headlineMedium" to typo.headlineMedium,
+            "headlineSmall" to typo.headlineSmall,
+            "titleLarge" to typo.titleLarge,
+            "titleMedium" to typo.titleMedium,
+            "titleSmall" to typo.titleSmall
+        )
+        val bodyAndLabelStyles = listOf(
+            "bodyLarge" to typo.bodyLarge,
+            "bodyMedium" to typo.bodyMedium,
+            "bodySmall" to typo.bodySmall,
+            "labelLarge" to typo.labelLarge,
+            "labelMedium" to typo.labelMedium,
+            "labelSmall" to typo.labelSmall
+        )
+
+        for ((name, style) in headingStyles) {
+            assertEquals("$name must use AppFont", com.example.ui.theme.AppFont, style.fontFamily)
+            assertEquals("$name must have 0.sp letterSpacing", 0f, style.letterSpacing.value, 0.001f)
+            assertTrue(
+                "$name lineHeight (${style.lineHeight.value}) must be >= 1.35 * fontSize (${style.fontSize.value})",
+                style.lineHeight.value >= style.fontSize.value * 1.35f - 0.01f
+            )
+        }
+
+        for ((name, style) in bodyAndLabelStyles) {
+            assertEquals("$name must use AppFont", com.example.ui.theme.AppFont, style.fontFamily)
+            assertEquals("$name must have 0.sp letterSpacing", 0f, style.letterSpacing.value, 0.001f)
+            assertTrue(
+                "$name lineHeight (${style.lineHeight.value}) must be >= 1.5 * fontSize (${style.fontSize.value})",
+                style.lineHeight.value >= style.fontSize.value * 1.5f - 0.01f
+            )
+        }
+
+        // 3. Verify PreviewDocFont has exactly 2 options: AMIRI (default) and PLEX
+        val previewFonts = com.example.ui.screens.PreviewDocFont.entries
+        assertEquals(2, previewFonts.size)
+        assertEquals("الكلاسيكي — الأميري", com.example.ui.screens.PreviewDocFont.AMIRI.label)
+        assertEquals(com.example.ui.theme.AmiriFont, com.example.ui.screens.PreviewDocFont.AMIRI.fontFamily)
+        assertEquals("الحديث — Plex", com.example.ui.screens.PreviewDocFont.PLEX.label)
+        assertEquals(com.example.ui.theme.AppFont, com.example.ui.screens.PreviewDocFont.PLEX.fontFamily)
+    }
+
+    @Test
+    fun `test ltr BiDi isolate helper and AppButtonDefaultContentPadding`() {
+        assertEquals("\u2066Word\u2069", com.example.ui.components.ltr("Word"))
+        assertEquals("\u2066.docx\u2069", com.example.ui.components.ltr(".docx"))
+        val buttonText = "حفظ وثيقة ${com.example.ui.components.ltr("Word")} في الهاتف (التنزيلات ${com.example.ui.components.ltr(".docx")})"
+        assertTrue(buttonText.contains("\u2066Word\u2069"))
+        assertTrue(buttonText.contains("\u2066.docx\u2069"))
+
+        val padding = com.example.ui.components.AppButtonDefaultContentPadding
+        assertEquals(
+            12f,
+            padding.calculateLeftPadding(androidx.compose.ui.unit.LayoutDirection.Rtl).value,
+            0.01f
+        )
+        assertEquals(
+            12f,
+            padding.calculateRightPadding(androidx.compose.ui.unit.LayoutDirection.Rtl).value,
+            0.01f
+        )
+        assertEquals(8f, padding.calculateTopPadding().value, 0.01f)
+        assertEquals(8f, padding.calculateBottomPadding().value, 0.01f)
+    }
 }
+
+

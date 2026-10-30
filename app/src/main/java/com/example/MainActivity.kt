@@ -51,6 +51,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -68,6 +69,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -79,6 +81,7 @@ import com.example.ui.AppTab
 import com.example.ui.JadhadhaViewModel
 import com.example.ui.components.FloatingQuickBar
 import com.example.ui.components.LiveMetricsBar
+import com.example.ui.components.ltr
 import com.example.ui.screens.AiGeneratorScreen
 import com.example.ui.screens.ComponentsHubScreen
 import com.example.ui.screens.DocxExportScreen
@@ -88,7 +91,6 @@ import com.example.ui.screens.ModelEditorScreen
 import com.example.ui.screens.PythonToolkitScreen
 import com.example.ui.screens.QuickToolsModalSheet
 import com.example.ui.screens.SamplesScreen
-import com.example.ui.theme.AppUiFont
 import com.example.ui.theme.MyApplicationTheme
 import kotlinx.coroutines.launch
 
@@ -110,10 +112,7 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             val uiState by viewModel.uiState.collectAsState()
-            MyApplicationTheme(
-                darkTheme = uiState.isDarkMode,
-                appFont = uiState.appUiFont
-            ) {
+            MyApplicationTheme(darkTheme = uiState.isDarkMode) {
                 CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Rtl) {
                     JadhadhaMainApp(viewModel = viewModel)
                 }
@@ -129,7 +128,6 @@ fun JadhadhaMainApp(viewModel: JadhadhaViewModel) {
     val snackbarHostState = remember { SnackbarHostState() }
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var showToolsSheet by remember { mutableStateOf(false) }
-    var showAppFontMenu by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
 
@@ -178,7 +176,10 @@ fun JadhadhaMainApp(viewModel: JadhadhaViewModel) {
                                     text = "الجذاذة النموذجية",
                                     style = MaterialTheme.typography.titleMedium,
                                     fontWeight = FontWeight.Bold,
-                                    color = MaterialTheme.colorScheme.onSurface
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                    maxLines = 1,
+                                    softWrap = false,
+                                    overflow = TextOverflow.Ellipsis
                                 )
                                 Surface(
                                     color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.7f),
@@ -192,6 +193,9 @@ fun JadhadhaMainApp(viewModel: JadhadhaViewModel) {
                                         style = MaterialTheme.typography.labelSmall,
                                         color = MaterialTheme.colorScheme.primary,
                                         fontWeight = FontWeight.Bold,
+                                        maxLines = 1,
+                                        softWrap = false,
+                                        overflow = TextOverflow.Ellipsis,
                                         modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
                                     )
                                 }
@@ -199,57 +203,13 @@ fun JadhadhaMainApp(viewModel: JadhadhaViewModel) {
                         }
                     },
                     actions = {
-                        // App UI Font Switcher (changes application interface font only, not Jadhadha .docx files)
-                        Box {
-                            IconButton(
-                                onClick = { showAppFontMenu = true },
-                                modifier = Modifier.testTag("action_app_font_selector")
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.FontDownload,
-                                    contentDescription = "تغيير خط واجهة التطبيق (${uiState.appUiFont.shortLabel})",
-                                    tint = MaterialTheme.colorScheme.primary
-                                )
-                            }
-                            DropdownMenu(
-                                expanded = showAppFontMenu,
-                                onDismissRequest = { showAppFontMenu = false }
-                            ) {
-                                AppUiFont.entries.forEach { fontOption ->
-                                    val isSelected = uiState.appUiFont == fontOption
-                                    DropdownMenuItem(
-                                        text = {
-                                            Text(
-                                                text = fontOption.label,
-                                                fontFamily = fontOption.headingFamily,
-                                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
-                                                color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
-                                            )
-                                        },
-                                        trailingIcon = if (isSelected) {
-                                            {
-                                                Icon(
-                                                    imageVector = Icons.Default.Check,
-                                                    contentDescription = null,
-                                                    tint = MaterialTheme.colorScheme.primary,
-                                                    modifier = Modifier.size(18.dp)
-                                                )
-                                            }
-                                        } else null,
-                                        onClick = {
-                                            showAppFontMenu = false
-                                            viewModel.setAppUiFont(fontOption)
-                                        },
-                                        modifier = Modifier.testTag("app_font_option_${fontOption.name.lowercase()}")
-                                    )
-                                }
-                            }
-                        }
-
                         // Night / Day Mode Toggle
                         IconButton(
                             onClick = { viewModel.toggleTheme() },
-                            modifier = Modifier.testTag("action_toggle_theme")
+                            modifier = Modifier
+                                .size(48.dp)
+                                .minimumInteractiveComponentSize()
+                                .testTag("action_toggle_theme")
                         ) {
                             Icon(
                                 imageVector = if (uiState.isDarkMode) Icons.Default.LightMode else Icons.Default.DarkMode,
@@ -261,11 +221,14 @@ fun JadhadhaMainApp(viewModel: JadhadhaViewModel) {
                         // Word Preview shortcut
                         IconButton(
                             onClick = { viewModel.selectTab(AppTab.WORD_PREVIEW) },
-                            modifier = Modifier.testTag("top_action_preview")
+                            modifier = Modifier
+                                .size(48.dp)
+                                .minimumInteractiveComponentSize()
+                                .testTag("top_action_preview")
                         ) {
                             Icon(
                                 imageVector = Icons.AutoMirrored.Filled.Article,
-                                contentDescription = "معاينة Word",
+                                contentDescription = "معاينة ${ltr("Word")}",
                                 tint = MaterialTheme.colorScheme.primary
                             )
                         }
@@ -273,11 +236,14 @@ fun JadhadhaMainApp(viewModel: JadhadhaViewModel) {
                         // Direct Docx Export
                         IconButton(
                             onClick = { viewModel.exportToDocx(context) },
-                            modifier = Modifier.testTag("top_action_export")
+                            modifier = Modifier
+                                .size(48.dp)
+                                .minimumInteractiveComponentSize()
+                                .testTag("top_action_export")
                         ) {
                             Icon(
                                 imageVector = Icons.Default.FileDownload,
-                                contentDescription = "تصدير Word",
+                                contentDescription = "تصدير ${ltr("Word")}",
                                 tint = MaterialTheme.colorScheme.primary
                             )
                         }
@@ -323,7 +289,10 @@ fun JadhadhaMainApp(viewModel: JadhadhaViewModel) {
                         Text(
                             text = "المكونات",
                             fontWeight = if (uiState.selectedTab == AppTab.COMPONENTS_HUB) FontWeight.Bold else FontWeight.Normal,
-                            fontSize = 11.sp
+                            fontSize = 11.sp,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
                         )
                     },
                     colors = NavigationBarItemDefaults.colors(
@@ -349,7 +318,10 @@ fun JadhadhaMainApp(viewModel: JadhadhaViewModel) {
                         Text(
                             text = "المحرر",
                             fontWeight = if (uiState.selectedTab == AppTab.MODEL_EDITOR) FontWeight.Bold else FontWeight.Normal,
-                            fontSize = 11.sp
+                            fontSize = 11.sp,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
                         )
                     },
                     colors = NavigationBarItemDefaults.colors(
@@ -367,15 +339,18 @@ fun JadhadhaMainApp(viewModel: JadhadhaViewModel) {
                     icon = {
                         Icon(
                             imageVector = Icons.AutoMirrored.Filled.Article,
-                            contentDescription = "معاينة Word",
+                            contentDescription = "معاينة ${ltr("Word")}",
                             modifier = Modifier.size(22.dp)
                         )
                     },
                     label = {
                         Text(
-                            text = "معاينة Word",
+                            text = "معاينة ${ltr("Word")}",
                             fontWeight = if (uiState.selectedTab == AppTab.WORD_PREVIEW) FontWeight.Bold else FontWeight.Normal,
-                            fontSize = 11.sp
+                            fontSize = 11.sp,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
                         )
                     },
                     colors = NavigationBarItemDefaults.colors(
@@ -405,7 +380,9 @@ fun JadhadhaMainApp(viewModel: JadhadhaViewModel) {
                             text = if (isSecondaryToolSelected) uiState.selectedTab.title else "الأدوات",
                             fontWeight = if (isSecondaryToolSelected) FontWeight.Bold else FontWeight.Normal,
                             fontSize = 11.sp,
-                            maxLines = 1
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
                         )
                     },
                     colors = NavigationBarItemDefaults.colors(
@@ -497,10 +474,10 @@ fun JadhadhaMainApp(viewModel: JadhadhaViewModel) {
                 }
             }
 
-            // Floating Quick Action Bar (visible on Model Editor & Live Word Preview)
+            // Floating Quick Action Bar (visible on screens other than MODEL_EDITOR & WORD_PREVIEW)
             FloatingQuickBar(
                 plan = uiState.currentPlan,
-                visible = uiState.selectedTab == AppTab.MODEL_EDITOR || uiState.selectedTab == AppTab.WORD_PREVIEW,
+                visible = uiState.selectedTab != AppTab.MODEL_EDITOR && uiState.selectedTab != AppTab.WORD_PREVIEW,
                 onExportDocx = { ctx -> viewModel.exportToDocx(ctx) },
                 onPreviewDoc = { viewModel.selectTab(AppTab.WORD_PREVIEW) },
                 onSavePlan = { viewModel.saveCurrentPlan() },

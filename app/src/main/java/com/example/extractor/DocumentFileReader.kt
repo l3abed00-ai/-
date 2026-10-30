@@ -3,14 +3,17 @@ package com.example.extractor
 import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
+import android.util.Xml
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
+import org.xmlpull.v1.XmlPullParser
 import java.io.BufferedInputStream
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.InputStream
+import java.io.StringReader
 import java.nio.charset.Charset
 import java.nio.charset.StandardCharsets
 import java.util.zip.ZipEntry
@@ -49,6 +52,28 @@ object DocumentFileReader {
     const val MSG_FILE_EMPTY = "الملف المرفوع فارغ ولا يحتوي على نص قابل للتفريغ."
     const val MSG_FILE_CORRUPTED_OR_PROTECTED = "الملف تالف أو محمي بكلمة سر؛ تعذر استخراج محتوى الجذاذة."
     const val MSG_FORMAT_UNSUPPORTED = "صيغة الملف غير مدعومة؛ يرجى اختيار ملف وورد (.docx) أو PDF أو ملف نصي عربي."
+
+    private val HEADER_FOOTER_ENTRY_REGEX = Regex("^word/(header|footer)\\d*\\.xml$", RegexOption.IGNORE_CASE)
+
+    /**
+     * Intermediate model for streaming XmlPullParser extraction.
+     */
+    data class Para(val text: String)
+
+    data class TableCell(
+        val paragraphs: List<Para>,
+        val gridSpan: Int = 1,
+        val vMerge: String? = null
+    )
+
+    data class Table(
+        val rows: List<List<TableCell>>
+    )
+
+    private sealed interface DocElement {
+        data class ParaItem(val para: Para) : DocElement
+        data class TableItem(val table: Table) : DocElement
+    }
 
     private enum class TableColType {
         STAGE, SEGMENT, ABIL, TEACHER, LEARNER, ACTIVITIES, CONTENT, EVAL, TIME, UNKNOWN
@@ -243,8 +268,8 @@ object DocumentFileReader {
     }
 
     /**
-     * Extracts text and structured table cells from Word .docx file by streaming word/document.xml
-     * with a 20 MB uncompressed size limit.
+     * Extracts text and structured table cells from Word .docx file by streaming word/document.xml,
+     * word/header*.xml, and word/footer*.xml with a 20 MB uncompressed size limit.
      */
     fun extractTextFromDocx(inputStream: InputStream): String {
         return extractTextFromDocxStreamInternal(
@@ -262,7 +287,24 @@ object DocumentFileReader {
         var foundDocumentXml = false
         var foundAnyEntry = false
         var totalUncompressedBytes = 0L
-        var documentXmlText = ""
+        var documentXmlRaw = ""
+        val headerFooterXmlList = mutableListOf<Pair<String, String>>()
+
+        fun readCurrentZipEntryUtf8(zip: ZipInputStream): String {
+            val out = ByteArrayOutputStream(32 * 1024)
+            val buffer = ByteArray(8 * 1024)
+            while (true) {
+                onCheckActive()
+                val read = zip.read(buffer)
+                if (read == -1) break
+                totalUncompressedBytes += read
+                if (totalUncompressedBytes > MAX_DOCX_UNCOMPRESSED_BYTES) {
+                    throw DocumentReadException(MSG_DOCX_UNCOMPRESSED_TOO_LARGE)
+                }
+                out.write(buffer, 0, read)
+            }
+            return out.toByteArray().toString(StandardCharsets.UTF_8)
+        }
 
         try {
             val zip = ZipInputStream(inputStream)
@@ -279,23 +321,12 @@ object DocumentFileReader {
                     throw DocumentReadException(MSG_FILE_CORRUPTED_OR_PROTECTED)
                 }
 
-                if (entryName == "word/document.xml") {
+                if (entryName.equals("word/document.xml", ignoreCase = true)) {
                     foundDocumentXml = true
-                    val out = ByteArrayOutputStream(32 * 1024)
-                    val buffer = ByteArray(8 * 1024)
-                    while (true) {
-                        onCheckActive()
-                        val read = zip.read(buffer)
-                        if (read == -1) break
-                        totalUncompressedBytes += read
-                        if (totalUncompressedBytes > MAX_DOCX_UNCOMPRESSED_BYTES) {
-                            throw DocumentReadException(MSG_DOCX_UNCOMPRESSED_TOO_LARGE)
-                        }
-                        out.write(buffer, 0, read)
-                    }
-                    val xml = out.toByteArray().toString(StandardCharsets.UTF_8)
-                    documentXmlText = parseDocumentXml(xml)
-                    break
+                    documentXmlRaw = readCurrentZipEntryUtf8(zip)
+                } else if (HEADER_FOOTER_ENTRY_REGEX.matches(entryName)) {
+                    val hfXml = readCurrentZipEntryUtf8(zip)
+                    headerFooterXmlList.add(entryName to hfXml)
                 } else {
                     // Drain entry while counting uncompressed bytes to guard against zip bombs
                     val skipBuf = ByteArray(8 * 1024)
@@ -334,7 +365,47 @@ object DocumentFileReader {
             }
         }
 
-        return documentXmlText
+        if (!foundDocumentXml) {
+            return ""
+        }
+
+        val mainText = parseDocumentXml(documentXmlRaw)
+        if (headerFooterXmlList.isEmpty()) {
+            return mainText
+        }
+
+        // Sort headers first (header1, header2, ...) then footers (footer1, footer2, ...) deterministically
+        val sortedHeaderFooters = headerFooterXmlList.sortedWith(
+            compareBy<Pair<String, String>> { (name, _) ->
+                if (name.lowercase().contains("header")) 0 else 1
+            }.thenBy { (name, _) -> name.lowercase() }
+        )
+
+        val outputLines = mutableListOf<String>()
+        val seenNonBlankLines = mutableSetOf<String>()
+        if (mainText.isNotEmpty()) {
+            for (line in mainText.lines()) {
+                outputLines.add(line)
+                val trimmed = line.trim()
+                if (trimmed.isNotEmpty()) {
+                    seenNonBlankLines.add(trimmed)
+                }
+            }
+        }
+
+        for ((_, hfXml) in sortedHeaderFooters) {
+            val hfParsed = parseDocumentXml(hfXml)
+            if (hfParsed.isNotEmpty()) {
+                for (line in hfParsed.lines()) {
+                    val trimmed = line.trim()
+                    if (trimmed.isNotEmpty() && trimmed != "[نهاية الجدول]" && seenNonBlankLines.add(trimmed)) {
+                        outputLines.add(trimmed)
+                    }
+                }
+            }
+        }
+
+        return outputLines.joinToString("\n")
     }
 
     private class BoundedCountingInputStream(
@@ -475,16 +546,452 @@ object DocumentFileReader {
     }
 
     /**
-     * Parses word/document.xml using depth-balanced XML scanning so nested <w:tbl> inside <w:tc>
-     * (such as analytical tables in "الوصف والتحليل") never truncate the outer stages table.
+     * Parses Word XML (word/document.xml, word/header*.xml, word/footer*.xml) using streaming
+     * XmlPullParser with FEATURE_PROCESS_NAMESPACES enabled. Falls back to [parseDocumentXmlLegacy]
+     * if the XML is malformed or any parsing error occurs.
      */
     fun parseDocumentXml(xml: String): String {
+        if (xml.isBlank()) return ""
+        return try {
+            parseDocumentXmlWithPullParser(xml)
+        } catch (_: Throwable) {
+            parseDocumentXmlLegacy(xml)
+        }
+    }
+
+    private enum class AlternateContentState {
+        BEFORE_CHOICE,
+        IN_CHOICE,
+        AFTER_CHOICE
+    }
+
+    private class TableBuilder {
+        val rows = mutableListOf<List<TableCell>>()
+    }
+
+    private class RowBuilder {
+        val cells = mutableListOf<TableCell>()
+    }
+
+    private class CellBuilder {
+        val paragraphs = mutableListOf<Para>()
+        var gridSpan: Int = 1
+        var vMerge: String? = null
+        var inTcPr: Boolean = false
+    }
+
+    private class ParagraphBuilder {
+        val parts = mutableListOf(StringBuilder())
+    }
+
+    private class RunBuilder {
+        val segment = StringBuilder()
+        var inRPr: Boolean = false
+        var isUnderlined: Boolean = false
+        var inT: Boolean = false
+
+        fun flushTo(paraBuilder: ParagraphBuilder) {
+            val runText = segment.toString()
+            if (runText.isNotEmpty()) {
+                val target = paraBuilder.parts.last()
+                if (isUnderlined && runText.trim().endsWith(":")) {
+                    target.append("<u>${runText.trim()}</u> ")
+                } else {
+                    target.append(runText)
+                }
+                segment.setLength(0)
+            }
+        }
+    }
+
+    private fun parseDocumentXmlWithPullParser(xml: String): String {
+        val elements = buildDocumentElements(xml)
+        val outputLines = mutableListOf<String>()
+
+        for (element in elements) {
+            when (element) {
+                is DocElement.ParaItem -> {
+                    val t = element.para.text.trim()
+                    if (t.isNotEmpty()) {
+                        outputLines.add(t)
+                    }
+                }
+                is DocElement.TableItem -> {
+                    outputLines.addAll(parseTableXml(element.table))
+                }
+            }
+        }
+
+        return outputLines.joinToString("\n")
+    }
+
+    private fun buildDocumentElements(rawXml: String): List<DocElement> {
+        val trimmedXml = rawXml.trimStart('\uFEFF', ' ', '\t', '\r', '\n')
+        if (trimmedXml.isEmpty()) return emptyList()
+
+        // If a partial test XML snippet is provided without root xmlns declarations, wrap it
+        // so FEATURE_PROCESS_NAMESPACES can resolve w:, mc:, v:, wps: prefixes cleanly while still
+        // failing with XmlPullParserException on any malformed/unclosed XML.
+        val preparedXml = ensureNamespaceDeclarations(trimmedXml)
+
+        val parser = Xml.newPullParser()
+        parser.setFeature(XmlPullParser.FEATURE_PROCESS_NAMESPACES, true)
+        parser.setInput(StringReader(preparedXml))
+
+        val topElements = mutableListOf<DocElement>()
+        val tableStack = ArrayDeque<TableBuilder>()
+        val rowStack = ArrayDeque<RowBuilder>()
+        val cellStack = ArrayDeque<CellBuilder>()
+        val pStack = ArrayDeque<ParagraphBuilder>()
+        val rStack = ArrayDeque<RunBuilder>()
+        val altStack = ArrayDeque<AlternateContentState>()
+
+        var ignoredDepth = 0
+
+        var eventType = parser.eventType
+        while (eventType != XmlPullParser.END_DOCUMENT) {
+            when (eventType) {
+                XmlPullParser.START_TAG -> {
+                    val localName = parser.name ?: ""
+
+                    if (ignoredDepth > 0) {
+                        ignoredDepth++
+                    } else if (altStack.isNotEmpty() && altStack.last() != AlternateContentState.IN_CHOICE) {
+                        if (localName == "Choice" && altStack.last() == AlternateContentState.BEFORE_CHOICE) {
+                            altStack[altStack.lastIndex] = AlternateContentState.IN_CHOICE
+                        } else {
+                            // Inside AlternateContent but outside Choice (e.g., Fallback) -> ignore subtree
+                            ignoredDepth = 1
+                        }
+                    } else if (localName == "AlternateContent") {
+                        altStack.addLast(AlternateContentState.BEFORE_CHOICE)
+                    } else if (localName == "del" || localName == "delText" || localName == "instrText") {
+                        ignoredDepth = 1
+                    } else {
+                        when (localName) {
+                            "tbl" -> {
+                                tableStack.addLast(TableBuilder())
+                            }
+                            "tr" -> {
+                                if (tableStack.isNotEmpty()) {
+                                    rowStack.addLast(RowBuilder())
+                                }
+                            }
+                            "tc" -> {
+                                if (rowStack.isNotEmpty()) {
+                                    cellStack.addLast(CellBuilder())
+                                }
+                            }
+                            "tcPr" -> {
+                                if (cellStack.isNotEmpty()) {
+                                    cellStack.last().inTcPr = true
+                                }
+                            }
+                            "gridSpan" -> {
+                                if (cellStack.isNotEmpty() && cellStack.last().inTcPr) {
+                                    val spanVal = getLocalAttributeValue(parser, "val")?.toIntOrNull()?.coerceAtLeast(1) ?: 1
+                                    cellStack.last().gridSpan = spanVal
+                                }
+                            }
+                            "vMerge" -> {
+                                if (cellStack.isNotEmpty() && cellStack.last().inTcPr) {
+                                    val vVal = getLocalAttributeValue(parser, "val").orEmpty()
+                                    cellStack.last().vMerge = vVal.ifEmpty { "continue" }
+                                }
+                            }
+                            "p" -> {
+                                pStack.addLast(ParagraphBuilder())
+                            }
+                            "r" -> {
+                                if (pStack.isNotEmpty()) {
+                                    rStack.addLast(RunBuilder())
+                                }
+                            }
+                            "rPr" -> {
+                                if (rStack.isNotEmpty()) {
+                                    rStack.last().inRPr = true
+                                }
+                            }
+                            "u" -> {
+                                if (rStack.isNotEmpty() && rStack.last().inRPr) {
+                                    val uVal = getLocalAttributeValue(parser, "val")
+                                    rStack.last().isUnderlined = uVal == null || !uVal.equals("none", ignoreCase = true)
+                                }
+                            }
+                            "t" -> {
+                                if (rStack.isNotEmpty()) {
+                                    rStack.last().inT = true
+                                }
+                            }
+                            "tab" -> {
+                                if (rStack.isNotEmpty()) {
+                                    rStack.last().segment.append(" ")
+                                } else if (pStack.isNotEmpty()) {
+                                    pStack.last().parts.last().append(" ")
+                                }
+                            }
+                            "noBreakHyphen" -> {
+                                if (rStack.isNotEmpty()) {
+                                    rStack.last().segment.append("-")
+                                } else if (pStack.isNotEmpty()) {
+                                    pStack.last().parts.last().append("-")
+                                }
+                            }
+                            "br", "cr" -> {
+                                if (pStack.isNotEmpty()) {
+                                    val currentPara = pStack.last()
+                                    if (rStack.isNotEmpty()) {
+                                        rStack.last().flushTo(currentPara)
+                                    }
+                                    currentPara.parts.add(StringBuilder())
+                                }
+                            }
+                        }
+                    }
+                }
+
+                XmlPullParser.TEXT -> {
+                    if (ignoredDepth == 0 && (altStack.isEmpty() || altStack.last() == AlternateContentState.IN_CHOICE)) {
+                        if (rStack.isNotEmpty() && rStack.last().inT) {
+                            rStack.last().segment.append(parser.text.orEmpty())
+                        }
+                    }
+                }
+
+                XmlPullParser.END_TAG -> {
+                    val localName = parser.name ?: ""
+
+                    if (ignoredDepth > 0) {
+                        ignoredDepth--
+                    } else if (localName == "Choice" && altStack.isNotEmpty() && altStack.last() == AlternateContentState.IN_CHOICE) {
+                        altStack[altStack.lastIndex] = AlternateContentState.AFTER_CHOICE
+                    } else if (localName == "AlternateContent" && altStack.isNotEmpty()) {
+                        altStack.removeLast()
+                    } else {
+                        when (localName) {
+                            "t" -> {
+                                if (rStack.isNotEmpty()) {
+                                    rStack.last().inT = false
+                                }
+                            }
+                            "rPr" -> {
+                                if (rStack.isNotEmpty()) {
+                                    rStack.last().inRPr = false
+                                }
+                            }
+                            "r" -> {
+                                if (rStack.isNotEmpty()) {
+                                    val finishedRun = rStack.removeLast()
+                                    if (pStack.isNotEmpty()) {
+                                        finishedRun.flushTo(pStack.last())
+                                    }
+                                }
+                            }
+                            "p" -> {
+                                if (pStack.isNotEmpty()) {
+                                    val finishedPara = pStack.removeLast()
+                                    val cleanedParts = finishedPara.parts.map { normalizeParagraphPart(it.toString()) }
+                                    val nonEmptyParts = cleanedParts.filter { it.isNotEmpty() }
+
+                                    if (cellStack.isNotEmpty()) {
+                                        val currentCell = cellStack.last()
+                                        if (nonEmptyParts.isEmpty()) {
+                                            currentCell.paragraphs.add(Para(""))
+                                        } else {
+                                            for (part in nonEmptyParts) {
+                                                currentCell.paragraphs.add(Para(part))
+                                            }
+                                        }
+                                    } else {
+                                        for (part in nonEmptyParts) {
+                                            topElements.add(DocElement.ParaItem(Para(part)))
+                                        }
+                                    }
+                                }
+                            }
+                            "tcPr" -> {
+                                if (cellStack.isNotEmpty()) {
+                                    cellStack.last().inTcPr = false
+                                }
+                            }
+                            "tc" -> {
+                                if (cellStack.isNotEmpty()) {
+                                    val finishedCell = cellStack.removeLast()
+                                    if (rowStack.isNotEmpty()) {
+                                        rowStack.last().cells.add(
+                                            TableCell(
+                                                paragraphs = finishedCell.paragraphs.toList(),
+                                                gridSpan = finishedCell.gridSpan,
+                                                vMerge = finishedCell.vMerge
+                                            )
+                                        )
+                                    }
+                                }
+                            }
+                            "tr" -> {
+                                if (rowStack.isNotEmpty()) {
+                                    val finishedRow = rowStack.removeLast()
+                                    if (tableStack.isNotEmpty() && finishedRow.cells.isNotEmpty()) {
+                                        tableStack.last().rows.add(finishedRow.cells.toList())
+                                    }
+                                }
+                            }
+                            "tbl" -> {
+                                if (tableStack.isNotEmpty()) {
+                                    val finishedTable = Table(tableStack.removeLast().rows.toList())
+                                    if (cellStack.isNotEmpty()) {
+                                        // Nested table inside a cell: append its cells' paragraphs in order to the parent cell
+                                        val parentCell = cellStack.last()
+                                        for (row in finishedTable.rows) {
+                                            for (cell in row) {
+                                                for (para in cell.paragraphs) {
+                                                    if (para.text.isNotEmpty()) {
+                                                        parentCell.paragraphs.add(para)
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    } else {
+                                        topElements.add(DocElement.TableItem(finishedTable))
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            eventType = parser.next()
+        }
+
+        return topElements
+    }
+
+    private fun getLocalAttributeValue(parser: XmlPullParser, targetLocalName: String): String? {
+        for (i in 0 until parser.attributeCount) {
+            val attrName = parser.getAttributeName(i) ?: continue
+            if (attrName == targetLocalName || attrName.endsWith(":$targetLocalName")) {
+                return parser.getAttributeValue(i)
+            }
+        }
+        return null
+    }
+
+    private fun normalizeParagraphPart(raw: String): String {
+        return raw
+            .replace("\u0640", "")
+            .replace("\u00a0", " ")
+            .replace(Regex("[ \\t]+"), " ")
+            .trim()
+    }
+
+    private fun ensureNamespaceDeclarations(xml: String): String {
+        if (xml.contains("xmlns:w=") && xml.contains("xmlns:mc=")) {
+            return xml
+        }
+        val bodyWithoutDecl = if (xml.startsWith("<?xml")) {
+            val endDecl = xml.indexOf("?>")
+            if (endDecl >= 0) xml.substring(endDecl + 2).trimStart() else xml
+        } else {
+            xml
+        }
+        // Only wrap if it looks like well-structured XML starting with '<'
+        if (!bodyWithoutDecl.startsWith("<")) return xml
+        return buildString(bodyWithoutDecl.length + 380) {
+            append("<root ")
+            append("xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" ")
+            append("xmlns:mc=\"http://schemas.openxmlformats.org/markup-compatibility/2006\" ")
+            append("xmlns:wps=\"http://schemas.microsoft.com/office/word/2010/wordprocessingShape\" ")
+            append("xmlns:v=\"urn:schemas-microsoft-com:vml\" ")
+            append("xmlns:wp=\"http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing\" ")
+            append("xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\">")
+            append(bodyWithoutDecl)
+            append("</root>")
+        }
+    }
+
+    /**
+     * Extracts non-blank paragraph strings from a [TableCell].
+     */
+    internal fun extractCellParagraphs(cell: TableCell): List<String> {
+        return cell.paragraphs.map { it.text.trim() }.filter { it.isNotEmpty() }
+    }
+
+    /**
+     * Groups a [TableCell]'s paragraphs into blocks separated by blank paragraphs while keeping
+     * each paragraph (and each br/cr split) as a separate line.
+     */
+    private fun extractCellParagraphBlocks(cell: TableCell): List<List<String>> {
+        val blocks = mutableListOf<MutableList<String>>()
+        var afterBlank = true
+        for (para in cell.paragraphs) {
+            val t = para.text.trim()
+            if (t.isEmpty()) {
+                afterBlank = true
+                continue
+            }
+            if (afterBlank || blocks.isEmpty()) {
+                blocks.add(mutableListOf(t))
+            } else {
+                blocks.last().add(t)
+            }
+            afterBlank = false
+        }
+        return blocks
+    }
+
+    /**
+     * Parses a [Table] model into structured stage lines (`[مرحلة: ...]`, field headers, `[نهاية الجدول]`)
+     * or header/metadata lines (`عنوان: عنصر - عنصر`), preserving column classification and resolution logic.
+     */
+    internal fun parseTableXml(table: Table): List<String> {
+        val result = mutableListOf<String>()
+        if (table.rows.isEmpty()) return result
+
+        // Build 2D grid supporting gridSpan and vMerge
+        val grid = mutableListOf<List<CellNode?>>()
+        var nextCellId = 1
+
+        for (tableRow in table.rows) {
+            val row = mutableListOf<CellNode?>()
+            for (tc in tableRow) {
+                val pBlocks = extractCellParagraphBlocks(tc)
+                val flatParas = extractCellParagraphs(tc)
+                val node = CellNode(
+                    id = nextCellId++,
+                    rawXml = "",
+                    paragraphBlocks = pBlocks,
+                    flatParagraphs = flatParas,
+                    contentLinesWithTables = flatParas
+                )
+
+                val span = tc.gridSpan.coerceAtLeast(1)
+                for (s in 0 until span) {
+                    if (tc.vMerge == "continue" && grid.isNotEmpty() && row.size < grid.last().size) {
+                        row.add(grid.last()[row.size])
+                    } else {
+                        row.add(node)
+                    }
+                }
+            }
+            if (row.isNotEmpty()) {
+                grid.add(row)
+            }
+        }
+
+        return formatTableGridToLines(grid, result)
+    }
+
+    /**
+     * Legacy fallback parser using regex/depth-balanced XML slicing.
+     * Kept intact for safety when XmlPullParser encounters corrupted XML.
+     */
+    internal fun parseDocumentXmlLegacy(xml: String): String {
         val outputLines = mutableListOf<String>()
         val topBlocks = extractTopLevelBlocks(xml)
 
         for ((isTable, blockXml) in topBlocks) {
             if (isTable) {
-                outputLines.addAll(parseTableXml(blockXml))
+                outputLines.addAll(parseTableXmlLegacy(blockXml))
             } else {
                 val pText = extractParagraphText(blockXml)
                 if (pText.isNotEmpty()) {
@@ -603,7 +1110,7 @@ object DocumentFileReader {
         return results
     }
 
-    private fun parseTableXml(tblXml: String): List<String> {
+    private fun parseTableXmlLegacy(tblXml: String): List<String> {
         val result = mutableListOf<String>()
         val trList = extractDirectChildrenIgnoreNestedTables(tblXml, "tr", stripOuterTableTag = true)
         if (trList.isEmpty()) return result
@@ -620,7 +1127,7 @@ object DocumentFileReader {
                 val span = extractGridSpan(tcPrXml)
                 val vMerge = extractVMerge(tcPrXml)
 
-                val pBlocks = extractCellParagraphBlocks(tcXml)
+                val pBlocks = extractCellParagraphBlocksLegacy(tcXml)
                 val flatParas = pBlocks.flatten()
                 val contentWithTables = extractCellContentWithNestedTables(tcXml)
                 val node = CellNode(
@@ -644,6 +1151,13 @@ object DocumentFileReader {
             }
         }
 
+        return formatTableGridToLines(grid, result)
+    }
+
+    private fun formatTableGridToLines(
+        grid: List<List<CellNode?>>,
+        result: MutableList<String>
+    ): List<String> {
         if (grid.isEmpty()) return result
 
         // Detect header rows (1..3) and column mapping
@@ -944,6 +1458,43 @@ object DocumentFileReader {
         }
     }
 
+    private fun classifyColumnHeader(
+        normalizedHeader: String,
+        alreadyAssigned: Set<TableColType> = emptySet()
+    ): TableColType {
+        val rules = listOf(
+            TableColType.TIME to listOf("الحصيص", "الزمني", "المده"),
+            TableColType.EVAL to listOf("التقويم", "الدعم", "مؤشرات"),
+            TableColType.CONTENT to listOf("محتوي", "التعلمات", "المضامين", "الدعامات"),
+            TableColType.TEACHER to listOf("المدرس", "الاستاذ"),
+            TableColType.LEARNER to listOf("المتعلم", "التلميذ"),
+            TableColType.STAGE to listOf("المراحل", "المهارات", "الخطوات"),
+            TableColType.SEGMENT to listOf("مقاطع", "المقطع"),
+            TableColType.ABIL to listOf("القدرات", "الكفايات", "الاهداف")
+        )
+        for ((colType, keywords) in rules) {
+            if (colType in alreadyAssigned) continue
+            if (keywords.any { kw -> normalizedHeader.contains(kw) }) {
+                return colType
+            }
+        }
+        return TableColType.UNKNOWN
+    }
+
+    private fun resolveUnknownColumns(
+        cols: MutableMap<TableColType, Int>,
+        colHeaders: List<String>
+    ) {
+        if (!cols.containsKey(TableColType.TEACHER) && !cols.containsKey(TableColType.LEARNER)) {
+            val actHit = colHeaders.indices.firstOrNull { idx ->
+                idx !in cols.values && (colHeaders[idx].contains("الانشطه") || colHeaders[idx].contains("التعليميه"))
+            }
+            if (actHit != null) {
+                cols[TableColType.ACTIVITIES] = actHit
+            }
+        }
+    }
+
     private fun detectColumnsFromGrid(grid: List<List<CellNode?>>, headerRows: Int): Map<TableColType, Int> {
         val nCols = grid.maxOfOrNull { it.size } ?: 0
         if (nCols == 0) return emptyMap()
@@ -984,14 +1535,7 @@ object DocumentFileReader {
             }
         }
 
-        if (!cols.containsKey(TableColType.TEACHER) && !cols.containsKey(TableColType.LEARNER)) {
-            val actHit = colHeaders.indices.firstOrNull { idx ->
-                idx !in cols.values && (colHeaders[idx].contains("الانشطه") || colHeaders[idx].contains("التعليميه"))
-            }
-            if (actHit != null) {
-                cols[TableColType.ACTIVITIES] = actHit
-            }
-        }
+        resolveUnknownColumns(cols, colHeaders)
 
         return cols
     }
@@ -1024,10 +1568,10 @@ object DocumentFileReader {
     }
 
     /**
-     * Extracts paragraph blocks from a <w:tc> (ignoring nested tables), grouping paragraphs separated by blank lines
-     * and re-joining single-word broken lines (matching reflow_blocks in reference Python scripts).
+     * Legacy helper: Extracts paragraph blocks from a <w:tc> (ignoring nested tables), grouping paragraphs separated by blank lines
+     * and re-joining single-word broken lines.
      */
-    private fun extractCellParagraphBlocks(tcXml: String): List<List<String>> {
+    private fun extractCellParagraphBlocksLegacy(tcXml: String): List<List<String>> {
         val directParas = extractDirectChildrenIgnoreNestedTables(tcXml, "p", stripOuterTableTag = false)
         val rawTexts = directParas.map { extractParagraphText(it) }
         val blocks = mutableListOf<MutableList<String>>()
@@ -1059,9 +1603,7 @@ object DocumentFileReader {
     }
 
     /**
-     * Extracts both direct paragraphs and any nested <w:tbl> tables inside a <w:tc>.
-     * Nested table rows are formatted as `[جدول: خلية1 | خلية2 | ...]` so they stay inside the stage's content cell
-     * and can be rendered as actual nested Word tables in DocxGenerator and LiveWordPreviewScreen.
+     * Legacy helper: Extracts both direct paragraphs and any nested <w:tbl> tables inside a <w:tc>.
      */
     private fun extractCellContentWithNestedTables(tcXml: String): List<String> {
         val out = mutableListOf<String>()
@@ -1105,7 +1647,7 @@ object DocumentFileReader {
         for (trXml in trList) {
             val tcList = extractDirectChildrenIgnoreNestedTables(trXml, "tc", stripOuterTableTag = false)
             val cellsText = tcList.map { tc ->
-                val pBlocks = extractCellParagraphBlocks(tc)
+                val pBlocks = extractCellParagraphBlocksLegacy(tc)
                 pBlocks.flatten().joinToString(" ").trim()
             }
             if (cellsText.any { it.isNotEmpty() }) {

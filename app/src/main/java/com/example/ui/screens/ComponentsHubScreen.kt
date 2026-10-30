@@ -2,11 +2,13 @@ package com.example.ui.screens
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -17,36 +19,30 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.MenuBook
 import androidx.compose.material.icons.filled.AutoAwesome
-import androidx.compose.material.icons.filled.Book
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Create
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.EditNote
 import androidx.compose.material.icons.filled.Layers
-import androidx.compose.material.icons.automirrored.filled.MenuBook
-import androidx.compose.material.icons.filled.RecordVoiceOver
 import androidx.compose.material.icons.filled.School
 import androidx.compose.material.icons.filled.SwapHoriz
-import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
@@ -55,6 +51,10 @@ import com.example.model.JadhadhaPlan
 import com.example.model.PedagogicalComponent
 import com.example.model.StageCatalog
 import com.example.ui.AppTab
+import com.example.ui.components.AppButton
+import com.example.ui.components.AppOutlinedButton
+import com.example.ui.components.ButtonLabel
+import com.example.ui.components.ltr
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -265,7 +265,7 @@ fun ComponentsHubScreen(
                     Spacer(modifier = Modifier.width(12.dp))
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            text = "معاينة الوثيقة الرسمية (Word A4)",
+                            text = "معاينة الوثيقة الرسمية (${ltr("Word A4")})",
                             style = MaterialTheme.typography.titleSmall,
                             fontWeight = FontWeight.Bold,
                             color = MaterialTheme.colorScheme.onSecondaryContainer
@@ -280,8 +280,9 @@ fun ComponentsHubScreen(
             }
         }
 
+        // Bottom space so FloatingQuickBar never covers the last card
         item {
-            Spacer(modifier = Modifier.height(48.dp))
+            Spacer(modifier = Modifier.height(88.dp))
         }
     }
 }
@@ -311,8 +312,7 @@ fun ComponentCard(
             ),
         shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(
-            containerColor = if (isActive) MaterialTheme.colorScheme.surface
-            else MaterialTheme.colorScheme.surface
+            containerColor = MaterialTheme.colorScheme.surface
         ),
         elevation = CardDefaults.cardElevation(defaultElevation = if (isActive) 4.dp else 2.dp)
     ) {
@@ -434,45 +434,51 @@ fun ComponentCard(
             // Action Buttons
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Button(
+                AppButton(
                     onClick = onActivate,
                     modifier = Modifier
-                        .weight(1.2f)
+                        .weight(1.1f)
                         .testTag("activate_component_${component.id}"),
                     colors = ButtonDefaults.buttonColors(
                         containerColor = if (isActive) MaterialTheme.colorScheme.primary
                         else MaterialTheme.colorScheme.secondary
                     )
                 ) {
-                    Icon(imageVector = Icons.Default.EditNote, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text(
+                    ButtonLabel(
                         text = if (isActive) "فتح المحرر" else "تفعيل وتحرير",
+                        icon = Icons.Default.EditNote,
+                        iconSize = 16.dp,
                         fontWeight = FontWeight.Bold
                     )
                 }
 
-                OutlinedButton(
+                AppOutlinedButton(
                     onClick = onExtract,
                     modifier = Modifier
                         .weight(1f)
                         .testTag("extract_component_${component.id}")
                 ) {
-                    Icon(imageVector = Icons.Default.SwapHoriz, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text("تفريغ جذاذة")
+                    ButtonLabel(
+                        text = "تفريغ جذاذة",
+                        icon = Icons.Default.SwapHoriz,
+                        iconSize = 16.dp
+                    )
                 }
 
-                OutlinedButton(
+                AppOutlinedButton(
                     onClick = onAiGenerate,
-                    modifier = Modifier.testTag("ai_component_${component.id}")
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+                    modifier = Modifier
+                        .minimumInteractiveComponentSize()
+                        .testTag("ai_component_${component.id}")
                 ) {
                     Icon(
                         imageVector = Icons.Default.AutoAwesome,
                         contentDescription = "توليد بالذكاء الاصطناعي",
-                        modifier = Modifier.size(16.dp)
+                        modifier = Modifier.size(18.dp)
                     )
                 }
             }

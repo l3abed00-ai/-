@@ -37,25 +37,22 @@ import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.School
 import androidx.compose.material.icons.filled.TableChart
-import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -69,6 +66,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import com.example.model.FieldSource
@@ -80,7 +78,13 @@ import com.example.model.StageCatalog
 import com.example.model.StageData
 import com.example.model.SuggestedObjectives
 import com.example.ui.AppTab
+import com.example.ui.components.AppButton
+import com.example.ui.components.AppOutlinedButton
+import com.example.ui.components.AppTextButton
+import com.example.ui.components.AppTonalButton
+import com.example.ui.components.ButtonLabel
 import com.example.ui.components.SectionHeader
+import com.example.ui.components.ltr
 
 @OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
 @Composable
@@ -176,20 +180,13 @@ fun ModelEditorScreen(
                                 fontWeight = FontWeight.ExtraBold
                             )
                             Spacer(modifier = Modifier.height(6.dp))
-                            FilledTonalButton(
+                            AppTonalButton(
                                 onClick = { showSuggestObjectivesDialog = true },
                                 modifier = Modifier.testTag("btn_suggest_content_header")
                             ) {
-                                Icon(
-                                    imageVector = Icons.Default.AutoAwesome,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(16.dp),
-                                    tint = MaterialTheme.colorScheme.primary
-                                )
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text(
-                                    text = "اقتراح محتوى (Gemini 3.8 Flash)",
-                                    fontWeight = FontWeight.Bold,
+                                ButtonLabel(
+                                    text = "اقتراح محتوى (${ltr("Gemini 3.8 Flash")})",
+                                    icon = Icons.Default.AutoAwesome,
                                     style = MaterialTheme.typography.labelMedium
                                 )
                             }
@@ -198,6 +195,8 @@ fun ModelEditorScreen(
                         IconButton(
                             onClick = { showEditInfoDialog = true },
                             modifier = Modifier
+                                .size(48.dp)
+                                .minimumInteractiveComponentSize()
                                 .clip(CircleShape)
                                 .background(MaterialTheme.colorScheme.surface)
                                 .testTag("edit_header_button")
@@ -228,40 +227,44 @@ fun ModelEditorScreen(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        Button(
+                        AppButton(
                             onClick = onSavePlan,
                             modifier = Modifier
-                                .weight(1.1f)
+                                .weight(1f)
                                 .testTag("btn_save_plan_db"),
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = MaterialTheme.colorScheme.primary
                             )
                         ) {
-                            Icon(imageVector = Icons.Default.Save, contentDescription = null, modifier = Modifier.size(18.dp))
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text("حفظ الجذاذة", fontWeight = FontWeight.Bold)
+                            ButtonLabel(
+                                text = "حفظ الجذاذة",
+                                icon = Icons.Default.Save
+                            )
                         }
 
-                        FilledTonalButton(
+                        AppTonalButton(
                             onClick = { onNavigateToTab(AppTab.EXPORT_DOCX) },
                             modifier = Modifier
-                                .weight(1.1f)
+                                .weight(1f)
                                 .testTag("export_docx_button")
                         ) {
-                            Icon(imageVector = Icons.Default.FileDownload, contentDescription = null, modifier = Modifier.size(18.dp))
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text("تصدير Word", fontWeight = FontWeight.Bold)
+                            ButtonLabel(
+                                text = "تصدير ${ltr("Word")}",
+                                icon = Icons.Default.FileDownload
+                            )
                         }
 
-                        OutlinedButton(
+                        AppOutlinedButton(
                             onClick = { onNavigateToTab(AppTab.COMPONENTS_HUB) },
                             modifier = Modifier
-                                .weight(0.9f)
+                                .weight(1f)
                                 .testTag("change_component_button")
                         ) {
-                            Icon(imageVector = Icons.Default.Layers, contentDescription = null, modifier = Modifier.size(18.dp))
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text("المكونات")
+                            ButtonLabel(
+                                text = "المكونات",
+                                icon = Icons.Default.Layers,
+                                fontWeight = FontWeight.Medium
+                            )
                         }
                     }
                 }
@@ -272,31 +275,55 @@ fun ModelEditorScreen(
         item {
             when (plan.componentType) {
                 PedagogicalComponent.READING -> {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
+                    Column {
                         Text(
                             text = "عرض الحصص:",
                             style = MaterialTheme.typography.bodyMedium,
                             fontWeight = FontWeight.Bold
                         )
-                        FilterChip(
-                            selected = selectedSessionFilter == null,
-                            onClick = { selectedSessionFilter = null },
-                            label = { Text("كامل الجذاذة (الحصتان)") }
-                        )
-                        FilterChip(
-                            selected = selectedSessionFilter == 1,
-                            onClick = { selectedSessionFilter = 1 },
-                            label = { Text("الحصة 1") }
-                        )
-                        FilterChip(
-                            selected = selectedSessionFilter == 2,
-                            onClick = { selectedSessionFilter = 2 },
-                            label = { Text("الحصة 2") }
-                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        FlowRow(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            FilterChip(
+                                selected = selectedSessionFilter == null,
+                                onClick = { selectedSessionFilter = null },
+                                label = {
+                                    Text(
+                                        text = "كامل الجذاذة (الحصتان)",
+                                        maxLines = 1,
+                                        softWrap = false,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                            )
+                            FilterChip(
+                                selected = selectedSessionFilter == 1,
+                                onClick = { selectedSessionFilter = 1 },
+                                label = {
+                                    Text(
+                                        text = "الحصة 1",
+                                        maxLines = 1,
+                                        softWrap = false,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                            )
+                            FilterChip(
+                                selected = selectedSessionFilter == 2,
+                                onClick = { selectedSessionFilter = 2 },
+                                label = {
+                                    Text(
+                                        text = "الحصة 2",
+                                        maxLines = 1,
+                                        softWrap = false,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                            )
+                        }
                     }
                 }
 
@@ -330,27 +357,62 @@ fun ModelEditorScreen(
                             FilterChip(
                                 selected = selectedSessionFilter == null,
                                 onClick = { selectedSessionFilter = null },
-                                label = { Text("الكل (4 حصص)") }
+                                label = {
+                                    Text(
+                                        text = "الكل (4 حصص)",
+                                        maxLines = 1,
+                                        softWrap = false,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
                             )
                             FilterChip(
                                 selected = selectedSessionFilter == 1,
                                 onClick = { selectedSessionFilter = 1 },
-                                label = { Text("ح1: الاكتساب") }
+                                label = {
+                                    Text(
+                                        text = "ح1: الاكتساب",
+                                        maxLines = 1,
+                                        softWrap = false,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
                             )
                             FilterChip(
                                 selected = selectedSessionFilter == 2,
                                 onClick = { selectedSessionFilter = 2 },
-                                label = { Text("ح2: التطبيق") }
+                                label = {
+                                    Text(
+                                        text = "ح2: التطبيق",
+                                        maxLines = 1,
+                                        softWrap = false,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
                             )
                             FilterChip(
                                 selected = selectedSessionFilter == 3,
                                 onClick = { selectedSessionFilter = 3 },
-                                label = { Text("ح3: الإنتاج") }
+                                label = {
+                                    Text(
+                                        text = "ح3: الإنتاج",
+                                        maxLines = 1,
+                                        softWrap = false,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
                             )
                             FilterChip(
                                 selected = selectedSessionFilter == 4,
                                 onClick = { selectedSessionFilter = 4 },
-                                label = { Text("ح4: التصحيح") }
+                                label = {
+                                    Text(
+                                        text = "ح4: التصحيح",
+                                        maxLines = 1,
+                                        softWrap = false,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
                             )
                         }
                     }
@@ -479,7 +541,12 @@ fun HeaderSummaryCard(
                     )
                 }
 
-                IconButton(onClick = { expanded = !expanded }) {
+                IconButton(
+                    onClick = { expanded = !expanded },
+                    modifier = Modifier
+                        .size(48.dp)
+                        .minimumInteractiveComponentSize()
+                ) {
                     Icon(
                         imageVector = if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
                         contentDescription = if (expanded) "طي" else "توسيع"
@@ -501,13 +568,14 @@ fun HeaderSummaryCard(
                     HeaderInfoRow("كفاية منهجية:", info.methodologicalComp)
                     HeaderInfoRow("كفاية ثقافية / معرفية:", info.culturalComp)
 
-                    TextButton(
+                    AppTextButton(
                         onClick = onEditClick,
                         modifier = Modifier.align(Alignment.End)
                     ) {
-                        Icon(imageVector = Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("تعديل معطيات الترويسة")
+                        ButtonLabel(
+                            text = "تعديل معطيات الترويسة",
+                            icon = Icons.Default.Edit
+                        )
                     }
                 }
             }
@@ -655,7 +723,13 @@ fun StageCard(
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(4.dp)
                             ) {
-                                Text(label, style = MaterialTheme.typography.labelSmall)
+                                Text(
+                                    text = label,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    maxLines = 1,
+                                    softWrap = false,
+                                    overflow = TextOverflow.Ellipsis
+                                )
                                 if (fieldSource != null) {
                                     FieldSourceBadge(
                                         source = fieldSource,
@@ -785,7 +859,7 @@ fun StageCard(
                         maxLines = 2
                     )
 
-                    Button(
+                    AppButton(
                         onClick = {
                             if (newItemText.isNotBlank()) {
                                 onAddItem(selectedField, newItemText.trim())
@@ -794,29 +868,33 @@ fun StageCard(
                             }
                         }
                     ) {
-                        Text("إضافة")
+                        ButtonLabel(text = "إضافة")
                     }
 
-                    IconButton(onClick = { isAdding = false }) {
+                    IconButton(
+                        onClick = { isAdding = false },
+                        modifier = Modifier
+                            .size(48.dp)
+                            .minimumInteractiveComponentSize()
+                    ) {
                         Icon(imageVector = Icons.Default.Close, contentDescription = "إلغاء")
                     }
                 }
             } else {
-                TextButton(
+                AppTextButton(
                     onClick = { isAdding = true },
                     modifier = Modifier.align(Alignment.Start)
                 ) {
-                    Icon(imageVector = Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text(
-                        "إضافة عنصر جديد في ${
+                    ButtonLabel(
+                        text = "إضافة عنصر جديد في ${
                             when (selectedField) {
                                 "content" -> "المحتوى"
                                 "teacher" -> "أنشطة المدرس"
                                 "abil" -> "القدرات"
                                 else -> "التقويم"
                             }
-                        }"
+                        }",
+                        icon = Icons.Default.Add
                     )
                 }
             }
@@ -894,7 +972,9 @@ fun ItemRow(
                             isEditing = false
                         }
                     },
-                    modifier = Modifier.size(32.dp)
+                    modifier = Modifier
+                        .size(48.dp)
+                        .minimumInteractiveComponentSize()
                 ) {
                     Icon(
                         imageVector = Icons.Default.Check,
@@ -907,7 +987,9 @@ fun ItemRow(
                         editedText = text
                         isEditing = false
                     },
-                    modifier = Modifier.size(32.dp)
+                    modifier = Modifier
+                        .size(48.dp)
+                        .minimumInteractiveComponentSize()
                 ) {
                     Icon(
                         imageVector = Icons.Default.Close,
@@ -920,7 +1002,7 @@ fun ItemRow(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                    .padding(horizontal = 10.dp, vertical = 4.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
@@ -938,18 +1020,22 @@ fun ItemRow(
                 )
                 IconButton(
                     onClick = { isEditing = true },
-                    modifier = Modifier.size(26.dp)
+                    modifier = Modifier
+                        .size(48.dp)
+                        .minimumInteractiveComponentSize()
                 ) {
                     Icon(
                         imageVector = Icons.Default.Edit,
                         contentDescription = "تعديل",
                         tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.75f),
-                        modifier = Modifier.size(15.dp)
+                        modifier = Modifier.size(16.dp)
                     )
                 }
                 IconButton(
                     onClick = onDelete,
-                    modifier = Modifier.size(26.dp)
+                    modifier = Modifier
+                        .size(48.dp)
+                        .minimumInteractiveComponentSize()
                 ) {
                     Icon(
                         imageVector = Icons.Default.Close,
@@ -1032,7 +1118,7 @@ fun EditInfoDialog(
                             )
 
                             // Dedicated "Suggest Content" button
-                            Button(
+                            AppButton(
                                 onClick = { onSuggestObjectives(topic) },
                                 enabled = topic.isNotBlank() && !isSuggestingObjectives,
                                 colors = ButtonDefaults.buttonColors(
@@ -1052,19 +1138,16 @@ fun EditInfoDialog(
                                     )
                                     Spacer(modifier = Modifier.width(8.dp))
                                     Text(
-                                        "جارٍ توليد الأهداف عبر Gemini 3.8 Flash...",
-                                        style = MaterialTheme.typography.labelMedium
+                                        text = "جارٍ توليد الأهداف عبر ${ltr("Gemini 3.8 Flash")}...",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        maxLines = 1,
+                                        softWrap = false,
+                                        overflow = TextOverflow.Ellipsis
                                     )
                                 } else {
-                                    Icon(
-                                        imageVector = Icons.Default.AutoAwesome,
-                                        contentDescription = null,
-                                        modifier = Modifier.size(18.dp)
-                                    )
-                                    Spacer(modifier = Modifier.width(8.dp))
-                                    Text(
-                                        text = "اقتراح محتوى (توليد الأهداف بـ Gemini 3.8 Flash)",
-                                        fontWeight = FontWeight.Bold,
+                                    ButtonLabel(
+                                        text = "اقتراح محتوى (توليد الأهداف بـ ${ltr("Gemini 3.8 Flash")})",
+                                        icon = Icons.Default.AutoAwesome,
                                         style = MaterialTheme.typography.labelMedium
                                     )
                                 }
@@ -1101,14 +1184,16 @@ fun EditInfoDialog(
                     item {
                         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                             Text(
-                                text = "تصنيف الجذاذة في قاعدة البيانات (Category) *",
+                                text = "تصنيف الجذاذة في قاعدة البيانات (${ltr("Category")}) *",
                                 style = MaterialTheme.typography.labelMedium,
                                 fontWeight = FontWeight.Bold,
                                 color = MaterialTheme.colorScheme.primary
                             )
-                            Row(
+                            @OptIn(ExperimentalLayoutApi::class)
+                            FlowRow(
                                 modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
                             ) {
                                 JadhadhaCategories.ALL.forEach { catOption ->
                                     FilterChip(
@@ -1119,7 +1204,15 @@ fun EditInfoDialog(
                                                 component = catOption
                                             }
                                         },
-                                        label = { Text(catOption, style = MaterialTheme.typography.labelSmall) }
+                                        label = {
+                                            Text(
+                                                text = catOption,
+                                                style = MaterialTheme.typography.labelSmall,
+                                                maxLines = 1,
+                                                softWrap = false,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                        }
                                     )
                                 }
                             }
@@ -1217,11 +1310,11 @@ fun EditInfoDialog(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.End
                 ) {
-                    TextButton(onClick = onDismiss) {
-                        Text("إلغاء")
+                    AppTextButton(onClick = onDismiss) {
+                        ButtonLabel(text = "إلغاء", fontWeight = FontWeight.Medium)
                     }
                     Spacer(modifier = Modifier.width(8.dp))
-                    Button(
+                    AppButton(
                         onClick = {
                             val newInfo = currentInfo.copy(
                                 level = level.trim(),
@@ -1238,7 +1331,7 @@ fun EditInfoDialog(
                             onConfirm(topic.trim(), finalCat, newInfo)
                         }
                     ) {
-                        Text("حفظ التعديلات")
+                        ButtonLabel(text = "حفظ التعديلات")
                     }
                 }
             }
@@ -1279,7 +1372,10 @@ fun SuggestObjectivesDialog(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.weight(1f)
+                    ) {
                         Icon(
                             imageVector = Icons.Default.AutoAwesome,
                             contentDescription = null,
@@ -1299,7 +1395,7 @@ fun SuggestObjectivesDialog(
                                 shape = RoundedCornerShape(4.dp)
                             ) {
                                 Text(
-                                    text = "مدعوم بـ Gemini 3.8 Flash",
+                                    text = "مدعوم بـ ${ltr("Gemini 3.8 Flash")}",
                                     style = MaterialTheme.typography.labelSmall,
                                     fontWeight = FontWeight.Bold,
                                     color = MaterialTheme.colorScheme.onTertiaryContainer,
@@ -1309,7 +1405,12 @@ fun SuggestObjectivesDialog(
                         }
                     }
 
-                    IconButton(onClick = onDismiss) {
+                    IconButton(
+                        onClick = onDismiss,
+                        modifier = Modifier
+                            .size(48.dp)
+                            .minimumInteractiveComponentSize()
+                    ) {
                         Icon(imageVector = Icons.Default.Close, contentDescription = "إغلاق")
                     }
                 }
@@ -1331,7 +1432,7 @@ fun SuggestObjectivesDialog(
                 Spacer(modifier = Modifier.height(8.dp))
 
                 // Action to Generate
-                Button(
+                AppButton(
                     onClick = { onRequestSuggest(topicInput) },
                     enabled = topicInput.isNotBlank() && !isSuggesting,
                     colors = ButtonDefaults.buttonColors(
@@ -1350,13 +1451,16 @@ fun SuggestObjectivesDialog(
                             strokeWidth = 2.dp
                         )
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text("جارٍ توليد الأهداف عبر Gemini 3.8 Flash...")
-                    } else {
-                        Icon(imageVector = Icons.Default.AutoAwesome, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = if (suggested == null) "توليد واقتراح الأهداف الآن" else "إعادة اقتراح الأهداف بـ Gemini 3.8 Flash",
-                            fontWeight = FontWeight.Bold
+                            text = "جارٍ توليد الأهداف عبر ${ltr("Gemini 3.8 Flash")}...",
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    } else {
+                        ButtonLabel(
+                            text = if (suggested == null) "توليد واقتراح الأهداف الآن" else "إعادة اقتراح الأهداف بـ ${ltr("Gemini 3.8 Flash")}",
+                            icon = Icons.Default.AutoAwesome
                         )
                     }
                 }
@@ -1387,7 +1491,7 @@ fun SuggestObjectivesDialog(
                                     )
                                     Spacer(modifier = Modifier.height(6.dp))
                                     Text(
-                                        text = "يقوم نموذج Gemini 3.8 Flash بدراسة عنوان وموضوع الدرس ويقترح:",
+                                        text = "يقوم نموذج ${ltr("Gemini 3.8 Flash")} بدراسة عنوان وموضوع الدرس ويقترح:",
                                         style = MaterialTheme.typography.bodySmall,
                                         textAlign = TextAlign.Center,
                                         fontWeight = FontWeight.Bold
@@ -1508,14 +1612,14 @@ fun SuggestObjectivesDialog(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    OutlinedButton(
+                    AppOutlinedButton(
                         onClick = onDismiss,
                         modifier = Modifier.weight(1f)
                     ) {
-                        Text("إلغاء")
+                        ButtonLabel(text = "إلغاء", fontWeight = FontWeight.Medium)
                     }
 
-                    Button(
+                    AppButton(
                         onClick = {
                             suggested?.let {
                                 onApply(it, applyToStages)
@@ -1524,12 +1628,13 @@ fun SuggestObjectivesDialog(
                         enabled = suggested != null,
                         colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
                         modifier = Modifier
-                            .weight(1.5f)
+                            .weight(1f)
                             .testTag("btn_apply_suggested_objectives")
                     ) {
-                        Icon(imageVector = Icons.Default.Check, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("تطبيق على الجذاذة", fontWeight = FontWeight.Bold)
+                        ButtonLabel(
+                            text = "تطبيق على الجذاذة",
+                            icon = Icons.Default.Check
+                        )
                     }
                 }
             }
