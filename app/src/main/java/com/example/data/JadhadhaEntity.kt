@@ -11,7 +11,7 @@ import com.example.model.StageData
 import org.json.JSONArray
 import org.json.JSONObject
 
-@Entity(tableName = "jadhadha_plans")
+@Entity(tableName = "jadhadha_table")
 data class JadhadhaEntity(
     @PrimaryKey
     val id: String,

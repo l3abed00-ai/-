@@ -1,42 +1,66 @@
 package com.example.data
 
+import android.content.Context
 import com.example.model.JadhadhaPlan
 import com.example.model.SamplePlans
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 
-class JadhadhaRepository(private val dao: JadhadhaDao) {
+class JadhadhaRepository(
+    private val jadhadhaDao: JadhadhaDao,
+    private val context: Context? = null
+) {
 
-    val allPlans: Flow<List<JadhadhaPlan>> = dao.getAllPlans().map { entities ->
+    val allPlans: Flow<List<JadhadhaPlan>> = jadhadhaDao.getAllPlans().map { entities ->
         entities.map { it.toPlan() }
     }
 
     fun getPlansByCategory(category: String): Flow<List<JadhadhaPlan>> =
-        dao.getPlansByCategory(category).map { entities ->
+        jadhadhaDao.getPlansByCategory(category).map { entities ->
             entities.map { it.toPlan() }
         }
 
-    val allCategories: Flow<List<String>> = dao.getAllCategories()
+    val allCategories: Flow<List<String>> = jadhadhaDao.getAllCategories()
 
     suspend fun savePlan(plan: JadhadhaPlan, isCustom: Boolean = true) {
         val entity = JadhadhaEntity.fromPlan(plan, isCustom = isCustom)
-        dao.insertOrUpdate(entity)
+        jadhadhaDao.insertOrUpdate(entity)
     }
 
     suspend fun deletePlan(id: String) {
-        dao.deleteById(id)
+        jadhadhaDao.deleteById(id)
+    }
+
+    suspend fun clearAllStoredData() {
+        jadhadhaDao.deleteAllJadhadhat()
+        // إذا كانت هناك تفضيلات أو ملفات مؤقتة مسجلة محلياً يمكن مسحها هنا أيضاً
+        context?.let { ctx ->
+            runCatching {
+                ctx.cacheDir?.listFiles()?.forEach { file ->
+                    if (file.isFile && (
+                            file.name.endsWith(".docx") ||
+                                file.name.endsWith(".json") ||
+                                file.name.endsWith(".py") ||
+                                file.name.endsWith(".tmp")
+                            )
+                    ) {
+                        file.delete()
+                    }
+                }
+            }
+        }
     }
 
     suspend fun getPlanById(id: String): JadhadhaPlan? {
-        return dao.getPlanById(id)?.toPlan()
+        return jadhadhaDao.getPlanById(id)?.toPlan()
     }
 
     suspend fun prepopulateSamplesIfEmpty() {
-        if (dao.getCount() == 0) {
+        if (jadhadhaDao.getCount() == 0) {
             val entities = SamplePlans.ALL_SAMPLES.map {
                 JadhadhaEntity.fromPlan(it, isCustom = false)
             }
-            dao.insertAll(entities)
+            jadhadhaDao.insertAll(entities)
         }
     }
 }

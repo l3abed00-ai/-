@@ -1010,8 +1010,28 @@ class ExampleRobolectricTest {
         assertTrue(aiPlan.stages["synthesis"]!!.content.any { it.contains("خلاصة تركيبية") })
         assertTrue(aiPlan.stages["investment"]!!.content.any { it.contains("ابحث عن نماذج") })
     }
+
+    @Test
+    fun `test deleteAllJadhadhat and clearAllStoredData clear database and temp files`() = kotlinx.coroutines.runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val db = androidx.room.Room.inMemoryDatabaseBuilder(context, com.example.data.AppDatabase::class.java).build()
+        val dao = db.jadhadhaDao()
+        val repository = com.example.data.JadhadhaRepository(dao, context)
+
+        repository.prepopulateSamplesIfEmpty()
+        assertEquals(3, dao.getCount())
+
+        val tempDocx = java.io.File(context.cacheDir, "temp_test_jadhadha.docx").apply {
+            writeText("dummy")
+        }
+        assertTrue(tempDocx.exists())
+
+        repository.clearAllStoredData()
+        assertEquals(0, dao.getCount())
+        assertTrue(repository.allPlans.first().isEmpty())
+        assertTrue(!tempDocx.exists())
+
+        db.close()
+    }
 }
-
-
-
 

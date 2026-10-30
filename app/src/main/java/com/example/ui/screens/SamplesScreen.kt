@@ -56,10 +56,12 @@ fun SamplesScreen(
     savedPlans: List<JadhadhaPlan>,
     onSelectPlan: (JadhadhaPlan) -> Unit,
     onDeletePlan: (String) -> Unit = {},
+    onClearAllPlans: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     var selectedCategoryFilter by remember { mutableStateOf<String?>(null) }
     var planToDelete by remember { mutableStateOf<JadhadhaPlan?>(null) }
+    var showClearAllDialog by remember { mutableStateOf(false) }
 
     // Collect all distinct categories from saved plans + the 3 standard ones
     val allCategories = remember(savedPlans) {
@@ -193,6 +195,18 @@ fun SamplesScreen(
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold
                 )
+                if (savedPlans.isNotEmpty()) {
+                    AppTextButton(
+                        onClick = { showClearAllDialog = true },
+                        modifier = Modifier.testTag("clear_all_plans_btn")
+                    ) {
+                        ButtonLabel(
+                            text = "مسح الكل",
+                            icon = Icons.Default.Delete,
+                            iconSize = 16.dp
+                        )
+                    }
+                }
             }
         }
 
@@ -376,6 +390,37 @@ fun SamplesScreen(
             },
             dismissButton = {
                 AppTextButton(onClick = { planToDelete = null }) {
+                    ButtonLabel("إلغاء")
+                }
+            }
+        )
+    }
+
+    if (showClearAllDialog) {
+        AlertDialog(
+            onDismissRequest = { showClearAllDialog = false },
+            title = {
+                Text(
+                    text = "مسح جميع البيانات المحفوظة محلياً",
+                    fontWeight = FontWeight.Bold
+                )
+            },
+            text = {
+                Text("هل أنت متأكد من رغبتك في مسح جميع الجذاذات والملفات المؤقتة المحفوظة محلياً؟ لا يمكن التراجع عن هذا الإجراء.")
+            },
+            confirmButton = {
+                AppButton(
+                    onClick = {
+                        onClearAllPlans()
+                        showClearAllDialog = false
+                    },
+                    modifier = Modifier.testTag("confirm_clear_all_plans_btn")
+                ) {
+                    ButtonLabel("نعم، مسح الكل")
+                }
+            },
+            dismissButton = {
+                AppTextButton(onClick = { showClearAllDialog = false }) {
                     ButtonLabel("إلغاء")
                 }
             }

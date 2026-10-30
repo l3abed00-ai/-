@@ -140,7 +140,7 @@ class JadhadhaViewModel(
 
     constructor(application: Application) : this(
         application,
-        JadhadhaRepository(AppDatabase.getDatabase(application).jadhadhaDao())
+        JadhadhaRepository(AppDatabase.getDatabase(application).jadhadhaDao(), application)
     )
 
     private val _uiState = MutableStateFlow(JadhadhaUiState())
@@ -156,12 +156,8 @@ class JadhadhaViewModel(
         }
         viewModelScope.launch {
             repository.prepopulateSamplesIfEmpty()
-        }
-        viewModelScope.launch {
             repository.allPlans.collect { plans ->
-                if (plans.isNotEmpty()) {
-                    _uiState.value = _uiState.value.copy(savedPlans = plans)
-                }
+                _uiState.value = _uiState.value.copy(savedPlans = plans)
             }
         }
     }
@@ -223,6 +219,17 @@ class JadhadhaViewModel(
             repository.deletePlan(id)
             _uiState.value = _uiState.value.copy(
                 successMessage = "تم حذف الجذاذة من قاعدة البيانات بنجاح"
+            )
+        }
+    }
+
+    fun clearAllStoredData() {
+        viewModelScope.launch {
+            repository.clearAllStoredData()
+            _uiState.value = _uiState.value.copy(
+                savedPlans = emptyList(),
+                lastGeneratedFile = null,
+                successMessage = "تم مسح جميع الجذاذات والملفات المؤقتة المحفوظة محلياً بنجاح"
             )
         }
     }

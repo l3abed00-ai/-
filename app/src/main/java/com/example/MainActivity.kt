@@ -101,7 +101,7 @@ class MainActivity : ComponentActivity() {
             @Suppress("UNCHECKED_CAST")
             override fun <T : ViewModel> create(modelClass: Class<T>): T {
                 val db = AppDatabase.getDatabase(applicationContext)
-                val repository = JadhadhaRepository(db.jadhadhaDao())
+                val repository = JadhadhaRepository(db.jadhadhaDao(), applicationContext)
                 return JadhadhaViewModel(application, repository) as T
             }
         }
@@ -469,7 +469,8 @@ fun JadhadhaMainApp(viewModel: JadhadhaViewModel) {
                     AppTab.SAMPLES -> SamplesScreen(
                         savedPlans = uiState.savedPlans,
                         onSelectPlan = { viewModel.loadPlan(it) },
-                        onDeletePlan = { viewModel.deleteSavedPlan(it) }
+                        onDeletePlan = { viewModel.deleteSavedPlan(it) },
+                        onClearAllPlans = { viewModel.clearAllStoredData() }
                     )
                 }
             }
