@@ -501,7 +501,8 @@ fun JadhadhaMainApp(viewModel: JadhadhaViewModel) {
                     viewModel.selectTab(tab)
                 },
                 currentApiKey = uiState.customApiKey,
-                onSaveApiKey = { viewModel.setApiKey(it) }
+                onSaveApiKey = { viewModel.setApiKey(it) },
+                onClearAllStoredData = { viewModel.clearAllStoredData() }
             )
         }
     }

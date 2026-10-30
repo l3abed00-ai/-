@@ -491,8 +491,18 @@ private fun IdentificationTable(plan: JadhadhaPlan, fontFamily: FontFamily) {
                 .background(Color(0xFFF8FAFC))
                 .border(0.5.dp, Color(0xFFCBD5E1))
         ) {
-            TableCell(title = "المرجع المعتمد", value = "المختار في اللغة العربية", weight = 1.2f, fontFamily = fontFamily)
-            TableCell(title = "الوسائل الديداكتيكية", value = plan.info.materials, weight = 2f, fontFamily = fontFamily)
+            TableCell(title = "المرجع", value = plan.info.reference.ifBlank { "المختار في اللغة العربية" }, weight = 1.2f, fontFamily = fontFamily)
+            TableCell(title = "الوسائل التعليمية", value = plan.info.materials, weight = 2f, fontFamily = fontFamily)
+        }
+
+        // Row 4: Teacher & School
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .border(0.5.dp, Color(0xFFCBD5E1))
+        ) {
+            TableCell(title = "الأستاذ", value = plan.info.teacherName.ifBlank { "محمد العابد" }, weight = 1.2f, fontFamily = fontFamily)
+            TableCell(title = "المؤسسة", value = plan.info.schoolName.ifBlank { "مدرسة أنوال (السلك الإعدادي)" }, weight = 2f, fontFamily = fontFamily)
         }
     }
 }
@@ -536,52 +546,41 @@ private fun CompetenciesMatrix(plan: JadhadhaPlan, fontFamily: FontFamily) {
         modifier = Modifier
             .fillMaxWidth()
             .border(1.dp, Color(0xFF94A3B8))
-            .background(Color(0xFFFEF9C3).copy(alpha = 0.35f))
+            .background(Color(0xFFF2F2F2))
             .padding(8.dp)
     ) {
         Text(
-            text = "الكفايات المستهدفة:",
+            text = "الكفايات المستهدفة / الأهداف التعلمية:",
             style = MaterialTheme.typography.labelSmall,
             fontFamily = fontFamily,
             fontWeight = FontWeight.Bold,
-            color = Color(0xFF92400E),
+            color = Color(0xFF0F172A),
             fontSize = 12.sp,
             modifier = Modifier.padding(bottom = 4.dp)
         )
 
-        Row(modifier = Modifier.fillMaxWidth()) {
-            Column(modifier = Modifier.weight(1f).padding(end = 4.dp)) {
-                Text(
-                    text = "• كفاية تواصلية: ${plan.info.communicativeComp.ifBlank { "القدرة على التعبير والتفاعل السليم" }}",
-                    style = MaterialTheme.typography.bodySmall,
-                    fontFamily = fontFamily,
-                    color = Color(0xFF1F2937),
-                    fontSize = 10.5.sp
-                )
-                Text(
-                    text = "• كفاية منهجية: ${plan.info.methodologicalComp.ifBlank { "اكتساب آليات الملاحظة والتحليل والتركيب" }}",
-                    style = MaterialTheme.typography.bodySmall,
-                    fontFamily = fontFamily,
-                    color = Color(0xFF1F2937),
-                    fontSize = 10.5.sp
-                )
-            }
-            Column(modifier = Modifier.weight(1f).padding(start = 4.dp)) {
-                Text(
-                    text = "• كفاية ثقافية: ${plan.info.culturalComp.ifBlank { "إغناء الرصيد المعرفي والقيمي لدى المتعلم" }}",
-                    style = MaterialTheme.typography.bodySmall,
-                    fontFamily = fontFamily,
-                    color = Color(0xFF1F2937),
-                    fontSize = 10.5.sp
-                )
-                Text(
-                    text = "• كفاية استراتيجية: ترسيخ الهوية الوطنية والانفتاح الإيجابي",
-                    style = MaterialTheme.typography.bodySmall,
-                    fontFamily = fontFamily,
-                    color = Color(0xFF1F2937),
-                    fontSize = 10.5.sp
-                )
-            }
+        Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(
+                text = "- كفاية تواصلية: ${plan.info.communicativeComp.ifBlank { "القدرة على التعبير والتفاعل السليم" }}",
+                style = MaterialTheme.typography.bodySmall,
+                fontFamily = fontFamily,
+                color = Color(0xFF1F2937),
+                fontSize = 10.5.sp
+            )
+            Text(
+                text = "- كفاية منهجية: ${plan.info.methodologicalComp.ifBlank { "اكتساب آليات الملاحظة والتحليل والتركيب" }}",
+                style = MaterialTheme.typography.bodySmall,
+                fontFamily = fontFamily,
+                color = Color(0xFF1F2937),
+                fontSize = 10.5.sp
+            )
+            Text(
+                text = "- كفاية معرفية: ${plan.info.culturalComp.ifBlank { "إغناء الرصيد المعرفي والقيمي لدى المتعلم" }}",
+                style = MaterialTheme.typography.bodySmall,
+                fontFamily = fontFamily,
+                color = Color(0xFF1F2937),
+                fontSize = 10.5.sp
+            )
         }
     }
 }
@@ -589,6 +588,8 @@ private fun CompetenciesMatrix(plan: JadhadhaPlan, fontFamily: FontFamily) {
 @Composable
 private fun DidacticMatrixTable(plan: JadhadhaPlan, fontFamily: FontFamily) {
     val stages = StageCatalog.getStagesForComponent(plan.componentType)
+    val stageColHeader = if (plan.componentType == com.example.model.PedagogicalComponent.READING) "المقاطع" else "المراحل"
+    val actColHeader = if (plan.componentType == com.example.model.PedagogicalComponent.EXPRESSION) "الأنشطة التعليمية" else "الأنشطة التعليمية التعلمية"
 
     Column(
         modifier = Modifier
@@ -603,11 +604,11 @@ private fun DidacticMatrixTable(plan: JadhadhaPlan, fontFamily: FontFamily) {
                 .padding(vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            HeaderCell(text = "المراحل والمقاطع التعليمية", width = 130.dp, fontFamily = fontFamily)
-            HeaderCell(text = "القدرات والأهداف", width = 130.dp, fontFamily = fontFamily)
-            HeaderCell(text = "الأنشطة الديداكتيكية (المدرس / المتعلم)", width = 230.dp, fontFamily = fontFamily)
-            HeaderCell(text = "محتوى التعلمات والدعامات", width = 180.dp, fontFamily = fontFamily)
-            HeaderCell(text = "التقويم والدعم", width = 150.dp, fontFamily = fontFamily)
+            HeaderCell(text = stageColHeader, width = 110.dp, fontFamily = fontFamily)
+            HeaderCell(text = "القدرات والمهارات", width = 140.dp, fontFamily = fontFamily)
+            HeaderCell(text = actColHeader, width = 210.dp, fontFamily = fontFamily)
+            HeaderCell(text = "المحتوى", width = 230.dp, fontFamily = fontFamily)
+            HeaderCell(text = "التقويم والدعم", width = 130.dp, fontFamily = fontFamily)
         }
 
         // Table Rows
@@ -631,7 +632,7 @@ private fun DidacticMatrixTable(plan: JadhadhaPlan, fontFamily: FontFamily) {
             ) {
                 // Column 1: Stage Name
                 BodyCell(
-                    width = 130.dp,
+                    width = 110.dp,
                     title = stageMeta.title,
                     subtitle = stageMeta.sessionName,
                     isStageHeader = true,
@@ -641,7 +642,7 @@ private fun DidacticMatrixTable(plan: JadhadhaPlan, fontFamily: FontFamily) {
 
                 // Column 2: Abilities & Objectives
                 BodyCell(
-                    width = 130.dp,
+                    width = 140.dp,
                     items = if (stageData?.abil.isNullOrEmpty()) listOf(stageMeta.description) else stageData!!.abil,
                     isDefaultSource = abilIsDefault,
                     fontFamily = fontFamily
@@ -649,7 +650,7 @@ private fun DidacticMatrixTable(plan: JadhadhaPlan, fontFamily: FontFamily) {
 
                 // Column 3: Didactic Activities (Teacher & Student)
                 BodyActivitiesCell(
-                    width = 230.dp,
+                    width = 210.dp,
                     teacherActivities = stageData?.teacher ?: emptyList(),
                     fallbackActivities = listOf(stageMeta.description),
                     isDefaultSource = teacherIsDefault,
@@ -658,7 +659,7 @@ private fun DidacticMatrixTable(plan: JadhadhaPlan, fontFamily: FontFamily) {
 
                 // Column 4: Learning Content
                 BodyCell(
-                    width = 180.dp,
+                    width = 230.dp,
                     items = stageData?.content ?: emptyList(),
                     isDefaultSource = contentIsDefault,
                     fontFamily = fontFamily
@@ -666,7 +667,7 @@ private fun DidacticMatrixTable(plan: JadhadhaPlan, fontFamily: FontFamily) {
 
                 // Column 5: Evaluation & Support
                 BodyCell(
-                    width = 150.dp,
+                    width = 130.dp,
                     items = stageData?.eval ?: emptyList(),
                     isEval = true,
                     isDefaultSource = evalIsDefault,

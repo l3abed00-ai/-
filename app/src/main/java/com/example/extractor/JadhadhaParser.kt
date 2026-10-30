@@ -60,30 +60,33 @@ object JadhadhaParser {
         val isComponentDefaulted = !matchedByKeywords &&
                 (forcedComponent == null || forcedComponent == PedagogicalComponent.READING)
 
-        var level = "الثالثة ثانوي إعدادي"
-        var unit = "الوحدة الأولى"
+        var level = "السنة الثالثة إعدادي"
+        var unit = "الأول"
         var domain = when (detectedComponent) {
-            PedagogicalComponent.LANGUAGE -> "الظواهر اللغوية والأسلوبية"
-            PedagogicalComponent.EXPRESSION -> "مهارات التعبير والإنشاء"
-            PedagogicalComponent.READING -> "مجال القيم الإسلامية والوطنية"
+            PedagogicalComponent.LANGUAGE -> "القيم الإسلامية"
+            PedagogicalComponent.EXPRESSION -> "القيم الإسلامية"
+            PedagogicalComponent.READING -> "القيم الوطنية والإنسانية"
         }
         var component = detectedComponent.title
         var duration = detectedComponent.defaultDuration
         var materials = detectedComponent.defaultMaterials
+        var reference = "المختار في اللغة العربية"
+        var teacherName = "محمد العابد"
+        var schoolName = "مدرسة أنوال (السلك الإعدادي)"
         var communicative = when (detectedComponent) {
-            PedagogicalComponent.LANGUAGE -> "أن يوظف المتعلم الظاهرة اللغوية في سياقات تواصلية سليمة."
-            PedagogicalComponent.EXPRESSION -> "أن يتمكن المتعلم من التعبير والإنتاج الكتابي وفق خطوات المهارة."
-            PedagogicalComponent.READING -> "قراءة النص قراءة سليمة ومعبرة واستيعاب أبعاده الدلالية."
+            PedagogicalComponent.LANGUAGE -> "أن يكون المتعلم قادراً على توظيف الظاهرة اللغوية في سياقات تواصلية مختلفة تعبيراً وفهماً."
+            PedagogicalComponent.EXPRESSION -> "تمكين المتعلم من التعبير والتواصل بلغة عربية سليمة عبر توظيف خطوات المهارة."
+            PedagogicalComponent.READING -> "تمكين المتعلم من التواصل بلغة عربية سليمة، مستثمراً تعلمات الفصل ومطالعاته الحرة."
         }
         var methodological = when (detectedComponent) {
-            PedagogicalComponent.LANGUAGE -> "أن يحلل المتعلم الظاهرة اللغوية ويستنبط أحكامها الصرفية والتركيبية."
-            PedagogicalComponent.EXPRESSION -> "أن يكتسب المتعلم الخطوات المنهجية لإنتاج نصوص منسجمة."
-            PedagogicalComponent.READING -> "توظيف آليات القراءة المنهجية (الملاحظة، الفهم، التحليل، والتركيب)."
+            PedagogicalComponent.LANGUAGE -> "تمكين المتعلم من ملاحظة الظاهرة اللغوية ووصفها وتحليلها واستنتاج القاعدة الضابطة لها."
+            PedagogicalComponent.EXPRESSION -> "تمكين المتعلم من آليات تصميم الموضوع وتنظيم عناصره وفق خطوات منهجية متدرجة."
+            PedagogicalComponent.READING -> "تمكين المتعلم من استعمال أدوات القراءة المنهجية لفهم النص السردي وتحليله، وتركيب عناصره، واستثماره."
         }
         var cultural = when (detectedComponent) {
-            PedagogicalComponent.LANGUAGE -> "إدراك فصاحة اللسان العربي ودقة بنائه الدلالي."
-            PedagogicalComponent.EXPRESSION -> "الانفتاح على قضايا المجتمع والتعبير عنها بتفكير نقدي."
-            PedagogicalComponent.READING -> "استخلاص القيم التربوية والإنسانية المتضمنة في النص."
+            PedagogicalComponent.LANGUAGE -> "إغناء الرصيد اللغوي والمعرفي للمتعلم بالظواهر الصرفية والتركيبية وتطبيقاتها."
+            PedagogicalComponent.EXPRESSION -> "تنمية الرصيد الثقافي والقيمي للمتعلم للتعبير عن تجاربه اليومية ومشاعره الذاتية."
+            PedagogicalComponent.READING -> "يغني المتعلم رصيده الثقافي بمعطيات تاريخية ووطنية تتصل بمرحلة الاستعمار والكفاح من أجل الاستقلال."
         }
 
         // Available stages for this component
@@ -104,6 +107,7 @@ object JadhadhaParser {
         var currentRowStageKey: String? = null
         var currentField = "content"
         var hasEnteredStages = false
+        var activeSessionNumber = 1
         val stagesWithExplicitFields = mutableSetOf<String>()
         val unclassifiedLines = mutableListOf<UnclassifiedLine>()
 
@@ -117,6 +121,11 @@ object JadhadhaParser {
                 continue
             }
 
+            // Detect session transitions from any line or header
+            detectSessionTransition(cleanLine)?.let { newSession ->
+                activeSessionNumber = newSession
+            }
+
             val strippedHeaderLine = cleanLine
                 .removePrefix("•")
                 .removePrefix("-")
@@ -124,14 +133,20 @@ object JadhadhaParser {
                 .removePrefix("*")
                 .trim()
 
-            // Skip official administrative header banners from .docx header tables
-            if (isAdministrativeBannerLine(strippedHeaderLine)) {
+            // Skip official administrative header banners or standalone duration/segment noise
+            if (isAdministrativeBannerLine(strippedHeaderLine) || isDurationOrSegmentNoise(strippedHeaderLine)) {
                 continue
             }
 
             // 1. Check explicit Stage Marker [مرحلة: ...] or [حصة: ...]
             if ((cleanLine.startsWith("[مرحلة:") || cleanLine.startsWith("[حصة:")) && cleanLine.endsWith("]")) {
                 val inner = cleanLine.substringAfter(":").removeSuffix("]").trim()
+                detectSessionTransition(inner)?.let { newSession ->
+                    activeSessionNumber = newSession
+                }
+                if (isDurationOrSegmentNoise(inner)) {
+                    continue
+                }
                 // Ignore if the stage cell is actually a header metadata cell
                 if (!hasEnteredStages && isHeaderIsolationLine(inner)) {
                     extractHeaderMetadataInto(
@@ -143,14 +158,18 @@ object JadhadhaParser {
                         onComponent = { component = it },
                         onDuration = { duration = it },
                         onMaterials = { materials = it },
+                        onReference = { reference = it },
+                        onTeacherName = { teacherName = it },
+                        onSchoolName = { schoolName = it },
                         onCommunicative = { communicative = it },
                         onMethodological = { methodological = it },
                         onCultural = { cultural = it }
                     )
                     continue
                 }
-                val matchedKey = matchStageName(inner, detectedComponent)
-                    ?: detectIntraCellStageSwitch(inner, detectedComponent)
+                val hasComprehension = stageMap["comprehension"]?.values?.any { it.isNotEmpty() } == true
+                val matchedKey = matchStageName(inner, detectedComponent, activeSessionNumber, hasComprehension)
+                    ?: detectIntraCellStageSwitch(inner, detectedComponent, activeSessionNumber, hasComprehension)
                 if (matchedKey != null && stageMap.containsKey(matchedKey)) {
                     hasEnteredStages = true
                     currentStageKey = matchedKey
@@ -164,7 +183,7 @@ object JadhadhaParser {
                         currentStageKey = sessionStage
                         currentRowStageKey = sessionStage
                         currentField = "content"
-                    } else {
+                    } else if (!cleanLine.startsWith("[حصة:")) {
                         // Unrecognized stage row in table
                         currentStageKey = null
                         currentRowStageKey = null
@@ -190,6 +209,9 @@ object JadhadhaParser {
                     onComponent = { component = it },
                     onDuration = { duration = it },
                     onMaterials = { materials = it },
+                    onReference = { reference = it },
+                    onTeacherName = { teacherName = it },
+                    onSchoolName = { schoolName = it },
                     onCommunicative = { communicative = it },
                     onMethodological = { methodological = it },
                     onCultural = { cultural = it }
@@ -214,9 +236,10 @@ object JadhadhaParser {
                 currentField = detectedField
                 stagesWithExplicitFields.add(baseKey)
                 val rest = extractAfterColon(strippedHeaderLine)
-                if (rest.isNotBlank()) {
+                if (rest.isNotBlank() && !isDurationOrSegmentNoise(rest)) {
+                    val hasComprehension = stageMap["comprehension"]?.values?.any { it.isNotEmpty() } == true
                     val splitKey = if (currentField == "content") {
-                        detectIntraCellStageSwitch(rest, detectedComponent)
+                        detectIntraCellStageSwitch(rest, detectedComponent, activeSessionNumber, hasComprehension)
                     } else null
                     val effectiveStageKey = if (splitKey != null && stageMap.containsKey(splitKey)) {
                         currentStageKey = splitKey
@@ -244,9 +267,10 @@ object JadhadhaParser {
 
             // 4. Intra-Cell Stage Splitting (التقسيم المرحلي الداخلي):
             // While reading lines inside a content cell or unstructured stage block, inspect each line:
-            // if it starts with a new stage heading (Stages 1..6), switch the active stage pointer immediately.
+            // if it starts with a new stage heading, switch the active stage pointer immediately.
+            val hasComprehensionNow = stageMap["comprehension"]?.values?.any { it.isNotEmpty() } == true
             if (hasEnteredStages && (currentField == "content" || currentStageKey !in stagesWithExplicitFields)) {
-                val intraStageKey = detectIntraCellStageSwitch(cleanLine, detectedComponent)
+                val intraStageKey = detectIntraCellStageSwitch(cleanLine, detectedComponent, activeSessionNumber, hasComprehensionNow)
                 if (intraStageKey != null && stageMap.containsKey(intraStageKey)) {
                     val wasExplicit = currentStageKey != null && currentStageKey in stagesWithExplicitFields
                     currentStageKey = intraStageKey
@@ -254,7 +278,7 @@ object JadhadhaParser {
                         stagesWithExplicitFields.add(intraStageKey)
                     }
                     // If the line is purely a standalone stage title (without colon/details), don't duplicate the title as content
-                    if (isPureStageHeadingOnly(cleanLine, detectedComponent)) {
+                    if (isPureStageHeadingOnly(cleanLine, detectedComponent, activeSessionNumber, hasComprehensionNow)) {
                         continue
                     }
                 }
@@ -262,13 +286,13 @@ object JadhadhaParser {
 
             // 4b. Check natural Stage Header in text (when before stages or in unstructured text outside explicit table fields)
             if (currentStageKey == null || currentStageKey !in stagesWithExplicitFields) {
-                val stageMatch = detectStageWithRemainder(cleanLine, detectedComponent)
+                val stageMatch = detectStageWithRemainder(cleanLine, detectedComponent, activeSessionNumber, hasComprehensionNow)
                 if (stageMatch != null && stageMap.containsKey(stageMatch.first)) {
                     hasEnteredStages = true
                     currentStageKey = stageMatch.first
                     currentField = "content"
                     val remainder = stageMatch.second
-                    if (!remainder.isNullOrBlank()) {
+                    if (!remainder.isNullOrBlank() && !isDurationOrSegmentNoise(remainder)) {
                         addClassifiedItem(
                             stageMap = stageMap,
                             stageSources = stageSources,
@@ -322,6 +346,34 @@ object JadhadhaParser {
                 abil = fieldMap["abil"]?.distinct() ?: emptyList(),
                 sources = sourcesForStage
             )
+        }.toMutableMap()
+
+        // Populate legacy alias keys for backward compatibility if any caller accesses them directly
+        if (detectedComponent == PedagogicalComponent.LANGUAGE) {
+            builtStages["lang_observation"]?.let { obsData ->
+                builtStages.putIfAbsent("lang_analysis", obsData)
+            }
+        } else if (detectedComponent == PedagogicalComponent.EXPRESSION) {
+            fun mergeSessionStages(sessionNum: Int): StageData {
+                val keys = stageMetaList.filter { it.session == sessionNum }.map { it.key }
+                val evals = keys.flatMap { builtStages[it]?.eval.orEmpty() }.distinct()
+                val contents = keys.flatMap { builtStages[it]?.content.orEmpty() }.distinct()
+                val teachers = keys.flatMap { builtStages[it]?.teacher.orEmpty() }.distinct()
+                val abils = keys.flatMap { builtStages[it]?.abil.orEmpty() }.distinct()
+                val hasFile = keys.any { k -> builtStages[k]?.sources?.values?.contains(FieldSource.FILE) == true }
+                val src = if (hasFile) FieldSource.FILE else FieldSource.DEFAULT
+                return StageData(
+                    eval = evals,
+                    content = contents,
+                    teacher = teachers,
+                    abil = abils,
+                    sources = mapOf("eval" to src, "content" to src, "teacher" to src, "abil" to src)
+                )
+            }
+            builtStages.putIfAbsent("insha_acquisition", mergeSessionStages(1))
+            builtStages.putIfAbsent("insha_application", mergeSessionStages(2))
+            builtStages.putIfAbsent("insha_production", mergeSessionStages(3))
+            builtStages.putIfAbsent("insha_correction", mergeSessionStages(4))
         }
 
         val plan = JadhadhaPlan(
@@ -335,6 +387,9 @@ object JadhadhaParser {
                 component = component,
                 duration = duration,
                 materials = materials,
+                reference = reference,
+                teacherName = teacherName,
+                schoolName = schoolName,
                 communicativeComp = communicative,
                 methodologicalComp = methodological,
                 culturalComp = cultural
@@ -479,6 +534,47 @@ object JadhadhaParser {
                 (s.startsWith("مكون:") && s.contains("مادة:"))
     }
 
+    internal fun isDurationOrSegmentNoise(s: String): Boolean {
+        val norm = normalizeHeaderToken(s)
+        if (norm.isEmpty()) return true
+        // Ignore generic segment headers ("المقطع التمهيدي", "المقطع الوسيطي", "المقطع النهائي")
+        if (norm == "المقطع التمهيدي" || norm == "مقطع تمهيدي" ||
+            norm == "المقطع الوسيطي" || norm == "المقطع الوسطي" || norm == "مقطع وسيطي" || norm == "مقطع وسطي" ||
+            norm == "المقطع النهائي" || norm == "المقطع الختامي" || norm == "مقطع نهائي" || norm == "مقطع ختامي"
+        ) {
+            return true
+        }
+        // Ignore standalone time durations like "5 د", "10 د", "15 د", "20 د", "35 د", "10 دقائق", "15 دقيقة"
+        val compact = s.trim()
+        if (compact.matches(Regex("^[0-9٠-٩]+\\s*(د|دقيقة|دقائق|دقيقتان)\\.?$"))) {
+            return true
+        }
+        return false
+    }
+
+    private fun detectSessionTransition(s: String): Int? {
+        val trimmed = s.trim()
+        if (trimmed.startsWith("-") || trimmed.startsWith("+") || trimmed.startsWith("•") || trimmed.startsWith("*")) {
+            return null
+        }
+        val inner = if ((trimmed.startsWith("[مرحلة:") || trimmed.startsWith("[حصة:")) && trimmed.endsWith("]")) {
+            trimmed.substringAfter(":").removeSuffix("]").trim()
+        } else {
+            trimmed
+        }
+        if (inner.length > 60 && !inner.startsWith("المكون") && !inner.startsWith("المكوّن")) {
+            return null
+        }
+        val norm = normalizeHeaderToken(inner)
+        return when {
+            norm.contains("الحصه الاولي") || norm.contains("حصه الاكتساب") || norm.contains("انشطه الاكتساب") -> 1
+            norm.contains("الحصه الثانيه") || norm.contains("حصه التطبيق") || norm.contains("انشطه التطبيق") -> 2
+            norm.contains("الحصه الثالثه") || norm.contains("حصه الانتاج") || norm.contains("انشطه الانتاج") -> 3
+            norm.contains("الحصه الرابعه") || norm.contains("حصه التصحيح") || norm.contains("انشطه التصحيح") -> 4
+            else -> null
+        }
+    }
+
     /**
      * Header Isolation check: matches pre-lesson header lines/cells that contain
      * ("جذاذة تربوية", "الفئة المستهدفة", "المكون", "الموضوع", "الوسائل الديدكتيكية",
@@ -497,12 +593,15 @@ object JadhadhaParser {
                 norm.contains("الكفايه التواصليه") ||
                 norm.contains("الكفايه المنهجيه") ||
                 norm.contains("الكفايه الثقافيه") ||
+                norm.contains("الكفايه المعرفيه") ||
                 norm.contains("الكفايات المتوخاه") ||
                 norm.contains("الكفايات المستهدفه") ||
                 norm.startsWith("الهدف ") || norm == "الهدف" ||
                 norm.startsWith("الاهداف ") || norm == "الاهداف" ||
                 norm.startsWith("الفئه ") ||
-                norm.startsWith("المرجع ") ||
+                norm.startsWith("المرجع ") || norm == "المرجع" ||
+                norm.startsWith("الاستاذ ") || norm == "الاستاذ" ||
+                norm.startsWith("المؤسسه ") || norm == "المؤسسه" ||
                 norm.startsWith("الدعامات ") ||
                 norm.startsWith("المده الزمنيه") ||
                 norm.startsWith("الغلاف الزمني") ||
@@ -519,6 +618,9 @@ object JadhadhaParser {
         onComponent: (String) -> Unit,
         onDuration: (String) -> Unit,
         onMaterials: (String) -> Unit,
+        onReference: (String) -> Unit = {},
+        onTeacherName: (String) -> Unit = {},
+        onSchoolName: (String) -> Unit = {},
         onCommunicative: (String) -> Unit,
         onMethodological: (String) -> Unit,
         onCultural: (String) -> Unit
@@ -587,9 +689,26 @@ object JadhadhaParser {
                 onDuration(extracted)
                 matchedHeader = true
             }
+        } else if (strippedHeaderLine.startsWith("المرجع")) {
+            val extracted = extractAfterColon(strippedHeaderLine)
+            if (extracted.isNotBlank()) {
+                onReference(extracted)
+                matchedHeader = true
+            }
+        } else if (strippedHeaderLine.startsWith("الأستاذ") || strippedHeaderLine.startsWith("الاستاذ")) {
+            val extracted = extractAfterColon(strippedHeaderLine)
+            if (extracted.isNotBlank()) {
+                onTeacherName(extracted)
+                matchedHeader = true
+            }
+        } else if (strippedHeaderLine.startsWith("المؤسسة") || strippedHeaderLine.startsWith("المؤسسه")) {
+            val extracted = extractAfterColon(strippedHeaderLine)
+            if (extracted.isNotBlank()) {
+                onSchoolName(extracted)
+                matchedHeader = true
+            }
         } else if (strippedHeaderLine.startsWith("الوسائل") ||
-            strippedHeaderLine.startsWith("الدعامات") ||
-            strippedHeaderLine.startsWith("المرجع")
+            strippedHeaderLine.startsWith("الدعامات")
         ) {
             val extracted = extractAfterColon(strippedHeaderLine)
             if (extracted.isNotBlank()) {
@@ -607,6 +726,7 @@ object JadhadhaParser {
         } else if (strippedHeaderLine.contains("كفاية ثقافية") ||
             strippedHeaderLine.contains("كفاية معرفية") ||
             strippedHeaderLine.startsWith("الكفاية الثقافية") ||
+            strippedHeaderLine.startsWith("الكفاية المعرفية") ||
             strippedHeaderLine.startsWith("الكفاية الاستراتيجية") ||
             strippedHeaderLine.startsWith("القدرة الخاصة بالدرس") ||
             (!hasEnteredStages && (strippedHeaderLine.startsWith("الهدف:") || strippedHeaderLine.startsWith("الهدف العام:") || strippedHeaderLine.startsWith("الأهداف:")))
@@ -694,11 +814,36 @@ object JadhadhaParser {
 
         fun splitRowCols(line: String): List<String> {
             val trimmed = line.trim()
-            return if (delimiter == '|') {
-                trimmed.removePrefix("|").removeSuffix("|").split('|').map { it.trim() }
-            } else {
-                line.split('\t').map { it.trim() }
+            if (delimiter != '|') {
+                return line.split('\t').map { it.trim() }
             }
+            val raw = trimmed.removePrefix("|").removeSuffix("|")
+            val parts = mutableListOf<String>()
+            val current = StringBuilder()
+            var bracketDepth = 0
+            for (ch in raw) {
+                when (ch) {
+                    '[' -> {
+                        bracketDepth++
+                        current.append(ch)
+                    }
+                    ']' -> {
+                        bracketDepth = (bracketDepth - 1).coerceAtLeast(0)
+                        current.append(ch)
+                    }
+                    '|' -> {
+                        if (bracketDepth == 0) {
+                            parts.add(current.toString().trim())
+                            current.setLength(0)
+                        } else {
+                            current.append(ch)
+                        }
+                    }
+                    else -> current.append(ch)
+                }
+            }
+            parts.add(current.toString().trim())
+            return parts
         }
 
         // Active column role mapping by column index: "stage", "abil", "teacher", "content", "eval"
@@ -787,6 +932,7 @@ object JadhadhaParser {
                     }
 
                     val stageVal = stageIndices.mapNotNull { idx -> rawCols.getOrNull(idx)?.takeIf { it.isNotBlank() } }
+                        .filter { !isDurationOrSegmentNoise(it) }
                         .joinToString(" - ")
                     if (stageVal.isNotBlank()) {
                         sb.appendLine("[مرحلة: $stageVal]")
@@ -815,10 +961,13 @@ object JadhadhaParser {
         row1: List<String>,
         row2: List<String>?
     ): Pair<Map<Int, String>, Boolean>? {
+        if (row1.any { looksLikeStageCell(it) || isDurationOrSegmentNoise(it) }) {
+            return null
+        }
         val map1 = matchHeaderColumns(row1)
         val hasStageInRow1 = map1.containsValue("stage")
         val hasOtherInRow1 = map1.values.any { it != "stage" }
-        if (map1.size < 2 || (!hasStageInRow1 && !hasOtherInRow1)) {
+        if (map1.size < 2 || !hasStageInRow1 || !hasOtherInRow1) {
             return null
         }
 
@@ -829,8 +978,7 @@ object JadhadhaParser {
             val row2LooksLikeSubHeader = map2.isNotEmpty() &&
                 row2.all { it.length <= 45 } &&
                 (map2.containsValue("teacher") || map2.containsValue("content") || map2.containsValue("eval") || map2.containsValue("abil")) &&
-                !looksLikeStageCell(row2.firstOrNull().orEmpty()) &&
-                !looksLikeStageCell(row2.lastOrNull().orEmpty())
+                !row2.any { looksLikeStageCell(it) || isDurationOrSegmentNoise(it) }
 
             if (row2LooksLikeSubHeader) {
                 val maxCols = maxOf(row1.size, row2.size)
@@ -849,15 +997,11 @@ object JadhadhaParser {
             }
         }
 
-        return if (map1.size >= 2 && (hasStageInRow1 || map1.size >= 3)) {
-            map1 to false
-        } else {
-            null
-        }
+        return map1 to false
     }
 
     /**
-     * Dynamically matches column header titles from any table format (3, 4, or 9 columns, RTL or LTR):
+     * Dynamically matches column header titles from any table format (3, 4, 8, or 9 columns, RTL or LTR):
      * - عمود المحتوى: ("محتوى", "مضامين", "سير الدرس", "الأمثلة", "النصوص")
      * - عمود أنشطة المدرس: ("أنشطة المدرس", "أنشطة الأستاذ", "توجيهات", "مهام المدرس")
      * - عمود أنشطة المتعلم: ("أنشطة المتعلم", "أنشطة المتعلمين", "مهام المتعلم")
@@ -868,22 +1012,30 @@ object JadhadhaParser {
     internal fun matchHeaderColumns(cols: List<String>): Map<Int, String> {
         val result = mutableMapOf<Int, String>()
         var hasStage = false
+        val hasExplicitStageCol = cols.any { h ->
+            val n = normalizeHeaderToken(h)
+            n.contains("المراحل") || n.contains("مراحل") || n.contains("الخطوات") || n.contains("خطوات القراءه")
+        }
 
         for ((idx, rawHeader) in cols.withIndex()) {
             val norm = normalizeHeaderToken(rawHeader)
             if (norm.isEmpty() || norm.length > 60) continue
+
+            // Ignore time/duration columns ("الحصيص الزمني", "المدة الزمنية")
+            if (norm.contains("الحصيص") || norm.contains("الزمني") || norm.contains("المده")) {
+                continue
+            }
 
             val isCombinedActivities = (norm.contains("التعليميه") && norm.contains("التعلميه")) ||
                 (norm.contains("المدرس") && norm.contains("المتعلم")) ||
                 (norm.contains("الاستاذ") && norm.contains("المتعلم"))
 
             val role = when {
-                // 1. عمود المراحل: ("المراحل", "الخطوات", "خطوات القراءة", "المقاطع")
+                // 1. عمود المراحل: ("المراحل", "الخطوات", "خطوات القراءة", or "المقاطع" if no separate "المراحل" column exists)
                 !hasStage && (
                     norm.contains("المراحل") || norm.contains("مراحل") ||
                         norm.contains("الخطوات") || norm.contains("خطوات القراءه") ||
-                        norm.contains("المقاطع") || norm.contains("مقاطع") ||
-                        norm == "الحصص" || norm == "الحصه"
+                        (!hasExplicitStageCol && (norm.contains("المقاطع") || norm.contains("مقاطع") || norm == "الحصص" || norm == "الحصه"))
                     ) -> {
                     hasStage = true
                     "stage"
@@ -988,12 +1140,18 @@ object JadhadhaParser {
                 s.startsWith("الغلاف الزمني:") ||
                 s.startsWith("المدة الزمنية:") ||
                 s.startsWith("الحصيص الزمني:") ||
+                s.startsWith("مدة الإنجاز:") ||
+                s.startsWith("المرجع:") ||
+                s.startsWith("الأستاذ:") ||
+                s.startsWith("المؤسسة:") ||
+                s.startsWith("الوسائل التعليمية:") ||
                 s.startsWith("الوسائل الديداكتيكية:") ||
                 s.startsWith("الوسائل الديدكتيكية:") ||
                 s.startsWith("كفاية تواصلية:") ||
                 s.startsWith("الكفاية التواصلية:") ||
                 s.startsWith("كفاية منهجية:") ||
                 s.startsWith("الكفاية المنهجية:") ||
+                s.startsWith("كفاية معرفية") ||
                 s.startsWith("كفاية ثقافية") ||
                 s.startsWith("الكفاية الثقافية")
     }
@@ -1003,7 +1161,7 @@ object JadhadhaParser {
         val hasStage = norm.contains("المراحل") || norm.contains("المقاطع") || norm.contains("الخطوات")
         val hasOtherCol = norm.contains("القدرات") || norm.contains("الاستاذ") || norm.contains("المدرس") ||
             norm.contains("المتعلم") || norm.contains("التقويم") || norm.contains("المحتوي") || norm.contains("مضامين")
-        return s == "المقاطع والمراحل" || s == "المراحل" || (hasStage && hasOtherCol)
+        return s == "المقاطع والمراحل" || s == "المراحل" || s == "المقاطع" || s == "مقاطع الدرس" || (hasStage && hasOtherCol)
     }
 
     private fun addClassifiedItem(
@@ -1015,10 +1173,10 @@ object JadhadhaParser {
         rawItem: String
     ) {
         val clean = cleanBullet(DocumentFileReader.stripFormattingTags(rawItem))
-        if (clean.isBlank()) return
+        if (clean.isBlank() || isDurationOrSegmentNoise(clean)) return
 
         val targetField = if (hasExplicitFields) {
-            // Even when inside a "content" cell (e.g., 3-column table or combined activities column),
+            // Even when inside a "content" cell (e.g., 2-column or 3-column table or combined activities column),
             // if a paragraph begins with an explicit teacher verb or ability prefix, route it semantically.
             if (currentField == "content") {
                 val semanticRole = inferStrictSemanticRole(clean)
@@ -1033,7 +1191,7 @@ object JadhadhaParser {
         val formattedItem = if (targetField == "content") {
             formatContentSubLabel(clean)
         } else {
-            clean.replace("<u>", "").replace("</u>", "").trim()
+            DocumentFileReader.stripFormattingTags(clean).trim()
         }
 
         stageMap[stageKey]?.get(targetField)?.add(formattedItem)
@@ -1051,23 +1209,13 @@ object JadhadhaParser {
         "حالات الاسم", "حكمه الإعرابي", "الشاعر", "الكاتب",
         "الإيضاحات اللغوية", "دراسة العنوان", "الصورة المرفقة", "بداية النص", "بناء الفرضيات",
         "الفرضيات المصوغة", "تمحيص الفرضيات", "ملامح التفسير", "عناصر رسالة النص", "لغة النص",
-        "خلاصة تركيبية", "الاستثمار والبحث", "امتدادات"
+        "خلاصة تركيبية", "الاستثمار والبحث", "امتدادات", "المضمون العام للنص", "أحداث النص",
+        "شخصيات النص وأوصافها", "الزمان والمكان", "السارد والرؤية السردية", "أنماط الحكي",
+        "استنتاج جزئي", "نموذج إعرابي", "شبكة تشخيص أخطاء المتعلمين وتصحيحها"
     )
 
     private fun formatContentSubLabel(clean: String): String {
-        if (clean.contains("<u>") || clean.startsWith("[جدول:")) return clean
-        val colonIdx = clean.indexOf(':')
-        if (colonIdx in 2..32 && !clean.startsWith("http")) {
-            val label = clean.substring(0, colonIdx).trim()
-            val rest = clean.substring(colonIdx + 1).trim()
-            if (rest.isNotEmpty() && !label.contains(" ")) {
-                return "<u>$label:</u> $rest"
-            }
-            if (rest.isNotEmpty() && KNOWN_SUB_LABELS.any { label.contains(it) }) {
-                return "<u>$label:</u> $rest"
-            }
-        }
-        return clean
+        return DocumentFileReader.stripFormattingTags(clean).trim()
     }
 
     // ────────────────────── Semantic Verb-Prefix Classification ──────────────────────
@@ -1076,7 +1224,8 @@ object JadhadhaParser {
         "يطالب", "يطرح", "يوجه", "يساعد", "يقرأ الأستاذ", "يدعم", "يحفز",
         "يقرأ المدرس", "يشرف", "يدعو", "يمهد", "يناقش", "يسجل", "يدون",
         "يستدرج", "يكلف", "يوزع", "يعرض الأستاذ", "يعرض المدرس", "يوضح",
-        "يشرح", "ينظم", "يرسم", "يقدم", "يقترح", "يطلب من", "يدير حوار"
+        "يشرح", "ينظم", "يرسم", "يقدم", "يقترح", "يطلب من", "يدير حوار",
+        "يسطر الأستاذ", "يدرج أخطاء", "يركز على الأخطاء", "ينتقي الأستاذ"
     )
 
     private val LEARNER_VERB_PREFIXES = listOf(
@@ -1088,10 +1237,11 @@ object JadhadhaParser {
     )
 
     private val ABILITY_PREFIXES = listOf(
-        "القدرة على", "قدرة المتعلم على", "تنمية مهارة", "استدعاء المتعلم",
-        "أن يكون المتعلم", "أن يتعرف", "أن يتمكن", "أن يكتشف", "أن يستنتج",
-        "أن يحلل", "أن يدرك", "أن يميز", "أن يوظف", "أن يصوغ", "أن يقرأ",
-        "أن يستخلص", "أن يكتسب", "أن يستحضر", "تمكين المتعلم"
+        "القدرة على", "قدرة المتعلم على", "قدرة التلاميذ على", "تنمية مهارة", "تنمية قدرة",
+        "استدعاء المتعلم", "أن يكون المتعلم", "أن يتعرف", "أن يتمكن", "أن يكتشف",
+        "أن يستنتج", "أن يحلل", "أن يدرك", "أن يميز", "أن يوظف", "أن يصوغ", "أن يقرأ",
+        "أن يستخلص", "أن يكتسب", "أن يستحضر", "تمكين المتعلم", "مهارة الملاحظة",
+        "مهارة القراءة", "مهارة التعبير", "مهارة تفكيك", "مهارة التعليق", "اكتساب مهارتي"
     )
 
     /**
@@ -1127,15 +1277,18 @@ object JadhadhaParser {
                     plain.startsWith("مدى ") ||
                     plain.startsWith("ملاحظة مدى") ||
                     plain.startsWith("رصد تعثرات") ||
+                    plain.startsWith("رصد قدرة") ||
+                    plain.startsWith("رصد إمكانات") ||
                     plain.startsWith("مراقبة ") ||
                     plain.startsWith("دعم الفئات") ||
+                    plain.startsWith("تقديم الدعم") ||
                     plain.startsWith("تصحيح الإنجازات") -> "eval"
 
             else -> fallbackField
         }
     }
 
-    // ────────────────────── Intra-Cell Stage Splitting (Stages 1..6) ──────────────────────
+    // ────────────────────── Intra-Cell Stage Splitting ──────────────────────
 
     private val STAGE_1_KEYWORDS = listOf(
         "تشخيص", "تمهيد", "استحضار المكتسبات", "الإعدادات القبلية", "تقويم تشخيصي"
@@ -1144,7 +1297,7 @@ object JadhadhaParser {
     private val STAGE_2_KEYWORDS = listOf(
         "التأطير والملاحظة", "ملاحظة النص", "تأطير النص", "صاحب النص", "مصدر النص",
         "دراسة العنوان", "الصورة المرفقة", "بداية النص", "بناء الفرضيات",
-        "الفرضيات المصوغة", "أمثلة الانطلاق", "نص الانطلاق"
+        "الفرضيات المصوغة", "أمثلة الانطلاق", "نص الانطلاق", "قراءة نص الانطلاق"
     )
 
     private val STAGE_3_KEYWORDS = listOf(
@@ -1155,7 +1308,7 @@ object JadhadhaParser {
     private val STAGE_4_KEYWORDS = listOf(
         "تحليل النص", "القراءة التحليلية", "الحقول المعجمية", "الحقول الدلالية",
         "ملامح التفسير", "عناصر رسالة النص", "لغة النص", "القيم",
-        "الملاحظة والوصف", "التحليل والمناقشة"
+        "الملاحظة والوصف", "التحليل والمناقشة", "استخراج عناصر الدرس"
     )
 
     private val STAGE_5_KEYWORDS = listOf(
@@ -1203,9 +1356,14 @@ object JadhadhaParser {
 
     /**
      * Inspects a line inside a learning content cell to determine if it starts with a new stage heading
-     * (Stages 1..6) and returns the corresponding stage key for [component], or null if it does not.
+     * and returns the corresponding stage key for [component], or null if it does not.
      */
-    internal fun detectIntraCellStageSwitch(line: String, component: PedagogicalComponent): String? {
+    internal fun detectIntraCellStageSwitch(
+        line: String,
+        component: PedagogicalComponent,
+        activeSessionNumber: Int = 1,
+        hasComprehension: Boolean = false
+    ): String? {
         val candidate = stripLeadingOrdinalsAndBullets(line)
         if (candidate.isEmpty() || candidate.startsWith("[جدول:")) return null
 
@@ -1215,6 +1373,12 @@ object JadhadhaParser {
             colonIdx in 1..48 -> candidate.substring(0, colonIdx).trim()
             candidate.length <= 48 -> candidate
             else -> return null
+        }
+
+        // First check direct stage name match for EXPRESSION sub-stages
+        if (component == PedagogicalComponent.EXPRESSION) {
+            val directMatch = matchStageName(headerPrefix, component, activeSessionNumber, hasComprehension)
+            if (directMatch != null) return directMatch
         }
 
         val stageNumber = when {
@@ -1231,7 +1395,7 @@ object JadhadhaParser {
 
         return when (component) {
             PedagogicalComponent.READING -> when (stageNumber) {
-                1 -> "diagnostic"
+                1 -> if (activeSessionNumber == 2 || hasComprehension) "session2_intro" else "diagnostic"
                 2 -> "observation"
                 3 -> "comprehension"
                 4 -> "analysis"
@@ -1241,27 +1405,37 @@ object JadhadhaParser {
             }
             PedagogicalComponent.LANGUAGE -> when (stageNumber) {
                 1 -> "lang_diagnostic"
-                2 -> "lang_observation"
-                3 -> "lang_observation"
-                4 -> "lang_analysis"
+                2, 3, 4 -> "lang_observation"
                 5 -> "lang_synthesis"
                 6 -> "lang_application"
                 else -> null
             }
             PedagogicalComponent.EXPRESSION -> when (stageNumber) {
-                1, 2, 3, 4 -> "insha_acquisition"
-                5 -> if (normalizeHeaderToken(headerPrefix).contains("تطبيق")) "insha_application" else "insha_acquisition"
+                1 -> when (activeSessionNumber) {
+                    2 -> "insha_app_diagnostic"
+                    3 -> "insha_prod_diagnostic"
+                    4 -> "insha_corr_diagnostic"
+                    else -> "insha_acq_diagnostic"
+                }
+                2, 3 -> "insha_acq_reading"
+                4 -> "insha_acq_elements"
+                5 -> "insha_acq_synthesis"
                 6 -> when {
-                    normalizeHeaderToken(headerPrefix).contains("انتاج") -> "insha_production"
-                    normalizeHeaderToken(headerPrefix).contains("تطبيق") -> "insha_application"
-                    else -> "insha_production"
+                    normalizeHeaderToken(headerPrefix).contains("انتاج") -> "insha_prod_execution"
+                    normalizeHeaderToken(headerPrefix).contains("تطبيق") -> "insha_app_execution"
+                    else -> "insha_acq_investment"
                 }
                 else -> null
             }
         }
     }
 
-    private fun isPureStageHeadingOnly(line: String, component: PedagogicalComponent): Boolean {
+    private fun isPureStageHeadingOnly(
+        line: String,
+        component: PedagogicalComponent,
+        activeSessionNumber: Int = 1,
+        hasComprehension: Boolean = false
+    ): Boolean {
         val stripped = stripLeadingOrdinalsAndBullets(line)
         val colonIdx = stripped.indexOf(':')
         if (colonIdx >= 0 && colonIdx < stripped.length - 1) {
@@ -1270,8 +1444,8 @@ object JadhadhaParser {
         }
         val cleanHeading = stripped.removeSuffix(":").trim()
         return cleanHeading.length <= 35 && (
-            matchStageName(cleanHeading, component) != null ||
-                detectIntraCellStageSwitch(cleanHeading, component) != null
+            matchStageName(cleanHeading, component, activeSessionNumber, hasComprehension) != null ||
+                detectIntraCellStageSwitch(cleanHeading, component, activeSessionNumber, hasComprehension) != null
             )
     }
 
@@ -1280,7 +1454,7 @@ object JadhadhaParser {
         return when (component) {
             PedagogicalComponent.READING -> when {
                 norm.contains("الحصه الاولي") || norm == "الحصه 1" -> "diagnostic"
-                norm.contains("الحصه الثانيه") || norm == "الحصه 2" -> "analysis"
+                norm.contains("الحصه الثانيه") || norm == "الحصه 2" -> "session2_intro"
                 else -> null
             }
             PedagogicalComponent.LANGUAGE -> when {
@@ -1289,10 +1463,10 @@ object JadhadhaParser {
                 else -> null
             }
             PedagogicalComponent.EXPRESSION -> when {
-                norm.contains("الحصه الاولي") || norm == "الحصه 1" -> "insha_acquisition"
-                norm.contains("الحصه الثانيه") || norm == "الحصه 2" -> "insha_application"
-                norm.contains("الحصه الثالثه") || norm == "الحصه 3" -> "insha_production"
-                norm.contains("الحصه الرابعه") || norm == "الحصه 4" -> "insha_correction"
+                norm.contains("الحصه الاولي") || norm == "الحصه 1" || norm.contains("انشطه الاكتساب") || norm.contains("حصه الاكتساب") -> "insha_acq_elements"
+                norm.contains("الحصه الثانيه") || norm == "الحصه 2" || norm.contains("انشطه التطبيق") || norm.contains("حصه التطبيق") -> "insha_app_presentation"
+                norm.contains("الحصه الثالثه") || norm == "الحصه 3" || norm.contains("انشطه الانتاج") || norm.contains("حصه الانتاج") -> "insha_prod_presentation"
+                norm.contains("الحصه الرابعه") || norm == "الحصه 4" || norm.contains("انشطه التصحيح") || norm.contains("حصه التصحيح") -> "insha_corr_diagnosis"
                 else -> null
             }
         }
@@ -1356,18 +1530,23 @@ object JadhadhaParser {
      * Detects if a line is a stage header.
      * Returns Pair(stageKey, optionalRemainderText) if matched, or null if it's a normal content line.
      */
-    private fun detectStageWithRemainder(line: String, component: PedagogicalComponent): Pair<String, String?>? {
+    private fun detectStageWithRemainder(
+        line: String,
+        component: PedagogicalComponent,
+        activeSessionNumber: Int = 1,
+        hasComprehension: Boolean = false
+    ): Pair<String, String?>? {
         val trimmed = line.trim()
 
         // 1. Explicit marker from DocumentFileReader: [مرحلة: ...] or [حصة: ...]
         if ((trimmed.startsWith("[مرحلة:") || trimmed.startsWith("[حصة:")) && trimmed.endsWith("]")) {
             val inner = trimmed.substringAfter(":").removeSuffix("]").trim()
-            val key = matchStageName(inner, component)
+            val key = matchStageName(inner, component, activeSessionNumber, hasComprehension)
             if (key != null) return key to null
             return null
         }
 
-        // 2. Do NOT treat bulleted lines (-, +, •, *), underlined content items (<u>...</u>), table rows ([جدول:...]),
+        // 2. Do NOT treat bulleted lines (-, +, •, *), table rows ([جدول:...]),
         // semantic ability/teacher/learner sentences, or pure field headers (e.g. التقويم والدعم:) as stage headers
         if (trimmed.startsWith("-") ||
             trimmed.startsWith("+") ||
@@ -1400,10 +1579,15 @@ object JadhadhaParser {
 
         // Special case: "التمهيد: ..." inside diagnostic stage is a content sub-label when remainder is a full sentence
         if (headerPart == "التمهيد" && !remainderPart.isNullOrBlank() && remainderPart.length > 15) {
-            return "diagnostic" to "<u>التمهيد:</u> $remainderPart"
+            val diagKey = if (component == PedagogicalComponent.READING && (activeSessionNumber == 2 || hasComprehension)) {
+                "session2_intro"
+            } else {
+                "diagnostic"
+            }
+            return diagKey to "التمهيد: $remainderPart"
         }
 
-        val stageKey = matchStageName(headerPart, component) ?: return null
+        val stageKey = matchStageName(headerPart, component, activeSessionNumber, hasComprehension) ?: return null
 
         // If remainder is just a session subtitle (e.g. "الحصة الأولى: القراءة الاستكشافية"), ignore remainder
         val cleanRemainder = if (!remainderPart.isNullOrBlank() &&
@@ -1423,10 +1607,19 @@ object JadhadhaParser {
         return stageKey to cleanRemainder
     }
 
-    private fun matchStageName(text: String, component: PedagogicalComponent): String? {
+    private fun matchStageName(
+        text: String,
+        component: PedagogicalComponent,
+        activeSessionNumber: Int = 1,
+        hasComprehension: Boolean = false
+    ): String? {
         val t = text.replace(":", " ").replace("-", " ").replace(Regex("\\s+"), " ").trim()
+        if (isDurationOrSegmentNoise(t)) return null
+
         return when (component) {
             PedagogicalComponent.READING -> when {
+                (t == "تمهيد" || t == "التمهيد" || t.startsWith("تمهيد ")) && (activeSessionNumber == 2 || hasComprehension) ->
+                    "session2_intro"
                 t.contains("تشخيص المكتسبات") || t.contains("تقويم تشخيصي") || t.contains("مراقبة الإعداد") ||
                         t.contains("استحضار المكتسبات") || t.contains("الإعدادات القبلية") ||
                         t == "التمهيد" || t == "تمهيد" || t.startsWith("تمهيد ") || t.contains("تشخيص") -> "diagnostic"
@@ -1445,32 +1638,59 @@ object JadhadhaParser {
             }
 
             PedagogicalComponent.LANGUAGE -> when {
+                t.contains("تشخيص") || t.contains("تقويم تشخيصي") || t.contains("استحضار المكتسبات") ||
+                        t == "تمهيد" || t == "التمهيد" -> "lang_diagnostic"
+                t.contains("الاستنتاج") || t.contains("استنتاج") || t.contains("القاعدة التركيبية") ||
+                        t.contains("القاعدة") || t.contains("خلاصة") || t.contains("التركيب") -> "lang_synthesis"
+                t.contains("التطبيقات") || t.contains("تطبيق") || t.contains("تقويم إجمالي") ||
+                        t.contains("تمارين") || t.contains("استثمار") || t.contains("الاستثمار") -> "lang_application"
                 t.contains("الوصف والتحليل") || t.contains("الملاحظة والوصف") || t.contains("البناء والتحليل") ||
                         t.contains("العرض والتحليل") || t.contains("التحليل والمناقشة") ||
                         t.contains("تحليل الأمثلة") || t.contains("تحليل الامثلة") || t.contains("تحليل الظاهرة") ||
                         t.contains("مناقشة الأمثلة") || t.contains("تفكيك الظاهرة") ||
                         t.contains("التحليل") || t == "الوصف" ||
-                        (t.contains("المقطع الوسطي") && !t.contains("ملاحظة") && !t.contains("استنتاج")) -> "lang_analysis"
-                t.contains("ملاحظة الظاهرة") || t.contains("ملاحظة الأمثلة") || t.contains("ملاحظة الامثلة") ||
+                        t.contains("ملاحظة الظاهرة") || t.contains("ملاحظة الأمثلة") || t.contains("ملاحظة الامثلة") ||
                         t.contains("قراءة الأمثلة") || t.contains("عزل الظاهرة") || t.contains("أمثلة الانطلاق") ||
                         t.contains("امثلة الانطلاق") || t.contains("شواهد الانطلاق") || t == "الملاحظة" ||
                         t.contains("ملاحظة") -> "lang_observation"
-                t.contains("تشخيص") || t.contains("تقويم تشخيصي") || t.contains("استحضار المكتسبات") ||
-                        t == "تمهيد" || t == "التمهيد" || t.contains("المقطع التمهيدي") -> "lang_diagnostic"
-                t.contains("الاستنتاج") || t.contains("استنتاج") || t.contains("القاعدة التركيبية") ||
-                        t.contains("القاعدة") || t.contains("خلاصة") || t.contains("التركيب") -> "lang_synthesis"
-                t.contains("التطبيقات") || t.contains("تطبيق") || t.contains("تقويم إجمالي") ||
-                        t.contains("تمارين") || t.contains("المقطع النهائي") || t.contains("المقطع الختامي") ||
-                        t.contains("استثمار") || t.contains("الاستثمار") -> "lang_application"
                 else -> null
             }
 
             PedagogicalComponent.EXPRESSION -> when {
-                t.contains("اكتساب") || t.contains("الحصة الأولى") || t.contains("التعريف بالمهارة") ||
-                        t.contains("تقديم المهارة") || t.contains("نص الانطلاق") -> "insha_acquisition"
-                t.contains("تطبيق") || t.contains("الحصة الثانية") || t.contains("التدرب على المهارة") -> "insha_application"
-                t.contains("إنتاج") || t.contains("انتاج") || t.contains("الحصة الثالثة") || t.contains("التحرير") -> "insha_production"
-                t.contains("تصحيح") || t.contains("الحصة الرابعة") || t.contains("التصحيح والدعم") || t.contains("معالجة وتصحيح") -> "insha_correction"
+                t.contains("تشخيص أخطاء") || t.contains("تشخيص الأخطاء") || t.contains("شبكة تشخيص") -> "insha_corr_diagnosis"
+                t.contains("التصحيح الفردي") || t.contains("الدعم والتعزيز") -> "insha_corr_support"
+                t.contains("تقويم تشخيصي") || t == "تمهيد" || t == "التمهيد" || t.startsWith("تقويم تشخيصي") -> when (activeSessionNumber) {
+                    2 -> "insha_app_diagnostic"
+                    3 -> "insha_prod_diagnostic"
+                    4 -> "insha_corr_diagnostic"
+                    else -> "insha_acq_diagnostic"
+                }
+                t.contains("قراءة نص الانطلاق") || t.contains("نص الانطلاق") -> "insha_acq_reading"
+                t.contains("استخراج عناصر الدرس") || t.contains("عناصر المهارة") || t.contains("خطوات المهارة") ||
+                        t.contains("التعريف بالمهارة") || t == "عناصر الدرس" -> "insha_acq_elements"
+                t == "الاستنتاج" || t == "استنتاج" || t.contains("القاعدة") || t.contains("خلاصة المهارة") -> "insha_acq_synthesis"
+                t == "الاستثمار" || t == "استثمار" || t.contains("امتداد") -> "insha_acq_investment"
+                t.contains("تقديم الدرس") || t.contains("تقديم الموضوع") || t.contains("نص الموضوع") || t.contains("وضعية الانطلاق") -> when (activeSessionNumber) {
+                    3 -> "insha_prod_presentation"
+                    2 -> "insha_app_presentation"
+                    else -> "insha_app_presentation"
+                }
+                t.contains("إنجاز المهارة") || t.contains("انجاز المهارة") || t.contains("التدرب على المهارة") || t.contains("التحرير") -> when (activeSessionNumber) {
+                    3 -> "insha_prod_execution"
+                    2 -> "insha_app_execution"
+                    else -> "insha_app_execution"
+                }
+                t == "تصحيح" || t == "التصحيح" -> when (activeSessionNumber) {
+                    2 -> "insha_app_correction"
+                    3 -> "insha_prod_correction"
+                    4 -> "insha_corr_support"
+                    else -> "insha_app_correction"
+                }
+                // Generic 4-session titles
+                t.contains("اكتساب") || t.contains("الحصة الأولى") || t.contains("تقديم المهارة") -> "insha_acq_elements"
+                t.contains("تطبيق") || t.contains("الحصة الثانية") -> "insha_app_presentation"
+                t.contains("إنتاج") || t.contains("انتاج") || t.contains("الحصة الثالثة") -> "insha_prod_presentation"
+                t.contains("الحصة الرابعة") || t.contains("التصحيح والدعم") || t.contains("معالجة وتصحيح") || t.contains("أنشطة التصحيح") -> "insha_corr_diagnosis"
                 else -> null
             }
         }
@@ -1483,18 +1703,19 @@ object JadhadhaParser {
         if (label.length > 45) return null
 
         return when {
-            label == "التقويم" || label == "التقويم والدعم" || label == "مؤشرات التقويم" ||
+            label == "التقويم" || label == "التقويم والدعم" || label == "تقويم ودعم" || label == "مؤشرات التقويم" ||
                     label == "مؤشرات التقويم والدعم" || label == "التقويم المرحلي" || label == "معايير التقويم" ||
                     label == "الدعم" -> "eval"
 
             label == "أنشطة المدرس" || label == "أنشطة الأستاذ" || label == "الأنشطة التعليمية" ||
+                    label == "الأنشطة التعليمية التعلمية" ||
                     label == "مهام المدرس" || label == "دور المدرس" || label == "توجيهات" -> "teacher"
 
-            label == "القدرات المستهدفة" || label == "القدرات" || label == "الأهداف" || label == "الأهداف التعلمية" ||
-                    label == "الأهداف التعليمية" || label == "الكفايات المستهدفة" || label == "المهارات" -> "abil"
+            label == "القدرات المستهدفة" || label == "القدرات والمهارات" || label == "القدرات" || label == "الأهداف" ||
+                    label == "الأهداف التعلمية" || label == "الأهداف التعليمية" || label == "الكفايات المستهدفة" ||
+                    label == "المهارات" -> "abil"
 
             label == "المحتوى" || label == "المحتوى الديداكتيكي" || label == "الأنشطة التعلمية" ||
-                    label == "الأنشطة التعليمية التعلمية" ||
                     label == "المحتوى الديداكتيكي والأنشطة التعلمية" || label == "أنشطة المتعلم" ||
                     label == "أنشطة المتعلمين" || label == "مهام المتعلم" || label == "المضامين" ||
                     label == "سير الدرس" || label == "الأمثلة" || label == "النصوص" -> "content"
@@ -1518,50 +1739,58 @@ object JadhadhaParser {
                 fillStageDefaults(
                     stage = map["diagnostic"],
                     stageSources = sources["diagnostic"],
-                    defaultAbil = "القدرة على استحضار المكتسبات القبلية وربطها بموضوع الدرس «$topic».",
-                    defaultTeacher = "يطرح أسئلة تشخيصية لاستحضار مكتسبات المتعلمين القبلية وربطها بالدرس الجديد.",
-                    defaultContent = "<u>التمهيد:</u> استحضار المكتسبات القبلية المتعلقة بموضوع «$topic».",
-                    defaultEval = "تقويم مدى قدرة المتعلمين على استحضار المكتسبات السابقة والمشاركة في التمهيد."
+                    defaultAbil = "قدرة التلاميذ على استحضار مكتسباتهم السابقة التي تخدم الدرس قيد الإنجاز.",
+                    defaultTeacher = "يطرح أسئلة تشخيصية لاستحضار مكتسبات المتعلمين القبلية وربطها بموضوع «$topic».",
+                    defaultContent = "معطيات تمهيدية مرتبطة بمجال الدرس وموضوع «$topic».",
+                    defaultEval = "يدعم الأستاذ جوانب التعثر ويعزز الإجابات السليمة."
                 )
                 fillStageDefaults(
                     stage = map["observation"],
                     stageSources = sources["observation"],
-                    defaultAbil = "القدرة على ملاحظة العتبات النصية وصياغة فرضيات القراءة.",
+                    defaultAbil = "القدرة على استخراج القرائن والمؤشرات المساعدة على صياغة الفرضية.",
                     defaultTeacher = "يوجه المتعلمين إلى ملاحظة العنوان والمؤشرات الخارجية وبناء فرضيات القراءة.",
-                    defaultContent = "<u>العنوان:</u> دلالة العنوان وصياغة فرضيات القراءة لنص «$topic».",
-                    defaultEval = "فحص وجاهة الفرضيات المصوغة ومدى دقة ملاحظة العتبات النصية."
+                    defaultContent = "1- الملاحظة والتأطير: دلالة العنوان وصاحب النص ونوعيته وصياغة فرضية القراءة لنص «$topic».",
+                    defaultEval = "تصحيح إجابات المتعلمين وتدعيمها، وكل الفرضيات مقبولة شرط تمحيصها."
                 )
                 fillStageDefaults(
                     stage = map["comprehension"],
                     stageSources = sources["comprehension"],
-                    defaultAbil = "القدرة على قراءة النص قراءة سليمة واستخلاص مضمونه العام وأفكاره الأساسية.",
-                    defaultTeacher = "يقرأ النص قراءة نموذجية، ويتخلل قراءات المتعلمين بشرح المفردات وطرح أسئلة الفهم.",
-                    defaultContent = "<u>الفكرة العامة:</u> المعنى الإجمالي للنص وأفكاره الأساسية.",
-                    defaultEval = "تقويم سلامة القراءة ومدى استيعاب المعاني الصريحة والضمنية للنص."
+                    defaultAbil = "مهارة القراءة الفاحصة والتمكن من فهم النص القرائي في سياقه العام وصياغة الفكرة العامة.",
+                    defaultTeacher = "القراءة النموذجية للنص، والقراءة التناوبية للمتعلمين مع إضاءة النص وتذليل المعجم واستدراج المتعلمين لاستخلاص المضمون بالأسئلة.",
+                    defaultContent = "الشروح اللغوية والمضمون العام للنص وأفكاره الأساسية مع تمحيص الفرضية.",
+                    defaultEval = "تقويم النطق الصحيح ومخارج الحروف للمتعلمين وتقويم نمو الفهم."
+                )
+                fillStageDefaults(
+                    stage = map["session2_intro"],
+                    stageSources = sources["session2_intro"],
+                    defaultAbil = "تذكير بالحصة السابقة.",
+                    defaultTeacher = "استدراج المتعلمين لاسترجاع مكتسبات الحصة الأولى والتذكير بمضمون النص ودلالاته.",
+                    defaultContent = "تذكير بالمضمون العام لنص «$topic» وأبرز أفكاره المستخلصة في الحصة الأولى.",
+                    defaultEval = "رصد قدرة المتعلم(ة) على تذكر مكتسباته."
                 )
                 fillStageDefaults(
                     stage = map["analysis"],
                     stageSources = sources["analysis"],
-                    defaultAbil = "القدرة على تحليل الحقول الدلالية والخصائص الفنية والقيم المتضمنة في النص.",
-                    defaultTeacher = "يساعد المتعلمين على جرد الحقول المعجمية واستخراج الأساليب والصور الفنية وقيم النص.",
-                    defaultContent = "<u>الحقول المعجمية والأساليب:</u> المعجم الدلالي والخصائص الفنية وقيم النص.",
-                    defaultEval = "مدى قدرة المتعلمين على تصنيف المعجم واستخراج الأساليب والقيم بدقة."
+                    defaultAbil = "يحدد المتعلم(ة) معجم النص ويستخرج المفردات الدالة عليه والأساليب والقيم التي بني عليها النص.",
+                    defaultTeacher = "قراءة النص ومساعدة المتعلمين على جرد المعجم واستخراج عناصر التحليل والأساليب والقيم.",
+                    defaultContent = "المعجم الدلالي والخصائص البنائية والأسلوبية والقيم المتضمنة في نص «$topic».",
+                    defaultEval = "رصد إمكانات المتعلمين التحليلية وتعزيزها وتقويتها من خلال تفكيك النص."
                 )
                 fillStageDefaults(
                     stage = map["synthesis"],
                     stageSources = sources["synthesis"],
-                    defaultAbil = "القدرة على تجميع معطيات النص في خلاصة تركيبية منسجمة وتمحيص الفرضيات.",
-                    defaultTeacher = "يطالب المتعلمين بصياغة خلاصة تركيبية لمضامين النص وربطها بفرضيات الانطلاق.",
-                    defaultContent = "<u>التركيب:</u> خلاصة جامعة لمضامين النص ومقاصده التربوية والفنية.",
-                    defaultEval = "فحص جودة الخلاصة التركيبية ومدى تحقق فرضيات القراءة."
+                    defaultAbil = "اكتساب مهارتي التركيب والإنتاج.",
+                    defaultTeacher = "يطلب الأستاذ من المتعلمين تركيب ما تم التطرق إليه في الفهم والتحليل في خلاصات يثبتون أو ينفون فيها صحة الفرضية.",
+                    defaultContent = "خلاصة تركيبية جامعة لمضامين نص «$topic» ومقاصده التربوية والفنية.",
+                    defaultEval = "اختبار قدرة المتعلم(ة) على الإنتاج (إعادة بناء النص)."
                 )
                 fillStageDefaults(
                     stage = map["investment"],
                     stageSources = sources["investment"],
-                    defaultAbil = "القدرة على استثمار مكتسبات النص في وضعيات تواصلية وإنتاجية جديدة.",
-                    defaultTeacher = "يكلف المتعلمين بإنجاز نشاط استثماري يربط النص بواقعهم المعيش.",
-                    defaultContent = "<u>الاستثمار:</u> نشاط تعبيري أو بحثي يوظف مكتسبات درس «$topic».",
-                    defaultEval = "تقويم الإنجازات الاستثمارية للمتعلمين وتصويب التعثرات."
+                    defaultAbil = "تنمية قدرة المتعلمين على التعبير واستثمار مكتسبات الدرس.",
+                    defaultTeacher = "يطالب المتعلمين بإنجاز أنشطة البحث والاستثمار بالكتاب المدرسي لتقويم تعلماتهم.",
+                    defaultContent = "تكليف المتعلمين بإنجاز أنشطة الاستثمار والبحث المرتبطة بموضوع «$topic».",
+                    defaultEval = "تقويم قدرة المتعلم(ة) على تحويل المكتسبات لإنجاز أنشطة أخرى في وضعيات جديدة."
                 )
             }
 
@@ -1569,78 +1798,49 @@ object JadhadhaParser {
                 fillStageDefaults(
                     stage = map["lang_diagnostic"],
                     stageSources = sources["lang_diagnostic"],
-                    defaultAbil = "القدرة على استحضار المكتسبات اللغوية السابقة ذات الصلة بالظاهرة.",
-                    defaultTeacher = "يطرح أسئلة تقويمية لتشخيص المكتسبات اللغوية السابقة والتمهيد للدرس.",
-                    defaultContent = "<u>التقويم التشخيصي:</u> استحضار القواعد الصرفية والتركيبية السابقة ذات الصلة.",
-                    defaultEval = "تقويم مدى تذكر المتعلمين للقواعد اللغوية المكتسبة سابقاً."
+                    defaultAbil = "استحضار المتعلم مكتسباته السابقة الضرورية لبناء المفهوم اللغوي الجديد.",
+                    defaultTeacher = "يطرح الأستاذ أسئلة مركزة لتشخيص المكتسبات القبلية وربطها بدرس «$topic».",
+                    defaultContent = "إجابات المتعلمين تستثمر للربط بالدرس الجديد «$topic».",
+                    defaultEval = "تقويم قدرة المتعلم على تذكر القواعد السابقة واستثمارها."
                 )
                 fillStageDefaults(
                     stage = map["lang_observation"],
                     stageSources = sources["lang_observation"],
-                    defaultAbil = "القدرة على ملاحظة أمثلة الانطلاق ورصد الظاهرة اللغوية وعزلها.",
-                    defaultTeacher = "يدون أمثلة الانطلاق على السبورة ويطالب المتعلمين بقراءتها وملاحظة الكلمات المكتوبة بلون مغاير.",
-                    defaultContent = "<u>أمثلة الانطلاق:</u> رصد الشواهد اللغوية لظاهرة «$topic».",
-                    defaultEval = "فحص قدرة المتعلمين على تحديد الظاهرة اللغوية المستهدفة داخل الشواهد."
-                )
-                fillStageDefaults(
-                    stage = map["lang_analysis"],
-                    stageSources = sources["lang_analysis"],
-                    defaultAbil = "القدرة على وصف الظاهرة اللغوية وتحليل خصائصها واستنباط أحكامها.",
-                    defaultTeacher = "يستدرج المتعلمين عبر جدول توضيحي لوصف الظاهرة وتحليل بنيتها وشروطها.",
-                    defaultContent = "<u>الوصف والتحليل:</u> دراسة خصائص ظاهرة «$topic» واستنباط القواعد الجزئية.",
-                    defaultEval = "مراقبة مدى مشاركة المتعلمين في ملء الجدول التحليلي واستخلاص الاستنتاجات الجزئية."
+                    defaultAbil = "ملاحظة الظاهرة اللغوية وتعرف سياقها والتمكن من وصفها وتفكيك عناصرها الصرفية والتركيبية.",
+                    defaultTeacher = "يدون الأستاذ أمثلة الانطلاق على السبورة، ويرسم جدولاً تفاعلياً ويوجه المتعلمين بأسئلة ديدكتيكية لملئه واستخلاص الاستنتاجات الجزئية.",
+                    defaultContent = "أمثلة الانطلاق وجدول الوصف والتحليل والاستنتاجات الجزئية ونموذج إعرابي لدرس «$topic».",
+                    defaultEval = "مراقبة سلامة القراءة وتقويم مدى قدرة المتعلمين على استنباط خصائص الظاهرة اللغوية وشروطها."
                 )
                 fillStageDefaults(
                     stage = map["lang_synthesis"],
                     stageSources = sources["lang_synthesis"],
-                    defaultAbil = "القدرة على تجميع الاستنتاجات الجزئية وصياغة القاعدة العامة للدرس.",
-                    defaultTeacher = "يوجه المتعلمين إلى تجميع الاستنتاجات الجزئية لبناء القاعدة التركيبية الشاملة.",
-                    defaultContent = "<u>الاستنتاج:</u> صياغة القاعدة العامة الشاملة لدرس «$topic».",
-                    defaultEval = "تقويم قدرة المتعلمين على استيعاب القاعدة والتمثيل لها بجمل مفيدة."
+                    defaultAbil = "القدرة على تجميع الاستنتاجات الجزئية وبناء القاعدة العامة للدرس.",
+                    defaultTeacher = "يطرح الأستاذ أسئلة تجميعية لمساعدة المتعلمين على صياغة القاعدة الكلية للدرس.",
+                    defaultContent = "صياغة القاعدة العامة الشاملة لدرس «$topic».",
+                    defaultEval = "تثبيت المكتسبات عبر قراءة القاعدة قراءة واعية والتمثيل لها."
                 )
                 fillStageDefaults(
                     stage = map["lang_application"],
                     stageSources = sources["lang_application"],
-                    defaultAbil = "القدرة على توظيف القاعدة اللغوية في سياقات تطبيقية وإعرابية متنوعة.",
-                    defaultTeacher = "يقترح تمارين تطبيقية وإعرابية ويشرف على التصحيح الجماعي والفردي.",
-                    defaultContent = "<u>التطبيقات:</u> تمارين إعرابية وتحويلية لترسيخ ظاهرة «$topic».",
-                    defaultEval = "فحص نسبة التحكم في الظاهرة اللغوية ودعم المتعثرين."
+                    defaultAbil = "توظيف المتعلم تعلمه الجديد في سياقات لغوية تطبيقية وإعرابية مختلفة.",
+                    defaultTeacher = "يسجل الأستاذ تطبيقات متنوعة على السبورة، ويطالب المتعلمين بإنجازها لتقويم فهمهم، ثم ينظم التصحيح الجماعي والفردي.",
+                    defaultContent = "تمارين تطبيقية وإعرابية لترسيخ ظاهرة «$topic».",
+                    defaultEval = "التصحيح الجماعي على السبورة، وتوجيه المتعلمين لتصحيح أخطائهم ذاتياً وتقديم الدعم الفوري للمتعثرين."
                 )
             }
 
             PedagogicalComponent.EXPRESSION -> {
-                fillStageDefaults(
-                    stage = map["insha_acquisition"],
-                    stageSources = sources["insha_acquisition"],
-                    defaultAbil = "القدرة على تعرف المهارة الإنشائية وتحديد خصائصها وخطواتها المنهجية.",
-                    defaultTeacher = "يعرض نص الانطلاق ويوجه المتعلمين لاستخلاص تعريف المهارة وخطواتها الإجرائية.",
-                    defaultContent = "<u>أنشطة الاكتساب:</u> التعريف بمهارة «$topic» واستخلاص خطواتها المنهجية.",
-                    defaultEval = "تقويم مدى استيعاب المتعلمين لعناصر المهارة وتصميمها المنهجي."
-                )
-                fillStageDefaults(
-                    stage = map["insha_application"],
-                    stageSources = sources["insha_application"],
-                    defaultAbil = "القدرة على تطبيق خطوات المهارة الإنشائية جماعياً وثنائياً على نموذج تطبيقي.",
-                    defaultTeacher = "يكتب نص الموضوع التطبيقي على السبورة ويشرف على التدريب الجماعي لتطبيق خطوات المهارة.",
-                    defaultContent = "<u>أنشطة التطبيق:</u> نص الموضوع والتدرب على إنجاز مهارة «$topic».",
-                    defaultEval = "مراقبة مدى التزام المتعلمين بخطوات المهارة أثناء التدريب التطبيقي."
-                )
-                fillStageDefaults(
-                    stage = map["insha_production"],
-                    stageSources = sources["insha_production"],
-                    defaultAbil = "القدرة على الإنتاج الفردي المستقل وفق معايير المهارة الإنشائية.",
-                    defaultTeacher = "يقدم وضعية الانطلاق ويوضح المطلوب ويرافق المتعلمين أثناء التحرير الفردي في المسودة.",
-                    defaultContent = "<u>أنشطة الإنتاج:</u> وضعية الانطلاق والتحرير الفردي للموضوع في مسودة.",
-                    defaultEval = "تقويم مدى قدرة المتعلم على التخطيط والربط والتحرير السليم."
-                )
-                fillStageDefaults(
-                    stage = map["insha_correction"],
-                    stageSources = sources["insha_correction"],
-                    defaultAbil = "القدرة على التقويم الذاتي وتصحيح الأخطاء اللغوية والمنهجية وتجويد الإنتاج.",
-                    defaultTeacher = "يعرض شبكة التقويم ويصنف الأخطاء المشتركة ويشرف على التصحيح الجماعي والفردي.",
-                    defaultContent = "<u>أنشطة التصحيح:</u> معايير شبكة التقويم وتصحيح الأخطاء الشائعة والدعم.",
-                    defaultEval = "فحص مدى قدرة المتعلمين على اكتشاف أخطائهم وتصويبها وفق شبكة التقويم."
-                )
+                val allExpStages = StageCatalog.EXPRESSION_STAGES
+                for (meta in allExpStages) {
+                    fillStageDefaults(
+                        stage = map[meta.key],
+                        stageSources = sources[meta.key],
+                        defaultAbil = meta.description,
+                        defaultTeacher = "يوجه الأستاذ المتعلمين خلال مرحلة «${meta.title}» ضمن «${meta.sessionName}» لمهارة «$topic».",
+                        defaultContent = "${meta.title}: عناصر ومضامين «$topic» الخاصة بـ «${meta.sessionName}».",
+                        defaultEval = "تقويم مدى تفاعل المتعلمين وتحقق أهداف مرحلة «${meta.title}»."
+                    )
+                }
             }
         }
     }

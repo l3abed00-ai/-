@@ -1,6 +1,6 @@
 {
-  "summary":  "خطة إعادة بناء قارئ ملفات docx في DocumentFileReader باستخدام XmlPullParser ونموذج وسيط متدفق مع دعم الجداول المتداخلة، فواصل الأسطر، مربعات النص، الرأس والتذييل، والعودة الآمنة إلى المحلل القديم عند تلف XML.",
-  "updatedAt":  "2026-10-29T22:35:57.976144738Z",
+  "summary":  "خطة التنفيذ الشاملة لإعادة بناء محرك تفريغ الجذاذات (DocumentFileReader و JadhadhaParser و GeminiAiService)، ومولّد الوورد الرسمي بـ 5 أعمدة RTL (DocxGenerator)، وتحديث النماذج الثلاثة (SamplePlans) وتصفير قاعدة البيانات (AppDatabase).",
+  "updatedAt":  "2026-10-30T22:07:51.340836681Z",
   "requestFeedback":  true,
   "userFacing":  true
 }

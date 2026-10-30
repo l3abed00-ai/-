@@ -16,23 +16,23 @@ enum class PedagogicalComponent(
         shortName = "القراءة",
         description = "دراسة وتأطير وفهم وتحليل وتركيب واستثمار النصوص القرائية (حصتان)",
         defaultDuration = "ساعتان (حصتان)",
-        defaultMaterials = "الكتاب المدرسي (المختار في اللغة العربية)، السبورة، خطاطات، مسلاط"
+        defaultMaterials = "السبورة - كتاب المتعلم (ة) – دفتر المتعلم (ة)."
     ),
     LANGUAGE(
         id = "language",
         title = "الدرس اللغوي",
         shortName = "الدرس اللغوي",
-        description = "ملاحظة الظاهرة اللغوية وعزلها ووصفها وتحليلها وصياغة القواعد والتطبيق",
+        description = "ملاحظة الأمثلة ووصفها وتحليلها واستنتاج القاعدة الضابطة وتطبيقها",
         defaultDuration = "ساعة واحدة",
-        defaultMaterials = "الكتاب المدرسي، السبورة، جداول الظاهرة اللغوية، مسلاط"
+        defaultMaterials = "السبورة - كتاب المتعلم (ة) – دفتر المتعلم (ة)."
     ),
     EXPRESSION(
         id = "expression",
         title = "التعبير والإنشاء",
         shortName = "التعبير والإنشاء",
         description = "التدرب على المهارات الإنشائية عبر 4 حصص: الاكتساب، التطبيق، الإنتاج، والتصحيح",
-        defaultDuration = "4 ساعات (أربع حصص مبرمجة)",
-        defaultMaterials = "الكتاب المدرسي، السبورة، نماذج المهارة، شبكات التقويم والتصحيح الذاتي"
+        defaultDuration = "ساعة واحدة",
+        defaultMaterials = "السبورة - كتاب المتعلم (ة) – دفتر المتعلم (ة)."
     );
 
     companion object {
@@ -48,15 +48,18 @@ enum class PedagogicalComponent(
 }
 
 data class JadhadhaInfo(
-    val level: String = "الثالثة ثانوي إعدادي",
-    val unit: String = "الوحدة الأولى: القيم الإسلامية والوطنية",
-    val domain: String = "مجال القيم الإسلامية والوطنية",
+    val level: String = "السنة الثالثة إعدادي",
+    val unit: String = "الثانية",
+    val domain: String = "القيم الوطنية والإنسانية",
     val component: String = "النصوص القرائية",
     val duration: String = "ساعتان (حصتان)",
-    val materials: String = "الكتاب المدرسي، السبورة، خطاطات، مسلاط",
-    val communicativeComp: String = "أن يقرأ المتعلم النص قراءة مسترسلة معبرة، ويفهم معانيه وأبعاده الدلالية، ويتواصل بمضامينه.",
-    val methodologicalComp: String = "أن يوظف المتعلم آليات القراءة المنهجية (الملاحظة، الفهم، التحليل، التركيب، والاستثمار).",
-    val culturalComp: String = "أن يغني المتعلم رصيده المعرفي بقيم النص ومقاصده الإنسانية والوطنية."
+    val materials: String = "السبورة - كتاب المتعلم (ة) – دفتر المتعلم (ة).",
+    val reference: String = "المختار في اللغة العربية",
+    val teacherName: String = "محمد العابد",
+    val schoolName: String = "مدرسة أنوال (السلك الإعدادي)",
+    val communicativeComp: String = "يتمكن المتعلم من التواصل بلغة عربية سليمة، مستثمرا تعلماته الفصلية ومطالعاته الحرة.",
+    val methodologicalComp: String = "تمكن المتعلم من استعمال أدوات القراءة المنهجية لفهم النص السردي وتحليله، وتركيب عناصره، واستثماره.",
+    val culturalComp: String = "يغني المتعلم رصيده الثقافي بمعطيات تاريخية ووطنية تتصل بمرحلة الاستعمار والكفاح من أجل الاستقلال."
 )
 
 enum class FieldSource(val arabicLabel: String) {
@@ -100,134 +103,237 @@ data class StageMetadata(
 
 object StageCatalog {
 
-    // 1. مراحل النصوص القرائية (Reading Stages)
+    // 1. مراحل النصوص القرائية (Reading Stages - 2 Sessions, 7 Stages including Session 2 Intro)
     val READING_STAGES = listOf(
         StageMetadata(
             key = "diagnostic",
-            title = "تشخيص المكتسبات والتمهيد",
+            title = "تشخيص المكتسبات",
             session = 1,
-            sessionName = "الحصة الأولى: القراءة الاستكشافية والتوجيهية",
+            sessionName = "الحصة الأولى: تأطير النص والقراءة التوجيهية",
             description = "تقويم قبلي لتشخيص المعارف والمكتسبات السابقة وربطها بالدرس الجديد",
             componentType = PedagogicalComponent.READING
         ),
         StageMetadata(
             key = "observation",
-            title = "ملاحظة النص وتأطيره",
+            title = "ملاحظة النص",
             session = 1,
-            sessionName = "الحصة الأولى: القراءة الاستكشافية والتوجيهية",
-            description = "دراسة العتبات النصية (العنوان، الصورة، البداية والنهاية، صاحب النص) وبناء الفرضيات",
+            sessionName = "الحصة الأولى: تأطير النص والقراءة التوجيهية",
+            description = "دراسة العتبات النصية (صاحب النص، مصدره، نوعيته، العنوان، البداية والنهاية) وصياغة الفرضية",
             componentType = PedagogicalComponent.READING
         ),
         StageMetadata(
             key = "comprehension",
             title = "فهم النص",
             session = 1,
-            sessionName = "الحصة الأولى: القراءة الاستكشافية والتوجيهية",
-            description = "القراءة النموذجية وشرح المفردات واستخلاص الفكرة العامة والأفكار الأساسية",
+            sessionName = "الحصة الأولى: تأطير النص والقراءة التوجيهية",
+            description = "القراءة النموذجية والتناوبية وإضاءة النص والشروح اللغوية والمضمون العام للنص",
+            componentType = PedagogicalComponent.READING
+        ),
+        StageMetadata(
+            key = "session2_intro",
+            title = "تمهيد",
+            session = 2,
+            sessionName = "الحصة الثانية: القراءة التحليلية والتركيبية",
+            description = "تذكير بالحصة السابقة واستدراج المتعلمين لاسترجاع مكتسبات الحصة الأولى",
             componentType = PedagogicalComponent.READING
         ),
         StageMetadata(
             key = "analysis",
             title = "القراءة التحليلية",
             session = 2,
-            sessionName = "الحصة الثانية: التحليل والتركيب والاستثمار",
-            description = "دراسة المعجم والحقول الدلالية وأساليب النص والضمائر والقيم التربوية",
+            sessionName = "الحصة الثانية: القراءة التحليلية والتركيبية",
+            description = "تحليل أحداث النص وشخصياته والزمان والمكان والسارد والرؤية السردية وأنماط الحكي واللغة والقيم",
             componentType = PedagogicalComponent.READING
         ),
         StageMetadata(
             key = "synthesis",
             title = "التركيب",
             session = 2,
-            sessionName = "الحصة الثانية: التحليل والتركيب والاستثمار",
-            description = "تركيب نتائج القراءة وصياغة خلاصة عامة لمضامين النص ومقاصده الفنية",
+            sessionName = "الحصة الثانية: القراءة التحليلية والتركيبية",
+            description = "تركيب ما تم التطرق إليه في الفهم والتحليل في خلاصة تبرز صحة الفرضية وأبعاد النص",
             componentType = PedagogicalComponent.READING
         ),
         StageMetadata(
             key = "investment",
-            title = "الاستثمار والامتداد",
+            title = "الاستثمار",
             session = 2,
-            sessionName = "الحصة الثانية: التحليل والتركيب والاستثمار",
-            description = "أنشطة استثمارية وتطبيقات منزلية ووضعيات لإعادة توظيف التعلمات",
+            sessionName = "الحصة الثانية: القراءة التحليلية والتركيبية",
+            description = "إنجاز أنشطة الاستثمار والبحث بالكتاب المدرسي لتقويم التعلمات وتحويل المكتسبات",
             componentType = PedagogicalComponent.READING
         )
     )
 
-    // 2. مراحل الدرس اللغوي (Language / Grammar Stages)
+    // 2. مراحل الدرس اللغوي (Language / Grammar Stages - 4 Official Exemplar Stages)
     val LANGUAGE_STAGES = listOf(
         StageMetadata(
             key = "lang_diagnostic",
-            title = "التقويم التشخيصي والتمهيد",
+            title = "تقويم تشخيصي",
             session = 1,
             sessionName = "حصة الدرس اللغوي",
-            description = "استحضار المكتسبات والظواهر اللغوية السابقة ذات الصلة بموضوع الدرس",
+            description = "استحضار المكتسبات والظواهر اللغوية السابقة ذات الصلة بموضوع الدرس والتمهيد له",
             componentType = PedagogicalComponent.LANGUAGE
         ),
         StageMetadata(
             key = "lang_observation",
-            title = "ملاحظة الظاهرة اللغوية وعزلها",
+            title = "ملاحظة الأمثلة ووصفها وتحليلها",
             session = 1,
             sessionName = "حصة الدرس اللغوي",
-            description = "قراءة أمثلة الانطلاق وتحديد الشواهد اللغوية المتضمنة للظاهرة وعزلها",
-            componentType = PedagogicalComponent.LANGUAGE
-        ),
-        StageMetadata(
-            key = "lang_analysis",
-            title = "الوصف والتحليل",
-            session = 1,
-            sessionName = "حصة الدرس اللغوي",
-            description = "تفكيك عناصر الظاهرة اللغوية عبر الجدول التحليلي وبناء القواعد الجزئية",
+            description = "ملاحظة أمثلة الانطلاق وتحليل الظاهرة اللغوية عبر الجداول التوضيحية والاستنتاجات الجزئية",
             componentType = PedagogicalComponent.LANGUAGE
         ),
         StageMetadata(
             key = "lang_synthesis",
-            title = "الاستنتاج والقاعدة التركيبية",
+            title = "الاستنتاج",
             session = 1,
             sessionName = "حصة الدرس اللغوي",
-            description = "تجميع القواعد الجزئية وصياغة القاعدة العامة للظاهرة اللغوية",
+            description = "صياغة الاستنتاج العام للدرس اللغوي مع نموذج إعرابي تطبيقي",
             componentType = PedagogicalComponent.LANGUAGE
         ),
         StageMetadata(
             key = "lang_application",
-            title = "التطبيقات والتقويم الإجمالي",
+            title = "تطبيق",
             session = 1,
             sessionName = "حصة الدرس اللغوي",
-            description = "تمارين تطبيقية فورية وأنشطة إعرابية لتثبيت المكتسبات وقياس مدى تحقق الهدف",
+            description = "إنجاز أنشطة «أطبق» بالكتاب المدرسي وتصحيحها جماعياً وفردياً على السبورة والدفاتر",
             componentType = PedagogicalComponent.LANGUAGE
         )
     )
 
-    // 3. مراحل التعبير والإنشاء (Expression & Composition Stages - 4 Sessions)
+    // 3. مراحل التعبير والإنشاء (Expression & Composition Stages - 4 Sessions, 16 Sub-Stages)
     val EXPRESSION_STAGES = listOf(
+        // الحصة الأولى: حصة الاكتساب
         StageMetadata(
-            key = "insha_acquisition",
-            title = "حصة الاكتساب (أنشطة الاكتساب)",
+            key = "insha_acq_diagnostic",
+            title = "تقويم تشخيصي",
             session = 1,
-            sessionName = "الحصة الأولى: أنشطة الاكتساب",
-            description = "التعريف بالمهارة المستهدفة وقراءة نص الانطلاق واستخلاص خطواتها وإجراءاتها المنهجية",
+            sessionName = "حصة الاكتساب",
+            description = "ربط الدرس الجديد بالمكتسبات السابقة واستدراج المتعلمين لتحديد مفهوم المهارة",
             componentType = PedagogicalComponent.EXPRESSION
         ),
         StageMetadata(
-            key = "insha_application",
-            title = "حصة التطبيق (أنشطة التطبيق)",
+            key = "insha_acq_reading",
+            title = "قراءة نص الانطلاق وفهمه",
+            session = 1,
+            sessionName = "حصة الاكتساب",
+            description = "قراءة نص الانطلاق قراءة متأنية وفهم مضمونه العام وأحداثه",
+            componentType = PedagogicalComponent.EXPRESSION
+        ),
+        StageMetadata(
+            key = "insha_acq_elements",
+            title = "استخراج عناصر الدرس",
+            session = 1,
+            sessionName = "حصة الاكتساب",
+            description = "تحليل نص الانطلاق واستخراج عناصر المهارة وخصائصها البنائية واللغوية",
+            componentType = PedagogicalComponent.EXPRESSION
+        ),
+        StageMetadata(
+            key = "insha_acq_synthesis",
+            title = "الاستنتاج",
+            session = 1,
+            sessionName = "حصة الاكتساب",
+            description = "صياغة الاستنتاج العام المنظم لعناصر المهارة وخطواتها",
+            componentType = PedagogicalComponent.EXPRESSION
+        ),
+        StageMetadata(
+            key = "insha_acq_investment",
+            title = "الاستثمار",
+            session = 1,
+            sessionName = "حصة الاكتساب",
+            description = "تكليف المتعلمين بنشاط استثماري منزلي لتطبيق خطوات المهارة المكتسبة",
+            componentType = PedagogicalComponent.EXPRESSION
+        ),
+
+        // الحصة الثانية: حصة التطبيق
+        StageMetadata(
+            key = "insha_app_diagnostic",
+            title = "تقويم تشخيصي (تمهيد)",
             session = 2,
-            sessionName = "الحصة الثانية: أنشطة التطبيق",
-            description = "التذكير بخطوات المهارة، وتطبيقها عملياً على نص الموضوع المقترح جماعياً وفردياً",
+            sessionName = "حصة التطبيق",
+            description = "استحضار عناصر المهارة المكتسبة في الحصة السابقة",
             componentType = PedagogicalComponent.EXPRESSION
         ),
         StageMetadata(
-            key = "insha_production",
-            title = "حصة الإنتاج (أنشطة الإنتاج والربط)",
+            key = "insha_app_presentation",
+            title = "تقديم الدرس",
+            session = 2,
+            sessionName = "حصة التطبيق",
+            description = "كتابة نص الموضوع التطبيقي على السبورة وقراءته واستخراج عناصره ومطلوبه",
+            componentType = PedagogicalComponent.EXPRESSION
+        ),
+        StageMetadata(
+            key = "insha_app_execution",
+            title = "إنجاز المهارة",
+            session = 2,
+            sessionName = "حصة التطبيق",
+            description = "تطبيق خطوات المهارة لإنجاز المطلوب جماعياً وفردياً",
+            componentType = PedagogicalComponent.EXPRESSION
+        ),
+        StageMetadata(
+            key = "insha_app_correction",
+            title = "تصحيح",
+            session = 2,
+            sessionName = "حصة التطبيق",
+            description = "قراءة الإنتاجات التطبيقية وتصحيحها جماعياً وتدوين النموذج على السبورة",
+            componentType = PedagogicalComponent.EXPRESSION
+        ),
+
+        // الحصة الثالثة: حصة الإنتاج
+        StageMetadata(
+            key = "insha_prod_diagnostic",
+            title = "تقويم تشخيصي (تمهيد)",
             session = 3,
-            sessionName = "الحصة الثالثة: أنشطة الإنتاج والربط",
-            description = "عرض وضعية الانطلاق وتخطيط التصميم وتحرير مسودة الإنتاج الإنشائي الفردي",
+            sessionName = "حصة الإنتاج",
+            description = "استحضار مكتسبات حصتي الاكتساب والتطبيق وخطوات المهارة",
             componentType = PedagogicalComponent.EXPRESSION
         ),
         StageMetadata(
-            key = "insha_correction",
-            title = "حصة التصحيح (أنشطة التصحيح والدعم)",
+            key = "insha_prod_presentation",
+            title = "تقديم الدرس",
+            session = 3,
+            sessionName = "حصة الإنتاج",
+            description = "كتابة نص موضوع الإنتاج على السبورة وشرح المطلوب وعناصر التصميم",
+            componentType = PedagogicalComponent.EXPRESSION
+        ),
+        StageMetadata(
+            key = "insha_prod_execution",
+            title = "إنجاز المهارة",
+            session = 3,
+            sessionName = "حصة الإنتاج",
+            description = "التحرير الفردي للموضوع الإنشائي وفق التصميم المنهجي والضوابط اللغوية",
+            componentType = PedagogicalComponent.EXPRESSION
+        ),
+        StageMetadata(
+            key = "insha_prod_correction",
+            title = "تصحيح",
+            session = 3,
+            sessionName = "حصة الإنتاج",
+            description = "جمع أوراق التحرير أو الدفاتر قصد التصحيح والتقويم",
+            componentType = PedagogicalComponent.EXPRESSION
+        ),
+
+        // الحصة الرابعة: حصة التصحيح
+        StageMetadata(
+            key = "insha_corr_diagnostic",
+            title = "تقويم تشخيصي (تمهيد)",
             session = 4,
-            sessionName = "الحصة الرابعة: أنشطة التصحيح والدعم",
-            description = "عرض شبكة التقويم وتصنيف الأخطاء المشتركة وتصحيح الإنتاجات ودعم التعثرات",
+            sessionName = "حصة التصحيح",
+            description = "استحضار خطوات المهارة وعناصرها الأساسية والضوابط المنهجية",
+            componentType = PedagogicalComponent.EXPRESSION
+        ),
+        StageMetadata(
+            key = "insha_corr_diagnosis",
+            title = "تشخيص أخطاء المتعلمين وتصنيفها",
+            session = 4,
+            sessionName = "حصة التصحيح",
+            description = "سطر شبكة تشخيص الأخطاء المشتركة وتصنيفها (إملائي، تركيبي، معجمي) وتصويبها مع التعليل",
+            componentType = PedagogicalComponent.EXPRESSION
+        ),
+        StageMetadata(
+            key = "insha_corr_support",
+            title = "التصحيح الفردي والدعم والتعزيز",
+            session = 4,
+            sessionName = "حصة التصحيح",
+            description = "توزيع أوراق التحرير للتصحيح الذاتي وأنشطة التثبيت وإغناء المعجم وقراءة النماذج المتميزة",
             componentType = PedagogicalComponent.EXPRESSION
         )
     )
@@ -320,6 +426,3 @@ data class ParseResult(
     val plan: JadhadhaPlan,
     val report: ParseReport
 )
-
-
-

@@ -7,6 +7,7 @@ import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
 import android.provider.OpenableColumns
+import com.example.model.JadhadhaInfo
 import com.example.model.JadhadhaPlan
 import com.example.model.PedagogicalComponent
 import com.example.model.SamplePlans
@@ -23,13 +24,16 @@ object DocxGenerator {
 
     const val FONT_NAME = "Sakkal Majalla"
     const val FONT_SIZE_HALF_PT = 20 // 10pt (20 half-points) as in Model Jadhadha
-    private const val FONT_TITLE_SIZE = 22 // 11pt bold for main lesson title
-    const val HEADER_BG_HEX = "F3F4F6" // Very light grey header shading (#F3F4F6) for clear printing
-    private const val STAGE_BG_HEX = "F3F4F6"
-    private const val ACCENT_BG_HEX = "F3F4F6"
-    const val TABLE_HEADER_BG_HEX = "F3F4F6" // Very light grey table header (#F3F4F6) with black text
-    private const val BORDER_COLOR_HEX = "2F5597"
+    private const val FONT_TITLE_SIZE = 20
+    const val HEADER_BG_HEX = "F2F2F2" // Official light grey header shading (#F2F2F2) for clear printing
+    private const val STAGE_BG_HEX = "FFFFFF"
+    const val TABLE_HEADER_BG_HEX = "F2F2F2" // Official light grey table header (#F2F2F2) with black text
+    private const val BORDER_COLOR_HEX = "000000"
     const val DOCX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+    // 5-column widths in dxa (Total = 11106 dxa):
+    // 12% المراحل (1333) | 18% القدرات والمهارات (1999) | 25% الأنشطة التعليمية التعلمية (2776) | 30% المحتوى (3332) | 15% التقويم والدعم (1666)
+    val MAIN_TABLE_COL_WIDTHS = listOf(1333, 1999, 2776, 3332, 1666)
 
     /**
      * Saves a custom Model Jadhadha .docx template selected by the user (e.g. from the
@@ -318,16 +322,20 @@ object DocxGenerator {
   <w:body>
 """)
 
-        // 1. Header Table (matching Model Jadhadha 6-row header layout)
-        appendHeaderTable(sb, plan)
+        if (plan.componentType == PedagogicalComponent.EXPRESSION) {
+            appendExpressionFourSessionTables(sb, plan)
+        } else {
+            // 1. Official 7-Row x 4-Column RTL Header Table
+            appendHeaderTable(sb, plan)
 
-        // Compact spacer paragraph
-        sb.append("""<w:p><w:pPr><w:bidi/><w:spacing w:before="0" w:after="60"/></w:pPr></w:p>""")
+            // Compact spacer paragraph
+            sb.append("""<w:p><w:pPr><w:bidi/><w:spacing w:before="0" w:after="60"/></w:pPr></w:p>""")
 
-        // 2. Main Stages Table (Sakkal Majalla 10pt Bold, RTL, with nested tables support)
-        appendStagesTable(sb, plan)
+            // 2. Official 5-Column RTL Main Stages Table
+            appendStagesTable(sb, plan)
+        }
 
-        // Section properties with compact 400 dxa (~0.28 in) margins as in build_jadhadha.py
+        // Section properties with compact 400 dxa (~0.28 in) margins
         if (preservedSectPr != null) {
             sb.append("\n    ").append(preservedSectPr).append("\n")
         } else {
@@ -344,15 +352,141 @@ object DocxGenerator {
         return sb.toString()
     }
 
-    private fun appendHeaderTable(sb: StringBuilder, plan: JadhadhaPlan) {
+    /**
+     * Generates 4 independent Header + 5-Column Stages tables for التعبير والإنشاء:
+     * 1. حصة الاكتساب
+     * 2. حصة التطبيق
+     * 3. حصة الإنتاج
+     * 4. حصة التصحيح
+     */
+    private fun appendExpressionFourSessionTables(sb: StringBuilder, plan: JadhadhaPlan) {
+        data class ExpressionSessionSpec(
+            val sessionNumber: Int,
+            val componentLabel: String,
+            val stageKeys: List<String>,
+            val legacyKey: String,
+            val overrideInfo: (JadhadhaInfo) -> JadhadhaInfo
+        )
+
+        val sessionSpecs = listOf(
+            ExpressionSessionSpec(
+                sessionNumber = 1,
+                componentLabel = "التعبير والإنشاء – حصة الاكتساب",
+                stageKeys = listOf(
+                    "insha_acq_diagnostic",
+                    "insha_acq_reading",
+                    "insha_acq_elements",
+                    "insha_acq_synthesis",
+                    "insha_acq_investment"
+                ),
+                legacyKey = "insha_acquisition",
+                overrideInfo = { info -> info.copy(component = "التعبير والإنشاء – حصة الاكتساب", duration = "ساعة واحدة") }
+            ),
+            ExpressionSessionSpec(
+                sessionNumber = 2,
+                componentLabel = "التعبير والإنشاء – حصة التطبيق",
+                stageKeys = listOf(
+                    "insha_app_diagnostic",
+                    "insha_app_presentation",
+                    "insha_app_execution",
+                    "insha_app_correction"
+                ),
+                legacyKey = "insha_application",
+                overrideInfo = { info -> info.copy(component = "التعبير والإنشاء – حصة التطبيق", duration = "ساعة واحدة") }
+            ),
+            ExpressionSessionSpec(
+                sessionNumber = 3,
+                componentLabel = "التعبير والإنشاء – حصة الإنتاج",
+                stageKeys = listOf(
+                    "insha_prod_diagnostic",
+                    "insha_prod_presentation",
+                    "insha_prod_execution",
+                    "insha_prod_correction"
+                ),
+                legacyKey = "insha_production",
+                overrideInfo = { info -> info.copy(component = "التعبير والإنشاء – حصة الإنتاج", duration = "ساعة واحدة") }
+            ),
+            ExpressionSessionSpec(
+                sessionNumber = 4,
+                componentLabel = "التعبير والإنشاء – حصة التصحيح",
+                stageKeys = listOf(
+                    "insha_corr_diagnostic",
+                    "insha_corr_diagnosis",
+                    "insha_corr_support"
+                ),
+                legacyKey = "insha_correction",
+                overrideInfo = { info ->
+                    info.copy(
+                        component = "التعبير والإنشاء – حصة التصحيح",
+                        duration = "ساعة واحدة",
+                        communicativeComp = if (info.communicativeComp.contains("تطوير أدوات التواصل")) {
+                            "تمكين المتعلم من التعبير والتواصل بلغة عربية سليمة عن الأخطاء الإملائية والتركيبية والمعجمية."
+                        } else {
+                            info.communicativeComp
+                        },
+                        methodologicalComp = if (info.methodologicalComp.contains("وضع تصميم لعناصر")) {
+                            "اكتساب القدرة على التقويم الذاتي والتصحيح الجماعي للإنتاجات الكتابية."
+                        } else {
+                            info.methodologicalComp
+                        },
+                        culturalComp = if (info.culturalComp.contains("التشبع بالقيم الإسلامية")) {
+                            "تثبيت الظواهر اللغوية والإملائية المتعثرة، وإغناء الرصيد المعجمي الخاص بأساليب التدوين والسرد الذاتي."
+                        } else {
+                            info.culturalComp
+                        }
+                    )
+                }
+            )
+        )
+
+        var renderedAnySession = false
+        for (spec in sessionSpecs) {
+            val activeKeys = spec.stageKeys.filter { plan.stages.containsKey(it) }
+            val keysToRender = when {
+                activeKeys.isNotEmpty() -> activeKeys
+                plan.stages.containsKey(spec.legacyKey) -> listOf(spec.legacyKey)
+                else -> spec.stageKeys
+            }
+
+            if (renderedAnySession) {
+                // Page break paragraph before next session's header table
+                sb.append("""<w:p><w:pPr><w:bidi/><w:pageBreakBefore/><w:spacing w:before="0" w:after="60"/></w:pPr></w:p>""")
+            }
+
+            val sessionPlan = plan.copy(info = spec.overrideInfo(plan.info))
+            appendHeaderTable(sb, sessionPlan, overrideComponentTitle = spec.componentLabel)
+            sb.append("""<w:p><w:pPr><w:bidi/><w:spacing w:before="0" w:after="60"/></w:pPr></w:p>""")
+            appendStagesTableForKeys(sb, sessionPlan, keysToRender, stageHeaderLabel = "المراحل")
+            renderedAnySession = true
+        }
+    }
+
+    /**
+     * Appends the official 7-row x 4-column RTL Header Table matching the exemplar screenshots:
+     * Row 1: الوحدة | <unit> | الفئة المستهدفة | <level>
+     * Row 2: المجال | <domain> | الوسائل التعليمية | <materials> (#F2F2F2)
+     * Row 3: المكون | <component> | الكفايات المستهدفة / الأهداف التعلمية (gridSpan=2)
+     * Row 4: الموضوع | <topic> | - كفاية تواصلية: ... (gridSpan=2, #F2F2F2)
+     * Row 5: مدة الإنجاز | <duration> | - كفاية منهجية: ... (gridSpan=2)
+     * Row 6: المرجع | <reference> | - كفاية معرفية: ... (gridSpan=2, #F2F2F2)
+     * Row 7: الأستاذ | <teacherName> | المؤسسة | <schoolName>
+     */
+    private fun appendHeaderTable(
+        sb: StringBuilder,
+        plan: JadhadhaPlan,
+        overrideComponentTitle: String? = null
+    ) {
         val borders = """<w:tblBorders>
-      <w:top w:val="single" w:sz="8" w:space="0" w:color="$BORDER_COLOR_HEX"/>
-      <w:left w:val="single" w:sz="8" w:space="0" w:color="$BORDER_COLOR_HEX"/>
-      <w:bottom w:val="single" w:sz="8" w:space="0" w:color="$BORDER_COLOR_HEX"/>
-      <w:right w:val="single" w:sz="8" w:space="0" w:color="$BORDER_COLOR_HEX"/>
-      <w:insideH w:val="single" w:sz="4" w:space="0" w:color="8FAADC"/>
-      <w:insideV w:val="single" w:sz="4" w:space="0" w:color="8FAADC"/>
+      <w:top w:val="single" w:sz="6" w:space="0" w:color="000000"/>
+      <w:left w:val="none" w:sz="0" w:space="0" w:color="auto"/>
+      <w:bottom w:val="single" w:sz="6" w:space="0" w:color="000000"/>
+      <w:right w:val="none" w:sz="0" w:space="0" w:color="auto"/>
+      <w:insideH w:val="single" w:sz="4" w:space="0" w:color="BFBFBF"/>
+      <w:insideV w:val="none" w:sz="0" w:space="0" w:color="auto"/>
     </w:tblBorders>"""
+
+        // 4 columns in RTL (<w:bidiVisual/>): RightLabel (1400) | RightVal (3600) | LeftLabel (1900) | LeftVal (4206) = 11106 dxa
+        val colWidths = listOf(1400, 3600, 1900, 4206)
 
         sb.append("""
     <w:tbl>
@@ -363,91 +497,220 @@ object DocxGenerator {
         $borders
       </w:tblPr>
       <w:tblGrid>
-        <w:gridCol w:w="5553"/>
-        <w:gridCol w:w="5553"/>
+        <w:gridCol w:w="${colWidths[0]}"/>
+        <w:gridCol w:w="${colWidths[1]}"/>
+        <w:gridCol w:w="${colWidths[2]}"/>
+        <w:gridCol w:w="${colWidths[3]}"/>
       </w:tblGrid>
 """)
 
-        // Row 0: الفئة المستهدفة & الوحدة
-        appendHeaderRow(sb, "الفئة المستهدفة: " + plan.info.level, "الوحدة: " + plan.info.unit, bg = HEADER_BG_HEX)
+        val compTitle = overrideComponentTitle ?: plan.info.component.ifBlank { plan.componentType.title }
+        val competenciesHeader = if (plan.componentType == PedagogicalComponent.READING) {
+            "الكفايات المستهدفة"
+        } else {
+            "الأهداف التعلمية:"
+        }
 
-        // Row 1: الوسائل التعليمية & المجال
-        appendHeaderRow(sb, "الوسائل التعليمية: " + plan.info.materials, "المجال: " + plan.info.domain, bg = STAGE_BG_HEX)
-
-        // Row 2: المكون (Span 2)
-        val compTitle = plan.componentType.title
-        appendSpannedHeaderRow(sb, "المكوّن: $compTitle", bg = ACCENT_BG_HEX, bold = true, isCenter = true)
-
-        // Row 3: كفاية تواصلية & الموضوع
-        appendHeaderRow(
-            sb,
-            "- كفاية تواصلية: " + plan.info.communicativeComp,
-            "الموضوع: " + plan.topic,
-            bg2 = ACCENT_BG_HEX,
-            bold2 = true,
-            sz2 = FONT_TITLE_SIZE
+        // Row 1 (White): الوحدة & الفئة المستهدفة
+        appendFourColHeaderRow(
+            sb = sb,
+            rightLabel = "الوحدة :",
+            rightVal = plan.info.unit,
+            leftLabel = "الفئة المستهدفة :",
+            leftVal = plan.info.level,
+            bg = null,
+            colWidths = colWidths
         )
 
-        // Row 4: كفاية منهجية & المدة الزمنية
-        appendHeaderRow(sb, "- كفاية منهجية: " + plan.info.methodologicalComp, "المدة الزمنية: " + plan.info.duration)
+        // Row 2 (#F2F2F2): المجال & الوسائل التعليمية
+        appendFourColHeaderRow(
+            sb = sb,
+            rightLabel = "المجال :",
+            rightVal = plan.info.domain,
+            leftLabel = "الوسائل التعليمية :",
+            leftVal = plan.info.materials,
+            bg = HEADER_BG_HEX,
+            colWidths = colWidths
+        )
 
-        // Row 5: كفاية ثقافية (Span 2)
-        appendSpannedHeaderRow(sb, "- كفاية ثقافية: " + plan.info.culturalComp)
+        // Row 3 (White): المكون & الكفايات المستهدفة / الأهداف التعلمية (underlined, spanned 2 cols on left)
+        appendTwoPlusSpannedLeftHeaderRow(
+            sb = sb,
+            rightLabel = "المكون :",
+            rightVal = compTitle,
+            leftSpannedText = competenciesHeader,
+            bg = null,
+            colWidths = colWidths,
+            underlineLeft = true
+        )
+
+        // Row 4 (#F2F2F2): الموضوع & - كفاية تواصلية
+        appendTwoPlusSpannedLeftHeaderRow(
+            sb = sb,
+            rightLabel = "الموضوع :",
+            rightVal = plan.topic,
+            leftSpannedText = "- كفاية تواصلية: ${plan.info.communicativeComp}",
+            bg = HEADER_BG_HEX,
+            colWidths = colWidths,
+            rightValSz = FONT_TITLE_SIZE
+        )
+
+        // Row 5 (White): مدة الإنجاز & - كفاية منهجية
+        appendTwoPlusSpannedLeftHeaderRow(
+            sb = sb,
+            rightLabel = "مدة الإنجاز :",
+            rightVal = plan.info.duration,
+            leftSpannedText = "- كفاية منهجية: ${plan.info.methodologicalComp}",
+            bg = null,
+            colWidths = colWidths
+        )
+
+        // Row 6 (#F2F2F2): المرجع & - كفاية معرفية
+        appendTwoPlusSpannedLeftHeaderRow(
+            sb = sb,
+            rightLabel = "المرجع :",
+            rightVal = plan.info.reference,
+            leftSpannedText = "- كفاية معرفية: ${plan.info.culturalComp}",
+            bg = HEADER_BG_HEX,
+            colWidths = colWidths
+        )
+
+        // Row 7 (White): الأستاذ & المؤسسة
+        appendFourColHeaderRow(
+            sb = sb,
+            rightLabel = "الأستاذ :",
+            rightVal = plan.info.teacherName,
+            leftLabel = "المؤسسة :",
+            leftVal = plan.info.schoolName,
+            bg = null,
+            colWidths = colWidths
+        )
 
         sb.append("    </w:tbl>\n")
     }
 
-    private fun appendHeaderRow(
+    private fun appendFourColHeaderRow(
         sb: StringBuilder,
-        cell1: String,
-        cell2: String,
-        bg: String? = null,
-        bg2: String? = null,
-        bold2: Boolean = true,
-        sz2: Int = FONT_SIZE_HALF_PT
+        rightLabel: String,
+        rightVal: String,
+        leftLabel: String,
+        leftVal: String,
+        bg: String?,
+        colWidths: List<Int>
     ) {
         sb.append("      <w:tr>\n")
-        appendCell(sb, cell1, widthDxa = 5553, bgHex = bg, bold = true, isCenter = true)
-        appendCell(sb, cell2, widthDxa = 5553, bgHex = bg2 ?: bg, bold = bold2, isCenter = true, sz = sz2)
+        appendCell(sb, rightLabel, widthDxa = colWidths[0], bgHex = bg, bold = true, isCenter = true)
+        appendCell(sb, rightVal, widthDxa = colWidths[1], bgHex = bg, bold = true, isCenter = true)
+        appendCell(sb, leftLabel, widthDxa = colWidths[2], bgHex = bg, bold = true, isCenter = true)
+        appendCell(sb, leftVal, widthDxa = colWidths[3], bgHex = bg, bold = true, isCenter = true)
         sb.append("      </w:tr>\n")
     }
 
-    private fun appendSpannedHeaderRow(
+    private fun appendTwoPlusSpannedLeftHeaderRow(
         sb: StringBuilder,
-        text: String,
-        bg: String? = null,
-        bold: Boolean = true,
-        isCenter: Boolean = true
+        rightLabel: String,
+        rightVal: String,
+        leftSpannedText: String,
+        bg: String?,
+        colWidths: List<Int>,
+        underlineLeft: Boolean = false,
+        rightValSz: Int = FONT_SIZE_HALF_PT
     ) {
+        val leftWidth = colWidths[2] + colWidths[3]
         sb.append("      <w:tr>\n")
+        appendCell(sb, rightLabel, widthDxa = colWidths[0], bgHex = bg, bold = true, isCenter = true)
+        appendCell(sb, rightVal, widthDxa = colWidths[1], bgHex = bg, bold = true, isCenter = true, sz = rightValSz)
         sb.append("        <w:tc>\n")
         sb.append("          <w:tcPr>\n")
-        sb.append("            <w:tcW w:w=\"11106\" w:type=\"dxa\"/>\n")
+        sb.append("            <w:tcW w:w=\"$leftWidth\" w:type=\"dxa\"/>\n")
         sb.append("            <w:gridSpan w:val=\"2\"/>\n")
         sb.append("            <w:vAlign w:val=\"center\"/>\n")
         if (bg != null) {
             sb.append("            <w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"$bg\"/>\n")
         }
+        sb.append("            <w:tcMar><w:top w:w=\"20\" w:type=\"dxa\"/><w:bottom w:w=\"20\" w:type=\"dxa\"/><w:left w:w=\"60\" w:type=\"dxa\"/><w:right w:w=\"60\" w:type=\"dxa\"/></w:tcMar>\n")
         sb.append("          </w:tcPr>\n")
-        appendParagraph(sb, text, isCenter = isCenter, bold = bold)
+        if (underlineLeft) {
+            appendUnderlinedParagraph(sb, leftSpannedText, "", isCenter = true)
+        } else {
+            appendParagraph(sb, leftSpannedText, isCenter = true, bold = true)
+        }
         sb.append("        </w:tc>\n")
         sb.append("      </w:tr>\n")
     }
 
     private fun appendStagesTable(sb: StringBuilder, plan: JadhadhaPlan) {
-        // Table columns in RTL visual order (<w:bidiVisual/> places column 0 on far right and column 3 on far left):
-        // المراحل (15%) | أنشطة الأستاذ (35%) | أنشطة المتعلم (35%) | التقويم (15%)
-        // 15% = 1666 dxa, 35% = 3887 dxa, 35% = 3887 dxa, 15% = 1666 dxa (Total: 11106 dxa)
-        val colWidths = listOf(1666, 3887, 3887, 1666)
+        when (plan.componentType) {
+            PedagogicalComponent.READING -> {
+                val colWidths = MAIN_TABLE_COL_WIDTHS
+                val borders = buildMainTableBorders()
 
-        val borders = """<w:tblBorders>
-      <w:top w:val="single" w:sz="8" w:space="0" w:color="$BORDER_COLOR_HEX"/>
-      <w:left w:val="single" w:sz="8" w:space="0" w:color="$BORDER_COLOR_HEX"/>
-      <w:bottom w:val="single" w:sz="8" w:space="0" w:color="$BORDER_COLOR_HEX"/>
-      <w:right w:val="single" w:sz="8" w:space="0" w:color="$BORDER_COLOR_HEX"/>
-      <w:insideH w:val="single" w:sz="4" w:space="0" w:color="8FAADC"/>
-      <w:insideV w:val="single" w:sz="4" w:space="0" w:color="8FAADC"/>
-    </w:tblBorders>"""
+                sb.append("""
+    <w:tbl>
+      <w:tblPr>
+        <w:tblW w:w="11106" w:type="dxa"/>
+        <w:jc w:val="center"/>
+        <w:bidiVisual/>
+        $borders
+      </w:tblPr>
+      <w:tblGrid>
+""")
+                colWidths.forEach { w -> sb.append("        <w:gridCol w:w=\"$w\"/>\n") }
+                sb.append("      </w:tblGrid>\n")
+
+                // Session 1 Banner Row + 5-column Header Row
+                appendSessionBanner(sb, "الحصة الأولى: تأطير النص والقراءة التوجيهية", pageBreak = false)
+                appendMainTableHeaderRow(sb, colWidths, stageColLabel = "المقاطع")
+
+                val session1Keys = listOf("diagnostic", "observation", "comprehension")
+                session1Keys.forEach { key ->
+                    appendStageRow(sb, key, plan, colWidths)
+                }
+
+                // Session 2 Banner Row
+                appendSessionBanner(sb, "الحصة الثانية: القراءة التحليلية والتركيبية", pageBreak = true)
+                appendMainTableHeaderRow(sb, colWidths, stageColLabel = "مقاطع الدرس", evalColLabel = "تقويم ودعم")
+
+                if (plan.stages.containsKey("session2_intro")) {
+                    appendStageRow(sb, "session2_intro", plan, colWidths)
+                }
+                val session2Keys = listOf("analysis", "synthesis", "investment")
+                session2Keys.forEach { key ->
+                    appendStageRow(sb, key, plan, colWidths)
+                }
+
+                sb.append("    </w:tbl>\n")
+            }
+
+            PedagogicalComponent.LANGUAGE -> {
+                val langKeys = buildList {
+                    add("lang_diagnostic")
+                    add("lang_observation")
+                    if (plan.stages.containsKey("lang_analysis") &&
+                        plan.stages["lang_analysis"] != plan.stages["lang_observation"]
+                    ) {
+                        add("lang_analysis")
+                    }
+                    add("lang_synthesis")
+                    add("lang_application")
+                }
+                appendStagesTableForKeys(sb, plan, langKeys, stageHeaderLabel = "المراحل")
+            }
+
+            PedagogicalComponent.EXPRESSION -> {
+                appendExpressionFourSessionTables(sb, plan)
+            }
+        }
+    }
+
+    private fun appendStagesTableForKeys(
+        sb: StringBuilder,
+        plan: JadhadhaPlan,
+        stageKeys: List<String>,
+        stageHeaderLabel: String = "المراحل"
+    ) {
+        val colWidths = MAIN_TABLE_COL_WIDTHS
+        val borders = buildMainTableBorders()
 
         sb.append("""
     <w:tbl>
@@ -462,13 +725,37 @@ object DocxGenerator {
         colWidths.forEach { w -> sb.append("        <w:gridCol w:w=\"$w\"/>\n") }
         sb.append("      </w:tblGrid>\n")
 
-        // Table Header Row (Very light grey #F3F4F6 with black text #000000 for print clarity)
+        appendMainTableHeaderRow(sb, colWidths, stageColLabel = stageHeaderLabel)
+
+        stageKeys.forEach { key ->
+            appendStageRow(sb, key, plan, colWidths)
+        }
+
+        sb.append("    </w:tbl>\n")
+    }
+
+    private fun buildMainTableBorders(): String = """<w:tblBorders>
+      <w:top w:val="single" w:sz="8" w:space="0" w:color="$BORDER_COLOR_HEX"/>
+      <w:left w:val="single" w:sz="8" w:space="0" w:color="$BORDER_COLOR_HEX"/>
+      <w:bottom w:val="single" w:sz="8" w:space="0" w:color="$BORDER_COLOR_HEX"/>
+      <w:right w:val="single" w:sz="8" w:space="0" w:color="$BORDER_COLOR_HEX"/>
+      <w:insideH w:val="single" w:sz="4" w:space="0" w:color="$BORDER_COLOR_HEX"/>
+      <w:insideV w:val="single" w:sz="4" w:space="0" w:color="$BORDER_COLOR_HEX"/>
+    </w:tblBorders>"""
+
+    private fun appendMainTableHeaderRow(
+        sb: StringBuilder,
+        colWidths: List<Int>,
+        stageColLabel: String = "المراحل",
+        evalColLabel: String = "التقويم والدعم"
+    ) {
         sb.append("      <w:tr>\n")
         val headers = listOf(
-            "المراحل",
-            "أنشطة الأستاذ",
-            "أنشطة المتعلم",
-            "التقويم"
+            stageColLabel,
+            "القدرات والمهارات",
+            "الأنشطة التعليمية التعلمية",
+            "المحتوى",
+            evalColLabel
         )
         headers.forEachIndexed { idx, h ->
             appendCell(
@@ -482,51 +769,6 @@ object DocxGenerator {
             )
         }
         sb.append("      </w:tr>\n")
-
-        when (plan.componentType) {
-            PedagogicalComponent.READING -> {
-                val session1Keys = listOf("diagnostic", "observation", "comprehension")
-                session1Keys.forEach { key ->
-                    appendStageRow(sb, key, plan, colWidths)
-                }
-
-                appendSessionBanner(sb, "الحصة الثانية: القراءة التحليلية والتركيب والاستثمار", pageBreak = true)
-
-                val session2Keys = listOf("analysis", "synthesis", "investment")
-                session2Keys.forEach { key ->
-                    appendStageRow(sb, key, plan, colWidths)
-                }
-            }
-
-            PedagogicalComponent.LANGUAGE -> {
-                val langKeys = listOf(
-                    "lang_diagnostic",
-                    "lang_observation",
-                    "lang_analysis",
-                    "lang_synthesis",
-                    "lang_application"
-                )
-                langKeys.forEach { key ->
-                    appendStageRow(sb, key, plan, colWidths)
-                }
-            }
-
-            PedagogicalComponent.EXPRESSION -> {
-                appendSessionBanner(sb, "الحصة الأولى: أنشطة الاكتساب (التعريف بالمهارة وخطواتها)", pageBreak = false)
-                appendStageRow(sb, "insha_acquisition", plan, colWidths)
-
-                appendSessionBanner(sb, "الحصة الثانية: أنشطة التطبيق (التدرب على المهارة)", pageBreak = true)
-                appendStageRow(sb, "insha_application", plan, colWidths)
-
-                appendSessionBanner(sb, "الحصة الثالثة: أنشطة الإنتاج والربط (التحرير في مسودة)", pageBreak = true)
-                appendStageRow(sb, "insha_production", plan, colWidths)
-
-                appendSessionBanner(sb, "الحصة الرابعة: أنشطة التصحيح والدعم (شبكة التقويم)", pageBreak = true)
-                appendStageRow(sb, "insha_correction", plan, colWidths)
-            }
-        }
-
-        sb.append("    </w:tbl>\n")
     }
 
     private fun appendSessionBanner(sb: StringBuilder, title: String, pageBreak: Boolean) {
@@ -534,7 +776,7 @@ object DocxGenerator {
         sb.append("        <w:tc>\n")
         sb.append("          <w:tcPr>\n")
         sb.append("            <w:tcW w:w=\"11106\" w:type=\"dxa\"/>\n")
-        sb.append("            <w:gridSpan w:val=\"4\"/>\n")
+        sb.append("            <w:gridSpan w:val=\"5\"/>\n")
         sb.append("            <w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"$HEADER_BG_HEX\"/>\n")
         sb.append("          </w:tcPr>\n")
         sb.append("          <w:p>\n")
@@ -564,42 +806,49 @@ object DocxGenerator {
 
     private fun appendStageRow(sb: StringBuilder, key: String, plan: JadhadhaPlan, widths: List<Int>) {
         val stageMeta = StageCatalog.getByKey(key)
-        val stageTitle = stageMeta?.title ?: key
+        val stageTitle = when (key) {
+            "lang_analysis" -> "الوصف والتحليل"
+            "insha_acquisition" -> "حصة الاكتساب"
+            "insha_application" -> "حصة التطبيق"
+            "insha_production" -> "حصة الإنتاج"
+            "insha_correction" -> "حصة التصحيح"
+            else -> stageMeta?.title ?: key
+        }
         val data = plan.stages[key] ?: com.example.model.StageData()
 
         sb.append("      <w:tr>\n")
 
-        // 1. المراحل (15%, far right)
-        appendCell(sb, stageTitle, widths[0], bgHex = STAGE_BG_HEX, textColorHex = "000000", bold = true, isCenter = true)
+        // 1. المراحل / المقاطع (12% = 1333 dxa, far right)
+        appendCell(sb, stageTitle, widths[0], bgHex = null, textColorHex = "000000", bold = true, isCenter = true)
 
-        // 2. أنشطة الأستاذ (35%, includes target abilities + teacher activities)
-        val teacherLines = buildList {
-            if (data.abil.isNotEmpty()) {
-                add("القدرات المستهدفة:")
-                addAll(data.abil.map { formatItem(it, "- ") })
-            }
-            if (data.teacher.isNotEmpty()) {
-                if (data.abil.isNotEmpty()) {
-                    add("أنشطة الأستاذ:")
-                }
-                addAll(data.teacher.map { formatItem(it, "+ ") })
-            }
-        }
-        appendCellWithLines(sb, teacherLines, widths[1], isCenter = true)
+        // 2. القدرات والمهارات (18% = 1999 dxa)
+        val abilItems = data.abil.map { formatItem(it, "- ") }
+        appendCellWithLines(sb, abilItems, widths[1], isCenter = true)
 
-        // 3. أنشطة المتعلم (35%, supports underlined labels AND nested [جدول: ...] analytical tables)
-        appendContentCell(sb, data.content, widths[2])
+        // 3. الأنشطة التعليمية التعلمية (25% = 2776 dxa)
+        val teacherItems = data.teacher.map { formatItem(it, "- ") }
+        appendCellWithLines(sb, teacherItems, widths[2], isCenter = true)
 
-        // 4. التقويم (15%, far left)
+        // 4. المحتوى (30% = 3332 dxa, supports underlined labels AND nested [جدول: ...] analytical tables)
+        appendContentCell(sb, data.content, widths[3])
+
+        // 5. التقويم والدعم (15% = 1666 dxa, far left)
         val evalItems = data.eval.map { formatItem(it, "+ ") }
-        appendCellWithLines(sb, evalItems, widths[3], isCenter = true)
+        appendCellWithLines(sb, evalItems, widths[4], isCenter = true)
 
         sb.append("      </w:tr>\n")
     }
 
     private fun formatItem(text: String, defaultPrefix: String): String {
-        val cleaned = text.trim().removePrefix("+ ").removePrefix("- ").removePrefix("• ").trim()
-        return if (cleaned.startsWith("-") || cleaned.startsWith("+")) cleaned else "$defaultPrefix$cleaned"
+        val cleaned = text.trim()
+        if (cleaned.isEmpty()) return ""
+        if (cleaned.startsWith("-") || cleaned.startsWith("+") || cleaned.startsWith("*") ||
+            Regex("^\\d+[-–.)]").containsMatchIn(cleaned) ||
+            Regex("^[أبجدهوز][-–.)]").containsMatchIn(cleaned)
+        ) {
+            return cleaned
+        }
+        return "$defaultPrefix$cleaned"
     }
 
     private fun appendCell(
@@ -671,7 +920,7 @@ object DocxGenerator {
 
             fun flushNestedTable() {
                 if (pendingTableRows.isNotEmpty()) {
-                    appendNestedWordTable(sb, pendingTableRows, widthDxa - 160)
+                    appendNestedWordTable(sb, pendingTableRows, widthDxa - 120)
                     pendingTableRows.clear()
                 }
             }
@@ -688,16 +937,14 @@ object DocxGenerator {
                     }
                 } else {
                     flushNestedTable()
-                    val cleanLine = trimmed.removePrefix("- ").removePrefix("• ").trim()
+                    val cleanLine = trimmed.replace("<u>", "").replace("</u>", "").trim()
                     val colonIdx = cleanLine.indexOf(':')
                     if (colonIdx in 1..45 && !cleanLine.startsWith("http")) {
-                        val label = cleanLine.substring(0, colonIdx + 1).replace("<u>", "").replace("</u>", "").trim()
-                        val rest = cleanLine.substring(colonIdx + 1).replace("<u>", "").replace("</u>", "").trim()
+                        val label = cleanLine.substring(0, colonIdx + 1).trim()
+                        val rest = cleanLine.substring(colonIdx + 1).trim()
                         appendUnderlinedParagraph(sb, label, rest, isCenter = true)
                     } else {
-                        val cleanNoTags = cleanLine.replace("<u>", "").replace("</u>", "").trim()
-                        val contentText = if (cleanNoTags.startsWith("-")) cleanNoTags else "- $cleanNoTags"
-                        appendParagraph(sb, contentText, isCenter = true, bold = true)
+                        appendParagraph(sb, cleanLine, isCenter = true, bold = true)
                     }
                 }
             }
@@ -711,7 +958,7 @@ object DocxGenerator {
     }
 
     /**
-     * Renders a real nested <w:tbl> inside the المحتوى cell (matching make_table in build_jadhadha.py).
+     * Renders a real nested <w:tbl> inside the المحتوى cell (e.g. جدول اسم الفاعل وصيغ المبالغة or شبكة تشخيص الأخطاء).
      */
     private fun appendNestedWordTable(
         sb: StringBuilder,
@@ -836,4 +1083,3 @@ object DocxGenerator {
         sb.append("          </w:p>\n")
     }
 }
-

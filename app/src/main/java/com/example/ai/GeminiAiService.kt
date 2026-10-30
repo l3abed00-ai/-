@@ -379,6 +379,9 @@ object GeminiAiService {
                 sources = newSources
             )
         }
+        if (comp == PedagogicalComponent.LANGUAGE) {
+            mutableStages["lang_observation"]?.let { mutableStages["lang_analysis"] = it }
+        }
 
         // 3. Recompute StageSourceCount per stage
         val updatedCounts = mutableMapOf<String, StageSourceCount>()
@@ -441,10 +444,11 @@ object GeminiAiService {
         val clean = rawLine.removePrefix("+").removePrefix("-").removePrefix("•").trim()
         if (clean.length < 3) return null
 
-        // Skip pure metadata or noise lines
+        // Skip pure metadata or noise lines or standalone durations/segments
         if (clean.startsWith("الأستاذ") || clean.startsWith("المؤسسة") ||
             clean.startsWith("السنة الدراسية") || clean.startsWith("المديرية") ||
-            clean.startsWith("الأكاديمية")
+            clean.startsWith("الأكاديمية") ||
+            com.example.extractor.JadhadhaParser.isDurationOrSegmentNoise(clean)
         ) {
             return null
         }
@@ -454,10 +458,13 @@ object GeminiAiService {
             clean.startsWith("[جدول:") -> "content"
             clean.startsWith("القدرة على") || clean.startsWith("أن يتمكن") ||
                 clean.startsWith("أن يتعرف") || clean.startsWith("أن يوظف") ||
-                clean.startsWith("أن يميز") || clean.startsWith("أن يصوغ") -> "abil"
+                clean.startsWith("أن يميز") || clean.startsWith("أن يصوغ") ||
+                clean.startsWith("مهارة ") || clean.startsWith("تذكير ب") ||
+                clean.startsWith("استحضار مكتسبات") -> "abil"
             clean.startsWith("تقويم") || clean.startsWith("دعم") ||
                 clean.contains("تقويم تشخيصي") || clean.contains("تقويم تكويني") ||
-                clean.contains("تقويم إجمالي") || clean.startsWith("مراقبة") -> "eval"
+                clean.contains("تقويم إجمالي") || clean.startsWith("مراقبة") ||
+                clean.startsWith("اختبار قدرة") || clean.startsWith("رصد قدرة") -> "eval"
             rawLine.trim().startsWith("+") ||
                 clean.startsWith("يتأملون") || clean.startsWith("يصفون") ||
                 clean.startsWith("يلاحظون") || clean.startsWith("يستنتجون") ||
@@ -468,6 +475,7 @@ object GeminiAiService {
                 clean.startsWith("يناقش") || clean.startsWith("يدون") ||
                 clean.startsWith("يرسم") || clean.startsWith("يطالب") ||
                 clean.startsWith("يكلف") || clean.startsWith("يقدم") ||
+                clean.startsWith("يستدرج") || clean.startsWith("يسطر") ||
                 clean.startsWith("يساعد") -> "teacher"
             else -> "content"
         }
@@ -478,13 +486,11 @@ object GeminiAiService {
                 clean.contains("تمهيد") || clean.contains("تشخيص") || clean.contains("الدرس السابق") || clean.contains("يستحضرون") ->
                     "lang_diagnostic"
                 clean.contains("الأمثلة") || clean.contains("الشواهد") || clean.contains("المجموعة") ||
-                    clean.startsWith("يتأملون") || clean.startsWith("يلاحظون") ->
-                    "lang_observation"
-                clean.startsWith("[جدول:") || clean.contains("الظاهرة اللغوية") || clean.contains("متغيراتها") ||
+                    clean.startsWith("يتأملون") || clean.startsWith("يلاحظون") ||
+                    clean.startsWith("[جدول:") || clean.contains("الظاهرة اللغوية") || clean.contains("متغيراتها") ||
                     clean.startsWith("يصفون") || clean.contains("وزنه") || clean.contains("صياغت") ||
-                    clean.contains("مفعل") || clean.contains("مفعل") || clean.contains("الجدول") ||
-                    clean.contains("تحليل") ->
-                    "lang_analysis"
+                    clean.contains("مفعل") || clean.contains("الجدول") || clean.contains("تحليل") ->
+                    "lang_observation"
                 clean.contains("القاعدة") || clean.contains("الاستنتاج") || clean.startsWith("يستنتجون") ||
                     clean.contains("يصوغ") || clean.contains("يدل على زمان") || clean.contains("يدل على مكان") ->
                     "lang_synthesis"
@@ -493,29 +499,35 @@ object GeminiAiService {
                     clean.startsWith("يطبقون") ->
                     "lang_application"
                 else -> {
-                    // Prefer a stage where this field is still DEFAULT, especially lang_analysis
                     stageKeys.firstOrNull { k ->
                         currentStages[k]?.sourceFor(field) == FieldSource.DEFAULT
-                    } ?: "lang_analysis"
+                    } ?: "lang_observation"
                 }
             }
 
             PedagogicalComponent.READING -> when {
+                clean.contains("الحصة السابقة") || clean.contains("استرجاع مكتسبات ح") -> "session2_intro"
                 clean.contains("تمهيد") || clean.contains("تشخيص") || clean.contains("الدرس السابق") -> "diagnostic"
                 clean.contains("العنوان") || clean.contains("العتبات") || clean.contains("فرضيات") || clean.contains("صاحب النص") || clean.contains("تأطير") -> "observation"
                 clean.contains("الفكرة العامة") || clean.contains("الأفكار الأساسية") || clean.contains("الشرح") || clean.contains("المفردات") || clean.contains("قراءة") -> "comprehension"
-                clean.contains("الحقول") || clean.contains("المعجم") || clean.contains("الأساليب") || clean.contains("القيم") || clean.contains("تحليل") || clean.startsWith("[جدول:") -> "analysis"
+                clean.contains("الحقول") || clean.contains("المعجم") || clean.contains("الأساليب") || clean.contains("القيم") || clean.contains("تحليل") || clean.contains("شخصيات") || clean.contains("أحداث") || clean.startsWith("[جدول:") -> "analysis"
                 clean.contains("تركيب") || clean.contains("خلاصة") -> "synthesis"
                 clean.contains("استثمار") || clean.contains("امتداد") || clean.contains("ابحث") -> "investment"
                 else -> stageKeys.firstOrNull { k -> currentStages[k]?.sourceFor(field) == FieldSource.DEFAULT } ?: "analysis"
             }
 
             PedagogicalComponent.EXPRESSION -> when {
-                clean.contains("اكتساب") || clean.contains("تعريف المهارة") || clean.contains("نص الانطلاق") -> "insha_acquisition"
-                clean.contains("تطبيق") || clean.contains("التدرب") -> "insha_application"
-                clean.contains("إنتاج") || clean.contains("مسودة") || clean.contains("تحرير فردي") -> "insha_production"
-                clean.contains("تصحيح") || clean.contains("شبكة التقويم") || clean.contains("الأخطاء") -> "insha_correction"
-                else -> stageKeys.firstOrNull { k -> currentStages[k]?.sourceFor(field) == FieldSource.DEFAULT } ?: "insha_acquisition"
+                clean.contains("تشخيص أخطاء") || clean.contains("شبكة تشخيص") || clean.startsWith("[جدول:") -> "insha_corr_diagnosis"
+                clean.contains("التصحيح الفردي") || clean.contains("أوراق التحرير") || clean.contains("تثبيت إملائي") -> "insha_corr_support"
+                clean.contains("نص الانطلاق") || clean.contains("قراءة النص وفهمه") -> "insha_acq_reading"
+                clean.contains("عناصر المهارة") || clean.contains("الخطوات الإجرائية") -> "insha_acq_elements"
+                clean.contains("تعريف اليوميات") || clean.contains("الاستنتاج") -> "insha_acq_synthesis"
+                clean.contains("تقديم الموضوع") && clean.contains("إنتاج") -> "insha_prod_presentation"
+                clean.contains("تقديم الموضوع") -> "insha_app_presentation"
+                clean.contains("مسودة") || clean.contains("تحرير فردي") || clean.contains("إنتاج") -> "insha_prod_execution"
+                clean.contains("تطبيق") || clean.contains("التدرب") -> "insha_app_execution"
+                clean.contains("تصحيح") -> "insha_app_correction"
+                else -> stageKeys.firstOrNull { k -> currentStages[k]?.sourceFor(field) == FieldSource.DEFAULT } ?: "insha_acq_elements"
             }
         }
 
@@ -598,27 +610,24 @@ object GeminiAiService {
         val stagesMeta = StageCatalog.getStagesForComponent(component)
         val stagesSchema = stagesMeta.joinToString(",\n") { sm ->
             """    "${sm.key}": {
-      "abil": ["القدرات والأهداف المستهدفة الخاصة بـ ${sm.title}"],
-      "teacher": ["أنشطة المدرس وتوجيهاته الخاصة بـ ${sm.title}"],
+      "abil": ["القدرات والمهارات المستهدفة الخاصة بـ ${sm.title}"],
+      "teacher": ["الأنشطة التعليمية التعلمية الخاصة بـ ${sm.title}"],
       "learner": ["أنشطة المتعلم وإجاباته الخاصة بـ ${sm.title}"],
-      "content": ["المحتوى الديداكتيكي والمضامين والأمثلة الخاصة بـ ${sm.title}"],
+      "content": ["المحتوى والمضامين والأمثلة والجداول الفرعية الخاصة بـ ${sm.title}"],
       "eval": ["مؤشرات التقويم والدعم الخاصة بـ ${sm.title}"]
     }"""
         }
 
         return """
 أنت مفتش تربوي ومحلل بيداغوجي خبير في تدريس اللغة العربية بالتعليم الثانوي بالمغرب (نموذج $PRIMARY_MODEL).
-المهمة: تحليل النص الكامل المستخرج من ملف جذاذة درس (مكون: ${component.title}) وإرجاع كائن JSON مهيكل يوزع 100% من معلومات الجذاذة بدقة تامة على الترويسة ومراحل المكون النشط (المحتوى، أنشطة المدرس، أنشطة المتعلم، القدرات، التقويم) دون إسقاط أو حذف أي جملة أو جدول فرعي.
+المهمة: تحليل النص الكامل المستخرج من ملف جذاذة درس (مكون: ${component.title}) وإرجاع كائن JSON مهيكل يحول الجذاذة المصدرية (مهما كان عدد أعمدتها 9 أو 8 أو 4 أو 2 وبأي اتجاه) إلى القالب الرسمي ذي 5 أعمدة دون إسقاط أي جملة أو جدول فرعي.
 
-قواعد التوزيع الصارمة:
-1. عزل الترويسة: ضع بيانات الترويسة (الموضوع، الفئة المستهدفة/المستوى، الوحدة، المجال، المكون، الغلاف الزمني، الوسائل الديدكتيكية، الكفايات التواصلية والمنهجية والثقافية) في كائن "info" و"topic"، ولا تُدخلها في المراحل.
-2. عدم إسقاط أي جملة (100% حفظ للمحتوى): وزّع كل جملة أو فقرة أو مثال أو سؤال أو جدول تحليلي ورد في النص المستخرج على المرحلة والخليّة المناسبة له:
-   - "abil": القدرات المستهدفة والأهداف التعلمية.
-   - "teacher": أنشطة المدرس ومهامه وتوجيهاته وأسئلته.
-   - "learner": أنشطة المتعلم ومهامه وإجاباته.
-   - "content": المحتوى الديداكتيكي والمضامين والشواهد والأمثلة والاستنتاجات.
-   - "eval": التقويم والدعم ومؤشرات التقويم.
-3. التقسيم المرحلي الداخلي: إذا وردت عدة مراحل مدمجة في فقرة أو خلية واحدة (مثل التحليل والتركيب والاستثمار)، افصلها بدقة في مراحلها المستقلة المقابلة.
+قواعد التوزيع والتحويل الصارمة:
+1. عزل الترويسة: ضع بيانات الترويسة (الوحدة، المجال، المكون، الموضوع، مدة الإنجاز، المرجع، الأستاذ، الفئة المستهدفة، الوسائل التعليمية، المؤسسة، الكفايات التواصلية والمنهجية والمعرفية) في كائن "info" و"topic"، ولا تُدخلها في المراحل.
+2. تجاهل الحصيص الزمني والمقاطع الشكلية: احذف نهائياً أرقام الدقائق المنفردة (مثل: "5 د"، "10 د"، "15 د"، "20 د"، "35 د") وعبارات التقسيم الشكلي العام ("المقطع التمهيدي"، "المقطع الوسيطي"، "المقطع النهائي").
+3. في مكون الدرس اللغوي: ادمج مرحلتي "ملاحظة الأمثلة" و"الوصف والتحليل" في مرحلة واحدة هي "lang_observation" (ملاحظة الأمثلة ووصفها وتحليلها)، وضع فيها أمثلة المجموعات متبوعة بالجداول التحليلية بصيغة "[جدول: عمود1 | عمود2 | ...]" والاستنتاجات الجزئية.
+4. عدم إسقاط أي جملة (100% حفظ للمحتوى): وزّع كل جملة أو فقرة أو مثال أو سؤال أو جدول تحليلي أو جدول تشخيص أخطاء ورد في النص المستخرج على المرحلة والخليّة المناسبة له.
+5. لا تستعمل إطلاقاً أي وسوم HTML مثل <u> أو </u> أو <b> في النصوص.
 
 النص المستخرج من ملف الجذاذة:
 <<<
@@ -630,15 +639,18 @@ $rawText
   "topic": "$fallbackTopic",
   "component": "${component.id}",
   "info": {
-    "level": "الثالثة ثانوي إعدادي",
+    "level": "السنة الثالثة إعدادي",
     "unit": "الوحدة...",
     "domain": "المجال...",
     "component": "${component.title}",
     "duration": "${component.defaultDuration}",
     "materials": "${component.defaultMaterials}",
+    "reference": "المختار في اللغة العربية",
+    "teacherName": "محمد العابد",
+    "schoolName": "مدرسة أنوال (السلك الإعدادي)",
     "communicative": "الكفاية التواصلية...",
     "methodological": "الكفاية المنهجية...",
-    "cultural": "الكفاية الثقافية..."
+    "cultural": "الكفاية المعرفية..."
   },
   "stages": {
 $stagesSchema
@@ -789,7 +801,7 @@ $stagesSchema
     suspend fun suggestObjectivesForTopic(
         topic: String,
         component: PedagogicalComponent = PedagogicalComponent.READING,
-        level: String = "الثالثة ثانوي إعدادي",
+        level: String = "السنة الثالثة إعدادي",
         customKey: String? = null
     ): Result<SuggestedObjectives> = withContext(Dispatchers.IO) {
         val cleanTopic = topic.trim().ifBlank { "درس تطبيقي" }
@@ -860,28 +872,28 @@ $stagesTemplate
         val stagesKeys = StageCatalog.getStagesForComponent(component).map { it.key }
         val stagesGuide = when (component) {
             PedagogicalComponent.READING -> """
-المراحل الست الإلزامية لمكون النصوص القرائية:
-1. diagnostic (تشخيص المكتسبات والتمهيد)
-2. observation (ملاحظة النص وتأطيره)
-3. comprehension (فهم النص)
-4. analysis (القراءة التحليلية)
-5. synthesis (التركيب)
-6. investment (الاستثمار والامتداد)
+المراحل السبع الإلزامية لمكون النصوص القرائية (على حصتين):
+1. diagnostic (تشخيص المكتسبات - الحصة الأولى)
+2. observation (ملاحظة النص - الحصة الأولى)
+3. comprehension (فهم النص - الحصة الأولى)
+4. session2_intro (تمهيد - بداية الحصة الثانية)
+5. analysis (القراءة التحليلية - الحصة الثانية)
+6. synthesis (التركيب - الحصة الثانية)
+7. investment (الاستثمار - الحصة الثانية)
 """
             PedagogicalComponent.LANGUAGE -> """
-المراحل الخمس الإلزامية لمكون الدرس اللغوي:
-1. lang_diagnostic (التقويم التشخيصي والتمهيد)
-2. lang_observation (ملاحظة الظاهرة اللغوية وعزلها)
-3. lang_analysis (الوصف والتحليل والجدول التحليلي)
-4. lang_synthesis (الاستنتاج والقاعدة التركيبية)
-5. lang_application (التطبيقات والتقويم الإجمالي)
+المراحل الأربع الإلزامية لمكون الدرس اللغوي:
+1. lang_diagnostic (تقويم تشخيصي)
+2. lang_observation (ملاحظة الأمثلة ووصفها وتحليلها - تتضمن أمثلة المجموعات والجدول التحليلي [جدول: ...] والاستنتاج الجزئي)
+3. lang_synthesis (الاستنتاج - القاعدة العامة ونموذج من الإعراب)
+4. lang_application (تطبيق)
 """
             PedagogicalComponent.EXPRESSION -> """
-الحصص الأربع الإلزامية لمكون التعبير والإنشاء:
-1. insha_acquisition (الحصة الأولى: أنشطة الاكتساب - التعريف بالمهارة وإجراءاتها)
-2. insha_application (الحصة الثانية: أنشطة التطبيق - التدرب على المهارة)
-3. insha_production (الحصة الثالثة: أنشطة الإنتاج والربط - التصميم والتحرير في مسودة)
-4. insha_correction (الحصة الرابعة: أنشطة التصحيح والدعم - شبكة التقويم الذاتي)
+المراحل الفرعية الـ 16 الموزعة على الحصص الأربع لمكون التعبير والإنشاء:
+- الحصة 1 (الاكتساب): insha_acq_diagnostic، insha_acq_reading، insha_acq_elements، insha_acq_synthesis، insha_acq_investment
+- الحصة 2 (التطبيق): insha_app_diagnostic، insha_app_presentation، insha_app_execution، insha_app_correction
+- الحصة 3 (الإنتاج): insha_prod_diagnostic، insha_prod_presentation، insha_prod_execution، insha_prod_correction
+- الحصة 4 (التصحيح): insha_corr_diagnostic، insha_corr_diagnosis (تتضمن جدول شبكة تشخيص الأخطاء [جدول: الخطأ | نوعه | الصواب | القاعدة الضابطة / التعليل المنهجي])، insha_corr_support
 """
         }
 
@@ -891,15 +903,18 @@ $stagesTemplate
   "topic": "$topic",
   "component": "${component.id}",
   "info": {
-    "level": "الثالثة ثانوي إعدادي",
+    "level": "السنة الثالثة إعدادي",
     "unit": "اسم الوحدة",
     "domain": "اسم المجال",
     "component": "${component.title}",
     "duration": "${component.defaultDuration}",
     "materials": "${component.defaultMaterials}",
+    "reference": "المختار في اللغة العربية",
+    "teacherName": "محمد العابد",
+    "schoolName": "مدرسة أنوال (السلك الإعدادي)",
     "communicative": "صياغة الكفاية التواصلية",
     "methodological": "صياغة الكفاية المنهجية",
-    "cultural": "صياغة الكفاية الثقافية / المعرفية"
+    "cultural": "صياغة الكفاية المعرفية"
   },
   "stages": {
 ${stagesKeys.joinToString(",\n") { "    \"$it\": { \"eval\": [\"...\"], \"content\": [\"...\"], \"teacher\": [\"...\"], \"abil\": [\"...\"] }" }}
@@ -908,8 +923,8 @@ ${stagesKeys.joinToString(",\n") { "    \"$it\": { \"eval\": [\"...\"], \"conten
 $stagesGuide
 قواعد الصياغة البيداغوجية:
 - كل عنصر في teacher يبدأ بفعل مضارع للمدرس (يطرح، يوجه، يناقش، يحفز...).
-- كل عنصر في abil يبدأ بـ «القدرة على...».
-- في content: استعمل «<u>العنوان:</u> تفصيل» عند العناوين الفرعية، أو «- تفصيل» للبنود.
+- كل عنصر في abil يبدأ بـ «القدرة على...» أو «مهارة...».
+- في content: لا تستعمل وسوم HTML مثل <u> أو <b> إطلاقاً؛ استعمل «العنوان: تفصيل» أو «[جدول: عمود1 | عمود2 | ...]» للجداول الفرعية.
 """
         )
         return sb.toString()
@@ -1086,6 +1101,9 @@ $stagesGuide
             component = infoObj.optString("component", component.title).ifBlank { component.title },
             duration = infoObj.optString("duration", component.defaultDuration).ifBlank { component.defaultDuration },
             materials = infoObj.optString("materials", component.defaultMaterials).ifBlank { component.defaultMaterials },
+            reference = infoObj.optString("reference", fallbackPlan.info.reference).ifBlank { fallbackPlan.info.reference },
+            teacherName = infoObj.optString("teacherName", fallbackPlan.info.teacherName).ifBlank { fallbackPlan.info.teacherName },
+            schoolName = infoObj.optString("schoolName", fallbackPlan.info.schoolName).ifBlank { fallbackPlan.info.schoolName },
             communicativeComp = infoObj.optString("communicative", fallbackPlan.info.communicativeComp).ifBlank { fallbackPlan.info.communicativeComp },
             methodologicalComp = infoObj.optString("methodological", fallbackPlan.info.methodologicalComp).ifBlank { fallbackPlan.info.methodologicalComp },
             culturalComp = infoObj.optString("cultural", fallbackPlan.info.culturalComp).ifBlank { fallbackPlan.info.culturalComp }
@@ -1150,15 +1168,18 @@ $stagesGuide
             ?: "خاتمة النص الدالة على أبعاد «$cleanTopic»..."
 
         val (unitName, domainName) = inferDomainAndUnit(cleanTopic, cleanText)
-        val objectives = synthesizeSmartObjectives(cleanTopic, component, "الثالثة ثانوي إعدادي")
+        val objectives = synthesizeSmartObjectives(cleanTopic, component, "السنة الثالثة إعدادي")
 
         val info = JadhadhaInfo(
-            level = "الثالثة ثانوي إعدادي",
+            level = "السنة الثالثة إعدادي",
             unit = unitName,
             domain = domainName,
             component = component.title,
             duration = component.defaultDuration,
             materials = component.defaultMaterials,
+            reference = "المختار في اللغة العربية",
+            teacherName = "محمد العابد",
+            schoolName = "مدرسة أنوال (السلك الإعدادي)",
             communicativeComp = objectives.communicativeComp,
             methodologicalComp = objectives.methodologicalComp,
             culturalComp = objectives.culturalComp
@@ -1168,305 +1189,372 @@ $stagesGuide
             PedagogicalComponent.READING -> mapOf(
                 "diagnostic" to StageData(
                     abil = listOf(
-                        "القدرة على استحضار المكتسبات القبلية وربطها بموضوع «$cleanTopic».",
-                        "القدرة على الانخراط الذهني والوجداني في أفق الدرس القرائي الجديد."
+                        "قدرة التلاميذ على استحضار مكتسباتهم السابقة التي تخدم الدرس قيد الإنجاز «$cleanTopic»."
                     ),
                     teacher = listOf(
-                        "يطرح أسئلة تشخيصية لاستحضار مكتسبات المتعلمين حول $domainName.",
-                        "يمهد لموضوع الدرس «$cleanTopic» بوضعية انطلاق محفزة تثير اهتمام المتعلمين."
+                        "- ماذا تعرف عن السياق المرتبط بـ $domainName؟",
+                        "- يمهد لموضوع الدرس «$cleanTopic» بأسئلة تشخيصية تثير اهتمام المتعلمين."
                     ),
                     content = listOf(
-                        "<u>أسئلة التمهيد والتشخيص:</u>",
-                        "- ما هي أبرز القضايا التي تعرفنا عليها في الدرس السابق ضمن $domainName؟",
-                        "- ماذا يمثل لكم مفهوم «$cleanTopic» في واقعنا المعيش والثقافي؟",
-                        "- كيف تسهم النصوص الأدبية والفكرية في معالجة قضايا «$cleanTopic»؟"
+                        "معطيات تمهيدية مرتبطة بـ $domainName وموضوع «$cleanTopic»."
                     ),
                     eval = listOf(
-                        "تقويم تشخيصي: قياس مدى استعداد المتعلمين وتفاعلهم مع أسئلة التمهيد.",
-                        "رصد التمثلات الأولية للمتعلمين حول موضوع «$cleanTopic»."
+                        "يدعم الأستاذ جوانب التعثر بتوضيح السياق، ويعزز الإجابات السليمة."
                     )
                 ),
                 "observation" to StageData(
                     abil = listOf(
-                        "القدرة على ملاحظة العتبات النصية والمؤشرات الدالة لتأطير نص «$cleanTopic».",
-                        "القدرة على صياغة فرضيات القراءة انطلاقاً من العنوان وبداية النص ونهايته."
+                        "- مهارة الملاحظة.",
+                        "- القدرة على استخراج القرائن والمؤشرات المساعدة على صياغة الفرضية.",
+                        "- القدرة على صياغة فرضية القراءة.",
+                        "- مهارة التعبير."
                     ),
                     teacher = listOf(
-                        "يوجه المتعلمين إلى ملاحظة العنوان «$cleanTopic» والعتبات الموازية للنص.",
-                        "يدرب المتعلمين على تأطير النص (نوعيته، مجاله، مصدره) وبناء فرضيات القراءة."
+                        "1- الملاحظة والتأطير:",
+                        "+ من هو صاحب النص؟ وما مصدره؟ وما نوعيته؟",
+                        "+ مما يتركب العنوان «$cleanTopic»؟ وبما يشي؟",
+                        "+ اقرأ بداية النص ونهايته ودون استنتاجك.",
+                        "2- الفرضية:",
+                        "+ انطلاقا من العناصر السابق الوقوف عليها صغ فرضية للنص."
                     ),
                     content = listOf(
-                        "<u>أولاً: ملاحظة العتبات:</u>",
-                        "- <u>دراسة العنوان («$cleanTopic»):</u> تركيبياً: مركب دال يختزل بؤرة النص، ودلالياً: يوحي بأبعاد موضوع «$cleanTopic» وتجلياته.",
-                        "- <u>بداية النص ونهايته:</u> تشير البداية («$openingSnippet») والنهاية («$closingSnippet») إلى تطور الرؤية الفكرية والوجدانية في النص.",
-                        "<u>ثانياً: تأطير النص:</u>",
-                        "- <u>نوعية النص:</u> نص قرائي وظيفي / أدبي ذو بعد توجيهي وإنساني.",
-                        "- <u>مجال النص:</u> يندرج ضمن $domainName ($unitName).",
-                        "<u>ثالثاً: فرضيات القراءة:</u>",
-                        "- نفترض أن النص سيعالج أبعاد ومظاهر «$cleanTopic» ويبرز قيمه وآثاره."
+                        "1- الملاحظة والتأطير:",
+                        "- العنوان («$cleanTopic»): تركيبيا مركب دال يختزل بؤرة النص، ودلاليا يوحي بأبعاد موضوع «$cleanTopic» وتجلياته.",
+                        "- بداية النص ونهايته: تشير البداية («$openingSnippet») والنهاية («$closingSnippet») إلى تطور الرؤية الفكرية والوجدانية في النص.",
+                        "- نوعية النص: نص قرائي يندرج ضمن $domainName ($unitName).",
+                        "2- الفرضية: نفترض أن الموضوع يتناول أبعاد ومظاهر «$cleanTopic» ويبرز قيمه وآثاره."
                     ),
                     eval = listOf(
-                        "تقويم تكويني: مدى توفق المتعلمين في التقاط المؤشرات الدالة وصياغة فرضيات ملائمة.",
-                        "تصويب تعثرات المتعلمين في التحليل التركيبي والدلالي للعنوان."
+                        "+ تصحيح إجابات المتعلمين، وتدعيمها.",
+                        "+ كل الفرضيات مقبولة شرط تمحيصها."
                     )
                 ),
                 "comprehension" to StageData(
                     abil = listOf(
-                        "القدرة على قراءة نص «$cleanTopic» قراءة جهرية سليمة ومعبرة.",
-                        "القدرة على شرح المفردات السياقية واستخلاص الفكرة العامة والأفكار الأساسية."
+                        "+ مهارة القراءة الفاحصة.",
+                        "+ التمكن من فهم النص القرائي في سياقه العام.",
+                        "+ إثراء الرصيد المعجمي.",
+                        "+ مهارة تفكيك النص إلى مقاطع.",
+                        "+ قدرة التلاميذ على صياغة الفكرة العامة للنص."
                     ),
                     teacher = listOf(
-                        "يقرأ النص قراءة نموذجية متأنية تراعي مخارج الحروف وعلامات الترقيم.",
-                        "يتخلل القراءات الفردية بشرح المفردات الصعبة وتذليل صعوبات الفهم ومناقشة المضامين."
+                        "- القراءة النموذجية للنص.",
+                        "- القراءة التناوبية للمتعلمين.",
+                        "- إضاءة النص وتذليل المعجم.",
+                        "- استدراج المتعلمين لاستخلاص المضمون بالأسئلة.",
+                        "+ مما سبق استخلص الأفكار الأساسية والمضمون العام للنص."
                     ),
                     content = listOf(
-                        "<u>أولاً: الإيضاحات اللغوية:</u>",
-                        "- شرح المفردات والتعابير في سياقها التداولي داخل نص «$cleanTopic».",
-                        "<u>ثانياً: الفكرة العامة للنص:</u>",
-                        "- إبراز الكاتب لمفهوم وأبعاد «$cleanTopic» وتأثيراته الفكرية والاجتماعية مع الدعوة إلى تمثل قيمه الإيجابية.",
-                        "<u>ثالثاً: الأفكار الأساسية للفقرات:</u>",
-                        "- <u>الوحدة الأولى:</u> تحديد السياق العام لموضوع «$cleanTopic» وأهم تجلياته البارزة.",
-                        "- <u>الوحدة الثانية:</u> رصد العوامل والآثار المرتبطة بـ «$cleanTopic» في حياة الفرد والمجتمع.",
-                        "- <u>الوحدة الثالثة:</u> تأكيد الكاتب على الأبعاد القيمية والرسالة التربوية المستخلصة من «$cleanTopic»."
+                        "• يقرأ الأستاذ النص قراءة مراعية مخارج الحروف وصفاتها.",
+                        "• الشروح اللغوية: شرح المفردات والتعابير في سياقها التداولي داخل نص «$cleanTopic».",
+                        "• المضمون العام للنص: إبراز الكاتب لمفهوم وأبعاد «$cleanTopic» وتأثيراته الفكرية والاجتماعية مع الدعوة إلى تمثل قيمه الإيجابية.",
+                        "(تمحيص الفرضية): يثبت هذا المضمون صحة الفرضية المصاغة سابقا."
                     ),
                     eval = listOf(
-                        "تقويم تكويني: مراقبة جودة القراءة الفردية وتصحيح الأخطاء النطقية واللغوية.",
-                        "تمحيص الفرضيات السابقة والتأكد من الفهم السليم لمضامين النص."
+                        "+ تقويم النطق الصحيح ومخارج الحروف للمتعلمين.",
+                        "+ يقسم التلاميذ النص القرائي إلى فقرات.",
+                        "+ تقويم نمو الفهم عند المتعلمين."
+                    )
+                ),
+                "session2_intro" to StageData(
+                    abil = listOf(
+                        "تذكير بالحصة السابقة."
+                    ),
+                    teacher = listOf(
+                        "- استدراج المتعلمين لاسترجاع مكتسبات الحصة الأولى.",
+                        "- التذكير بمضمون النص ودلالاته."
+                    ),
+                    content = listOf(
+                        "النص يعالج موضوع «$cleanTopic» ضمن $domainName ويبرز أبعاده ودلالاته الكبرى."
+                    ),
+                    eval = listOf(
+                        "+ رصد قدرة المتعلم (ة) على تذكر مكتسباته."
                     )
                 ),
                 "analysis" to StageData(
                     abil = listOf(
-                        "القدرة على تفكيك نص «$cleanTopic» واستخراج حقوله المعجمية والدلالية.",
-                        "القدرة على رصد الخصائص الأسلوبية والبلاغية والقيم المبثوثة في النص."
+                        "+ يحدد المتعلم(ة) معجم النص ويستخرج المفردات الدالة عليه.",
+                        "+ يستخرج المتعلمون الأساليب التي بني عليها النص.",
+                        "+ مهارة التعليق."
                     ),
                     teacher = listOf(
-                        "يساعد المتعلمين على جرد المعجم المهيمن وتصنيف الألفاظ والعبارات إلى حقول دلالية.",
-                        "يوجه المتعلمين لاستخراج الأساليب الموظفة والصور الفنية ومقصدية الكاتب."
+                        "+ قراءة النص [أولية + فردية].",
+                        "1- المستوى المعجمي والدلالي: استخرج الألفاظ والعبارات الدالة على محور النص.",
+                        "2- المستوى الأسلوبي والبلاغي: استخرج الأساليب الموظفة وطبيعة اللغة.",
+                        "3- القيم ومقصدية النص: استخرج القيم الوطنية والإنسانية المبثوثة في النص."
                     ),
                     content = listOf(
-                        "<u>أولاً: المستوى المعجمي (الحقول الدلالية):</u>",
-                        "- <u>الحقل المرتبط بالموضوع («$cleanTopic»):</u> الألفاظ والعبارات الدالة على صلب القضية ومحاورها.",
-                        "- <u>الحقل الاجتماعي / القيمي:</u> العبارات الدالة على التفاعل الإنساني والأثر الوجداني.",
-                        "- <u>العلاقة بين الحقلين:</u> علاقة تكامل وترابط تعكس رؤية الكاتب ومقصده التواصلي.",
-                        "<u>ثانياً: المستوى التداولي والأسلوبي:</u>",
-                        "- توظيف الأساليب الخبرية للتقرير والتوضيح، والأساليب الإنشائية (الاستفهام، النداء، الأمر) للإقناع والتأثير.",
-                        "- حضور روابط الحجاج والتفسير (التعليل، التوكيد، التمثيل، الاستنتاج) لدعم أطروحة النص.",
-                        "<u>ثالثاً: القيم المتضمنة ومقصدية النص:</u>",
-                        "- <u>القيم المبثوثة:</u> قيمة وعي ومسؤولية وتكامل مرتبطة بـ $domainName.",
-                        "- <u>مقصدية الكاتب:</u> توعية المتلقي بأهمية «$cleanTopic» وترسيخ السلوك الإيجابي البناء."
+                        "1- المستوى المعجمي (الحقول الدلالية):",
+                        "- الحقل المرتبط بالموضوع («$cleanTopic»): الألفاظ والعبارات الدالة على صلب القضية ومحاورها.",
+                        "- الحقل الاجتماعي / القيمي: العبارات الدالة على التفاعل الإنساني والأثر الوجداني.",
+                        "2- المستوى الأسلوبي: توظيف الأساليب الخبرية للتقرير والتوضيح، والأساليب الإنشائية للإقناع والتأثير.",
+                        "3- القيم المتضمنة: قيمة وعي ومسؤولية وتكامل مرتبطة بـ $domainName."
                     ),
                     eval = listOf(
-                        "تقويم تكويني: مدى قدرة المتعلمين على التمييز بين الحقول الدلالية وتحديد العلاقة بينها.",
-                        "قياس استيعاب المتعلمين للخصائص الأسلوبية والقيم المتضمنة في النص."
+                        "+ تقويم النطق الصحيح ومخارج الحروف.",
+                        "+ رصد إمكانات المتعلمين التحليلية وتعزيزها وتقويتها.",
+                        "+ ما الذي يسعى النص إلى تحقيقه؟."
                     )
                 ),
                 "synthesis" to StageData(
                     abil = listOf(
-                        "القدرة على تجميع معطيات الفهم والتحليل في خلاصة تركيبية منسجمة لدرس «$cleanTopic».",
-                        "القدرة على إبداء الرأي الشخصي المعلل حول قضية النص."
+                        "+ اكتساب مهارتي التركيب والإنتاج."
                     ),
                     teacher = listOf(
-                        "يطالب المتعلمين بصياغة خلاصة تركيبية شفهية ثم كتابية تجمع مضمون النص وخصائصه الفنية.",
-                        "يشجع المتعلمين على مناقشة قضية «$cleanTopic» وإبداء آرائهم الشخصية."
+                        "+ يطلب الأستاذ من المتعلمين تركيب ما تم التطرق إليه في الفهم والتحليل في خلاصات يثبتون أو ينفون فيها صحة الفرضية مع الإشارة إلى مضمون النص وكيفية بنائه.",
+                        "+ يحرر كل تلميذ خلاصته التركيبية بمفرده."
                     ),
                     content = listOf(
-                        "<u>التركيب العام:</u>",
-                        "- يعالج نص «$cleanTopic» قضية محورية تندرج ضمن $domainName، حيث أبرز الكاتب تجليات الموضوع وأبعاده الفكرية والواقعية، موظفاً معجماً غنياً وأساليب تفسيرية وحجاجية متماسكة لترسيخ قيم الوعي والمسؤولية لدى المتلقي."
+                        "يعالج نص «$cleanTopic» قضية محورية تندرج ضمن $domainName، حيث أبرز الكاتب تجليات الموضوع وأبعاده الفكرية والواقعية، موظفاً معجماً غنياً وأساليب متماسكة لترسيخ قيم الوعي والمسؤولية لدى المتلقي."
                     ),
                     eval = listOf(
-                        "تقويم إجمالي: جودة الصياغة التركيبية وسلامة اللغة والربط المنهجي بين الأفكار.",
-                        "تثمين المبادرات الفردية المتميزة وتدوين التركيب الجماعي على السبورة."
+                        "+ اختبار قدرة المتعلم (ة) على الإنتاج (إعادة بناء النص)."
                     )
                 ),
                 "investment" to StageData(
                     abil = listOf(
-                        "القدرة على استثمار مكتسبات نص «$cleanTopic» في وضعيات تواصلية وإنتاجية جديدة.",
-                        "القدرة على البحث والتوسع في امتدادات الموضوع خارج الفصل."
+                        "تنمية قدرة المتعلمين على التعبير واستثمار مكتسبات الدرس."
                     ),
                     teacher = listOf(
-                        "يوجه المتعلمين لإنجاز أنشطة الاستثمار بالكتاب المدرسي ويكلفهم ببحث تكميلي.",
-                        "يوضح خطوات الإنجاز ومعايير التقويم الذاتي للإنتاج المطلوب."
+                        "يطالب المتعلمين بإنجاز أنشطة \"البحث والاستثمار\" بالكتاب المدرسي؛ لتقويم تعلماتهم."
                     ),
                     content = listOf(
-                        "<u>نشاط الاستثمار والامتداد:</u>",
-                        "- اكتب فقرة مركزة (من ستة إلى ثمانية أسطر) تعبر فيها عن موقفك من قضية «$cleanTopic» مقترحاً حلولاً أو مبادرات عملية، مع توظيف ما اكتسبته من معجم وأساليب.",
-                        "- إعداد ملف مقتضب أو بطاقة قرائية حول مظهر من مظاهر «$cleanTopic» استعداداً للحصة المقبلة."
+                        "+ تكليف المتعلمين بإنجاز أنشطة \"الاستثمار والبحث\":",
+                        "- اكتب فقرة مركزة تعبر فيها عن موقفك من قضية «$cleanTopic» موظفاً ما اكتسبته من معجم وأساليب."
                     ),
                     eval = listOf(
-                        "تقويم امتدادي: متابعة إنجازات المتعلمين وتوجيههم للاستثمار الأمثل لمكتسبات الدرس."
+                        "+ تقويم قدرة المتعلم (ة) على تحويل المكتسبات لإنجاز أنشطة أخرى في وضعيات جديدة."
                     )
                 )
             )
 
-            PedagogicalComponent.LANGUAGE -> mapOf(
-                "lang_diagnostic" to StageData(
+            PedagogicalComponent.LANGUAGE -> {
+                val obsStage = StageData(
                     abil = listOf(
-                        "القدرة على استحضار القواعد اللغوية السابقة وربطها بالظاهرة الجديدة «$cleanTopic».",
-                        "القدرة على التهيؤ الذهني لملاحظة الشواهد اللغوية."
+                        "- إقدار المتعلم على ملاحظة الظاهرة اللغوية «$cleanTopic».",
+                        "- قدرة المتعلم على وصف الظاهرة وتفكيك عناصرها واستنباط أحكامها."
                     ),
                     teacher = listOf(
-                        "يطرح أسئلة تقويمية تشخيصية لتفقد مكتسبات المتعلمين في الدرس اللغوي السابق.",
-                        "يمهد للظاهرة اللغوية الجديدة «$cleanTopic» انطلاقاً من جمل سياقية وظيفية."
-                    ),
-                    content = listOf(
-                        "<u>أسئلة التشخيص والتمهيد:</u>",
-                        "- تذكير موجز بالقاعدة اللغوية السابقة مع التمثيل بجمل مفيدة.",
-                        "- قراءة جمل التمهيد وتمييز التراكيب الممهدة لدرس «$cleanTopic»."
-                    ),
-                    eval = listOf(
-                        "تقويم تشخيصي: رصد مدى تمكن المتعلمين من المكتسبات اللغوية القبلية."
-                    )
-                ),
-                "lang_observation" to StageData(
-                    abil = listOf(
-                        "القدرة على قراءة أمثلة الانطلاق وملاحظة ظاهرة «$cleanTopic» في سياقها.",
-                        "القدرة على عزل الظاهرة اللغوية وتمييز عناصرها البارزة."
-                    ),
-                    teacher = listOf(
-                        "يدون أمثلة الانطلاق على السبورة بخط واضح مع تلوين عناصر ظاهرة «$cleanTopic».",
-                        "يقرأ الأمثلة قراءة نموذجية ويكلف المتعلمين بقراءتها واستخراج الشواهد."
-                    ),
-                    content = listOf(
-                        "<u>أمثلة الانطلاق والشواهد:</u>",
-                        "- المجموعة (أ): شواهد نصية وسياقية تتضمن ظاهرة «$cleanTopic» في حالتها الأصلية.",
-                        "- المجموعة (ب): أمثلة متنوعة تبرز أحكام وصور «$cleanTopic» ومواقعها الإعرابية.",
-                        "- ملاحظة الكلمات والتراكيب المكتوبة بلون مغاير وعزلها قصد الوصف والتحليل."
-                    ),
-                    eval = listOf(
-                        "تقويم تكويني: سلامة قراءة الشواهد ودقة تحديد الكلمات المتضمنة للظاهرة اللغوية."
-                    )
-                ),
-                "lang_analysis" to StageData(
-                    abil = listOf(
-                        "القدرة على وصف ظاهرة «$cleanTopic» وتفكيك عناصرها الصرفية أو التركيبية.",
-                        "القدرة على ملء الجدول التحليلي واستنباط الأحكام الإعرابية واللغوية."
-                    ),
-                    teacher = listOf(
-                        "يرسم جدول التوصيف والتحليل على السبورة ويقود حواراً استقرائياً مع المتعلمين.",
-                        "يساعد المتعلمين على تحليل كل مثال وتحديد شروط وعمل وإعراب «$cleanTopic».",
-                        "أنشطة المتعلم: يتأملون الأمثلة مع التركيز على الكلمات المكتوبة بلون مغاير، ويصفون الظاهرة اللغوية ويكتشفون متغيراتها."
+                        "- يسطر الأستاذ جدولاً على السبورة ويدون فيه أمثلة الانطلاق.",
+                        "- يقرأ الأمثلة قراءة نموذجية ثم يدعو بعض المتعلمين لقراءتها.",
+                        "- يستدرج المتعلمين بأسئلة ديداكتيكية لملاحظة الكلمات المكتوبة بلون مغاير وملء خانات الجدول التحليلي."
                     ),
                     content = buildLanguageAnalysisContent(cleanTopic),
                     eval = listOf(
-                        "تقويم تكويني: مطالبة المتعلمين بإعطاء أمثلة موازية لكل قسم من أقسام الجدول التحليلي."
-                    )
-                ),
-                "lang_synthesis" to StageData(
-                    abil = listOf(
-                        "القدرة على تجميع الاستنتاجات الجزئية وصياغة القاعدة الضابطة لدرس «$cleanTopic».",
-                        "القدرة على تنظيم عناصر القاعدة في خطاطة ذهنية واضحة."
-                    ),
-                    teacher = listOf(
-                        "يوجه المتعلمين لصياغة القاعدة العامة لدرس «$cleanTopic» بأسلوبهم الخاص.",
-                        "يثبت الاستنتاج النهائي والخطاطة التركيبية على السبورة."
-                    ),
-                    content = buildLanguageSynthesisContent(cleanTopic),
-                    eval = listOf(
-                        "تقويم تكويني: قراءة الاستنتاج العام والتأكد من استيعاب جميع عناصر القاعدة."
-                    )
-                ),
-                "lang_application" to StageData(
-                    abil = listOf(
-                        "القدرة على تطبيق قاعدة «$cleanTopic» في تمارين تحديد وصياغة وإعراب.",
-                        "القدرة على توظيف الظاهرة اللغوية في إنتاج جمل سليمة."
-                    ),
-                    teacher = listOf(
-                        "يقترح تمارين تطبيقية متدرجة الصعوبة (استخراج، تركيب، إعراب) حول «$cleanTopic».",
-                        "يراقب إنجازات المتعلمين ويشرف على التصحيح الجماعي والفردي على السبورة والدفاتر."
-                    ),
-                    content = listOf(
-                        "<u>تمارين تطبيقية ونماذج إعرابية:</u>",
-                        "- <u>السؤال الأول:</u> استخرج ظاهرة «$cleanTopic» من الجمل الآتية وبيّن نوعها وحكمها.",
-                        "- <u>السؤال الثاني:</u> ركّب ثلاث جمل مفيدة تتضمن «$cleanTopic» في حالات مختلفة.",
-                        "- <u>السؤال الثالث:</u> أعرب جملة نموذجية إعراباً تاماً يبرز عمل وموقع «$cleanTopic»."
-                    ),
-                    eval = listOf(
-                        "تقويم إجمالي ودعم فوري: رصد نسبة التحكم وتصويب الأخطاء الإعرابية والتركيبية."
+                        "- تقويم تكويني: رصد قدرة المتعلمين على التمييز بين عناصر الظاهرة اللغوية وتركيب جمل موازية."
                     )
                 )
-            )
+                mapOf(
+                    "lang_diagnostic" to StageData(
+                        abil = listOf(
+                            "استحضار المتعلم مكتسباته السابقة المتعلقة بالدرس اللغوي السابق."
+                        ),
+                        teacher = listOf(
+                            "يطرح الأستاذ أسئلة تقويمية تشخيصية للوقوف على مدى تمكن المتعلمين من الدرس اللغوي السابق."
+                        ),
+                        content = listOf(
+                            "- تذكير موجز بالقاعدة اللغوية السابقة مع التمثيل بجمل مفيدة.",
+                            "- قراءة جمل التمهيد وتمييز التراكيب الممهدة لدرس «$cleanTopic»."
+                        ),
+                        eval = listOf(
+                            "- تقويم مدى تذكر المتعلمين للقواعد السابقة واستعدادهم للدرس الجديد."
+                        )
+                    ),
+                    "lang_observation" to obsStage,
+                    "lang_analysis" to obsStage,
+                    "lang_synthesis" to StageData(
+                        abil = listOf(
+                            "إقدار المتعلم على تجميع الاستنتاجات الجزئية وصياغة القاعدة العامة لدرس «$cleanTopic»."
+                        ),
+                        teacher = listOf(
+                            "- يطرح الأستاذ أسئلة توجيهية لتجميع الاستنتاجات الجزئية وصياغة القاعدة العامة للدرس.",
+                            "- يدون القاعدة العامة على السبورة ويقرؤها المتعلمون."
+                        ),
+                        content = buildLanguageSynthesisContent(cleanTopic),
+                        eval = listOf(
+                            "- تقويم مدى استيعاب المتعلمين للقاعدة العامة وقدرتهم على التمثيل لها."
+                        )
+                    ),
+                    "lang_application" to StageData(
+                        abil = listOf(
+                            "إقدار المتعلم على استثمار وتوظيف القاعدة اللغوية في إنجاز تطبيقات متنوعة."
+                        ),
+                        teacher = listOf(
+                            "- يكتب الأستاذ التمارين التطبيقية على السبورة أو يحيل على الكتاب المدرسي.",
+                            "- يطالب المتعلمين بإنجازها فردياً على الدفاتر ثم جماعياً على السبورة."
+                        ),
+                        content = listOf(
+                            "تمارين تطبيقية ونماذج إعرابية:",
+                            "1- استخرج ظاهرة «$cleanTopic» من الجمل الآتية وبيّن نوعها وحكمها.",
+                            "2- ركّب ثلاث جمل مفيدة تتضمن «$cleanTopic» في حالات مختلفة.",
+                            "3- أعرب جملة نموذجية إعراباً تاماً يبرز عمل وموقع «$cleanTopic»."
+                        ),
+                        eval = listOf(
+                            "- تصحيح جماعي على السبورة وفردي على الدفاتر، ورصد التعثرات قصد دعمها."
+                        )
+                    )
+                )
+            }
 
-            PedagogicalComponent.EXPRESSION -> mapOf(
-                "insha_acquisition" to StageData(
+            PedagogicalComponent.EXPRESSION -> {
+                val acqDiag = StageData(
+                    abil = listOf("استحضار المتعلم مكتسباته السابقة المتعلقة بالمهارات التعبيرية وربطها بمهارة «$cleanTopic»."),
+                    teacher = listOf("يطرح الأستاذ أسئلة تمهيدية لاستحضار مكتسبات المتعلمين وربطها بمهارة «$cleanTopic»."),
+                    content = listOf("- المهارة المستهدفة هي: «$cleanTopic»."),
+                    eval = listOf("+ تشخيص مكتسبات المتعلمين وتمثلاتهم الأولية حول المهارة.")
+                )
+                val acqRead = StageData(
+                    abil = listOf("قراءة نص الانطلاق قراءة متأنية وفهم مضمونه العام."),
+                    teacher = listOf("- يقرأ الأستاذ نص الانطلاق قراءة نموذجية، ثم يوجه المتعلمين لقراءته قراءة فردية وشرح مفرداته."),
+                    content = listOf("المضمون العام لنص الانطلاق: نص نموذجي يبرز خصائص ومقومات مهارة «$cleanTopic»."),
+                    eval = listOf("+ مراقبة سلامة القراءة ومدى استيعاب المضمون العام لنص الانطلاق.")
+                )
+                val acqElem = StageData(
+                    abil = listOf("القدرة على تفكيك نص الانطلاق واستخراج العناصر المكونة لمهارة «$cleanTopic» وخصائصها."),
+                    teacher = listOf("- يستدرج الأستاذ المتعلمين عبر أسئلة ديداكتيكية لاستخراج عناصر المهارة وخطواتها من نص الانطلاق."),
+                    content = listOf(
+                        "عناصر مهارة «$cleanTopic» وخطواتها:",
+                        "1- المقدمة والتأطير: تحديد سياق الموضوع وعناصره الأولية.",
+                        "2- العرض والتوسيع: تسلسل الأفكار والأحداث وتوظيف الروابط المناسبة.",
+                        "3- الخاتمة: خلاصة مركزة أو التعبير عن الانطباع والموقف الشخصي."
+                    ),
+                    eval = listOf("+ تقويم تكويني لمدى قدرة المتعلمين على رصد عناصر المهارة من النص.")
+                )
+                val acqSynth = StageData(
+                    abil = listOf("القدرة على تجميع المعطيات التحليلية وصياغة خلاصة تركيبية لمفهوم المهارة وعناصرها."),
+                    teacher = listOf("- يوجه الأستاذ المتعلمين لصياغة استنتاج تركيبي يلخص تعريف المهارة وعناصرها ويدونه على السبورة."),
+                    content = listOf(
+                        "1- تعريف مهارة «$cleanTopic»: مهارة تعبيرية وتواصلية تهدف إلى تنظيم الأفكار وبنائها وفق تصميم منهجي محكم.",
+                        "2- خطواتها: التأطير والمقدمة، العرض والتحليل، الخاتمة وإبداء الرأي."
+                    ),
+                    eval = listOf("+ قراءة الاستنتاج العام والتأكد من ضبط المتعلمين لخطوات المهارة.")
+                )
+                val acqInv = StageData(
+                    abil = listOf("تهيئة المتعلمين لاستثمار خطوات المهارة في أنشطة تطبيقية لاحقة."),
+                    teacher = listOf("- يكلف الأستاذ المتعلمين بالاستعداد للحصة التطبيقية عبر إعداد مسودة أولية حول موضوع يرتبط بمهارة «$cleanTopic»."),
+                    content = listOf("الإعداد القبلي: التدرب المنزلي على توظيف خطوات المهارة استعداداً لحصة التطبيق."),
+                    eval = listOf("+ توجيه المتعلمين وحثهم على الالتزام بعناصر المهارة في إعدادهم القبلي.")
+                )
+                val appDiag = StageData(
+                    abil = listOf("استحضار مكتسبات حصة الاكتساب المتعلقة بمهارة «$cleanTopic»."),
+                    teacher = listOf("- يستدرج الأستاذ المتعلمين للتذكير بتعريف مهارة «$cleanTopic» وعناصرها وخطواتها المنهجية."),
+                    content = listOf("- التذكير بتعريف المهارة وعناصرها الأساسية والروابط اللغوية المناسبة لها."),
+                    eval = listOf("+ تقويم تشخيصي لقياس مدى تذكر المتعلمين لخطوات المهارة.")
+                )
+                val appPres = StageData(
+                    abil = listOf("قراءة نص الموضوع التطبيقي وفهم المطلوب وتحديد عناصر الإنجاز."),
+                    teacher = listOf("- يكتب الأستاذ نص الموضوع التطبيقي على السبورة، ويقرؤه ثم يدعو المتعلمين لقراءته واستخراج الكلمات المفاتيح."),
+                    content = listOf("نص الموضوع التطبيقي: اكتب موضوعاً إنشائياً تستثمر فيه خطوات مهارة «$cleanTopic» لمعالجة قضية مرتبطة بـ $domainName."),
+                    eval = listOf("+ التحقق من فهم المتعلمين لتعليمة الموضوع التطبيقي وخطوات إنجازه.")
+                )
+                val appExec = StageData(
+                    abil = listOf("القدرة على تطبيق خطوات المهارة وبناء موضوع متكامل جماعياً وفردياً."),
+                    teacher = listOf("- يوجه الأستاذ المتعلمين لإنجاز المطلوب على دفاترهم، ثم يقود عملاً جماعياً لبناء نموذج تطبيقي مشترك على السبورة."),
+                    content = listOf("نموذج الإنجاز التطبيقي المشترك مستوفٍ لعناصر مهارة «$cleanTopic» وروابطها اللغوية."),
+                    eval = listOf("+ تتبع إنجازات المتعلمين وتقديم التوجيهات المنهجية واللغوية اللازمة.")
+                )
+                val appCorr = StageData(
+                    abil = listOf("تقويم الإنتاجات التطبيقية وتصويب التعثرات وتدوين النموذج المصحح."),
+                    teacher = listOf("- يفتح الأستاذ المجال لقراءة بعض إنجازات المتعلمين ومناقشتها وتقويمها في ضوء معايير المهارة."),
+                    content = listOf("- قراءة الإنتاجات الفردية ومقارنتها بالنموذج الجماعي وتصحيح الأخطاء اللغوية والمنهجية."),
+                    eval = listOf("+ دعم المتعثرين وتعزيز الإنجازات الجيدة.")
+                )
+                val prodDiag = StageData(
+                    abil = listOf("استحضار خطوات وضوابط مهارة «$cleanTopic» قبل الشروع في الإنتاج الفردي."),
+                    teacher = listOf("- يمهد الأستاذ للحصة بتذكير سريع بعناصر المهارة التي تم التدرب عليها في حصتي الاكتساب والتطبيق."),
+                    content = listOf("- استحضار التصميم المنهجي لمهارة «$cleanTopic»."),
+                    eval = listOf("+ التأكد من جاهزية المتعلمين للانخراط في التحرير الفردي.")
+                )
+                val prodPres = StageData(
+                    abil = listOf("فهم وضعية الإنتاج الفردي واستيعاب شروط ومعايير الإنجاز."),
+                    teacher = listOf("- يدون الأستاذ نص موضوع الإنتاج على السبورة، ويقرؤه ثم يوضح للمتعلمين المطلوب ومعايير التقويم."),
+                    content = listOf("نص موضوع الإنتاج: حرر موضوعاً إنشائياً متكاملاً توظف فيه تقنيات مهارة «$cleanTopic» في حدود اثني عشر سطراً."),
+                    eval = listOf("+ التأكد من استيعاب جميع المتعلمين لتعليمة الإنتاج.")
+                )
+                val prodExec = StageData(
+                    abil = listOf("القدرة على التحرير الفردي المستقل وتوظيف خطوات المهارة بلغة سليمة."),
+                    teacher = listOf("- يكلف الأستاذ المتعلمين بتحرير الموضوع فردياً على أوراق التحرير في هدوء تام مع مراقبة سير الإنجاز."),
+                    content = listOf("- إنجاز المتعلمين الفردي للموضوع على أوراق التحرير الخاصة بهم."),
+                    eval = listOf("+ مراقبة التزام المتعلمين بالوقت المخصص وبالعمل الفردي المستقل.")
+                )
+                val prodCorr = StageData(
+                    abil = listOf("القدرة على المراجعة الذاتية للورقة قبل تسليمها للأستاذ."),
+                    teacher = listOf("- يطالب الأستاذ المتعلمين بمراجعة أوراقهم وتدقيقها إملائياً ونحوياً قبل جمعها في نهاية الحصة."),
+                    content = listOf("- جمع أوراق التحرير قصد تصحيحها خارج الفصل ورصد الأخطاء الشائعة لإعداد حصة التصحيح."),
+                    eval = listOf("+ تعويد المتعلم على المراجعة الذاتية قبل تسليم المنتوج.")
+                )
+                val corrDiag = StageData(
+                    abil = listOf("استحضار مكتسبات المتعلمين السابقة."),
+                    teacher = listOf("- يستدرج الأستاذ المتعلمين لاستحضار خطوات مهارة «$cleanTopic» وتصميمها المنهجي."),
+                    content = listOf("- التذكير بعناصر مهارة «$cleanTopic» ومعايير تقويم الإنتاج الكتابي."),
+                    eval = listOf("+ اختبار مكتسبات المتعلمين وتصويب الأخطاء المعرفية.")
+                )
+                val corrDiagnosis = StageData(
                     abil = listOf(
-                        "القدرة على تعرف مفهوم مهارة «$cleanTopic» وتحديد خصائصها البنائية.",
-                        "القدرة على استخلاص الخطوات المنهجية والإجرائية لإنجاز المهارة."
+                        "- مهارة الملاحظة والتحليل.",
+                        "- القدرة على اكتشاف الخطأ وتصنيفه وتصويبه.",
+                        "- الربط بين الخطأ والقاعدة الضابطة."
                     ),
                     teacher = listOf(
-                        "ينطلق من نص الانطلاق لقراءته وتحليله رفقة المتعلمين واستنباط مقومات مهارة «$cleanTopic».",
-                        "يبني مع المتعلمين خطاطة إجرائية توضح خطوات المهارة (المقدمة، العرض، الخاتمة) والروابط الملائمة."
+                        "- يسطر الأستاذ شبكة تشخيص الأخطاء على السبورة.",
+                        "- يدرج أخطاء واقعية استُلت من أوراق المتعلمين أثناء التصحيح الخارجي.",
+                        "- يدعو المتعلمين للتفكير الجماعي وتصنيف الأخطاء وتصويبها وذكر القاعدة الضابطة."
                     ),
                     content = listOf(
-                        "<u>الحصة الأولى: أنشطة الاكتساب (التعريف بالمهارة وإجراءاتها):</u>",
-                        "- <u>تعريف مهارة «$cleanTopic»:</u> مهارة تعبيرية وتواصلية تهدف إلى تنظيم الأفكار وبنائها وفق تصميم منهجي محكم.",
-                        "- <u>الخطوات الإجرائية للمهارة:</u>",
-                        "  1. <u>مرحلة التمهيد والمقدمة:</u> تأطير الموضوع وتحديد الفكرة المحورية لـ «$cleanTopic».",
-                        "  2. <u>مرحلة العرض والتوسيع:</u> توظيف آليات التحليل أو السرد أو الحجاج مع الشواهد والروابط المناسبة.",
-                        "  3. <u>مرحلة الخاتمة:</u> خلاصة مركزة وإبداء الرأي الشخصي حول الموضوع."
+                        "شبكة تشخيص أخطاء المتعلمين وتصحيحها:",
+                        "[جدول: الخطأ | نوعه | الصواب | القاعدة الضابطة / التعليل المنهجي]",
+                        "[جدول: إِستعملت | إملائي | استعملتُ | تكتب همزة الوصل في ماضي الخماسي والسداسي وأمرهما ومصدرهما]",
+                        "[جدول: لم يبقا | تركيبي | لم يبقَ | الفعل المضارع المعتل الآخر يُجزم بحذف حرف العلة]",
+                        "[جدول: تعبير عامي | معجمي | تعبير فصيح | وجوب الالتزام بلغة عربية فصيحة وتجنب العبارات العامية والدخيلة]"
                     ),
                     eval = listOf(
-                        "تقويم تكويني: مدى استيعاب المتعلمين لعناصر وخطوات مهارة «$cleanTopic»."
-                    )
-                ),
-                "insha_application" to StageData(
-                    abil = listOf(
-                        "القدرة على تطبيق خطوات مهارة «$cleanTopic» بشكل جماعي وموجه.",
-                        "القدرة على توظيف المعجم والروابط اللغوية وعلامات الترقيم المناسبة للمهارة."
-                    ),
-                    teacher = listOf(
-                        "يكتب نص الموضوع التطبيقي على السبورة ويشرح الكلمات المفاتيح والمطلوب إنجازه.",
-                        "يقود المتعلمين في وضع تصميم تطبيقي جماعي وتحرير نموذج تطبيقي مشترك."
-                    ),
-                    content = listOf(
-                        "<u>الحصة الثانية: أنشطة التطبيق (التدرب على المهارة):</u>",
-                        "- <u>نص الموضوع التطبيقي:</u> اكتب موضوعاً إنشائياً تستثمر فيه خطوات مهارة «$cleanTopic» لمعالجة قضية مرتبطة بـ $domainName.",
-                        "- <u>توجيهات الإنجاز التطبيقي:</u> استخراج العناصر الأساسية، وضع التصميم المنهجي، والربط السليم بين الفقرات."
-                    ),
-                    eval = listOf(
-                        "تقويم تكويني: مراقبة مدى التزام المتعلمين بالتصميم المنهجي للمهارة أثناء التدريب."
-                    )
-                ),
-                "insha_production" to StageData(
-                    abil = listOf(
-                        "القدرة على الإنجاز الفردي المستقل لموضوع في مهارة «$cleanTopic».",
-                        "القدرة على استثمار المكتسبات اللغوية والأسلوبية في إنتاج نص منسجم."
-                    ),
-                    teacher = listOf(
-                        "يقدم وضعية الإنتاج الفردي ويشرح تعليمة الإنجاز ومعايير التقويم.",
-                        "يتتبع إنجازات المتعلمين الفردية في المسودات ويقدم التوجيهات المنهجية دون التدخل في صياغتهم."
-                    ),
-                    content = listOf(
-                        "<u>الحصة الثالثة: أنشطة الإنتاج (التحرير الفردي):</u>",
-                        "- <u>وضعية الانطلاق:</u> تحرير موضوع إنشائي متكامل يوظف تقنيات «$cleanTopic» في حدود اثني عشر سطراً.",
-                        "- <u>معايير الإنجاز:</u> الالتزام بالمطلوب، تسلسل الأفكار، سلامة اللغة والأسلوب، وحسن توظيف علامات الترقيم."
-                    ),
-                    eval = listOf(
-                        "تقويم إجمالي: جمع المنتوجات أو المسودات قصد تصنيف التعثرات وإعداد حصة التصحيح."
-                    )
-                ),
-                "insha_correction" to StageData(
-                    abil = listOf(
-                        "القدرة على تشخيص الأخطاء المعرفية والمنهجية واللغوية وتصويبها.",
-                        "القدرة على التقويم الذاتي وتجويد الإنتاج الكتابي النهائي."
-                    ),
-                    teacher = listOf(
-                        "يعرض حصيلة الملاحظات العامة ويدون نماذج من الأخطاء الشائعة على السبورة لتصحيحها جماعياً.",
-                        "يوزع الأوراق ويوجه المتعلمين للتصحيح الفردي وتجويد إنتاجاتهم اعتماداً على شبكة التقويم."
-                    ),
-                    content = listOf(
-                        "<u>الحصة الرابعة: أنشطة التصحيح والدعم:</u>",
-                        "- <u>شبكة التقويم والمعايير:</u>",
-                        "  1. ملاءمة المنتوج لتعليمة الموضوع (3 نقط).",
-                        "  2. احترام خطوات وتصميم مهارة «$cleanTopic» (3 نقط).",
-                        "  3. سلامة اللغة والنحو والإملاء (2 نقطتان).",
-                        "  4. جودة العرض وتوظيف الروابط وعلامات الترقيم (2 نقطتان).",
-                        "- تصويب الأخطاء المسجلة على السبورة ثم نقل التصحيح والتجويد في الدفاتر."
-                    ),
-                    eval = listOf(
-                        "تقويم داعم: التحقق من تدارك التعثرات المسجلة وتثمين الإبداعات المتميزة."
+                        "- تقويم مدى قدرة المتعلم على تمييز نوع الخطأ (إملائي، تركيبي، تعبيري/منهجي، معجمي).",
+                        "- إشراك أكبر عدد من المتعلمين في التصحيح الجماعي على السبورة."
                     )
                 )
-            )
+                val corrSupport = StageData(
+                    abil = listOf(
+                        "- التقييم الذاتي وتصويب التعثرات.",
+                        "- إغناء المعجم والأسلوب.",
+                        "- الاستفادة من الإنتاجات المتميزة."
+                    ),
+                    teacher = listOf(
+                        "أ- التصحيح الفردي: توزيع أوراق التحرير على المتعلمين وتوجيههم لتصحيح أخطائهم الخاصة.",
+                        "ب- قراءة النماذج المتميزة: قراءة أجود موضوع كتبه أحد المتعلمين للإشادة به والاستئناس به."
+                    ),
+                    content = listOf(
+                        "- تثبيت إملائي ونحوي للقواعد الضابطة للأخطاء المرصودة.",
+                        "- إغناء معجم المهارة بروابط وتعابير فصيحة مناسبة لموضوع «$cleanTopic»."
+                    ),
+                    eval = listOf(
+                        "- تقديم الدعم الفردي للمتعلمين المتعثرين.",
+                        "- تشجيع التنافس الإيجابي بين المتعلمين."
+                    )
+                )
+
+                mapOf(
+                    "insha_acq_diagnostic" to acqDiag,
+                    "insha_acq_reading" to acqRead,
+                    "insha_acq_elements" to acqElem,
+                    "insha_acq_synthesis" to acqSynth,
+                    "insha_acq_investment" to acqInv,
+                    "insha_app_diagnostic" to appDiag,
+                    "insha_app_presentation" to appPres,
+                    "insha_app_execution" to appExec,
+                    "insha_app_correction" to appCorr,
+                    "insha_prod_diagnostic" to prodDiag,
+                    "insha_prod_presentation" to prodPres,
+                    "insha_prod_execution" to prodExec,
+                    "insha_prod_correction" to prodCorr,
+                    "insha_corr_diagnostic" to corrDiag,
+                    "insha_corr_diagnosis" to corrDiagnosis,
+                    "insha_corr_support" to corrSupport,
+                    "insha_acquisition" to acqElem,
+                    "insha_application" to appExec,
+                    "insha_production" to prodExec,
+                    "insha_correction" to corrDiagnosis
+                )
+            }
         }
 
         val defaultSources = mapOf(
@@ -1576,8 +1664,8 @@ $stagesGuide
     private fun buildLanguageAnalysisContent(topic: String): List<String> {
         return when {
             topic.contains("الزمان") || topic.contains("المكان") -> listOf(
-                "<u>أولاً: تعريف اسمي الزمان والمكان:</u> اسمان مشتقان يصاغان للدلالة على زمان أو مكان وقوع الفعل.",
-                "<u>ثانياً: جدول الوصف والتحليل (صياغة اسمي الزمان والمكان):</u>",
+                "أولاً: تعريف اسمي الزمان والمكان: اسمان مشتقان يصاغان للدلالة على زمان أو مكان وقوع الفعل.",
+                "ثانياً: جدول الوصف والتحليل (صياغة اسمي الزمان والمكان):",
                 "[جدول: المثال | اسم الزمان / المكان | وزنه | فعله ومضارعه | نوع الفعل | طريقة الصياغة]",
                 "[جدول: مَشْرِقُ الشمس صباحاً | مَشْرِق | مَفْعِل | شَرَقَ - يَشْرِقُ | ثلاثي صحيح مكسور العين في المضارع | على وزن مَفْعِل]",
                 "[جدول: مَسْكَنُ الأسرة فسيح | مَسْكَن | مَفْعَل | سَكَنَ - يَسْكُنُ | ثلاثي صحيح مضموم العين في المضارع | على وزن مَفْعَل]",
@@ -1585,26 +1673,28 @@ $stagesGuide
                 "[جدول: مَوْعِدُ الحفل مساءً | مَوْعِد | مَفْعِل | وَعَدَ - يَعِدُ | ثلاثي معتل المثال الواوي | على وزن مَفْعِل]",
                 "[جدول: مَرْمَى الكرة بعيد | مَرْمَى | مَفْعَل | رَمَى - يَرْمِي | ثلاثي معتل ناقص | على وزن مَفْعَل]",
                 "[جدول: مُجْتَمَعُ اللجنة ظهراً | مُجْتَمَع | مُفْتَعَل | اجْتَمَعَ - يَجْتَمِعُ | غير ثلاثي | على وزن اسم المفعول (ميم مضمومة وفتح ما قبل الآخر)]",
-                "- <u>ملاحظة:</u> قد تلحق تاء التأنيث بعض أسماء المكان على وزن (مَفْعَلَة) للدلالة على الكثرة مثل: مَطْبَعَة، مَكْتَبَة، مَزْرَعَة."
+                "* استنتاج جزئي: قد تلحق تاء التأنيث بعض أسماء المكان على وزن (مَفْعَلَة) للدلالة على الكثرة مثل: مَطْبَعَة، مَكْتَبَة، مَزْرَعَة."
             )
 
             topic.contains("الفاعل") || topic.contains("المبالغة") -> listOf(
-                "<u>جدول الوصف والتحليل (صياغة وعمل اسم الفاعل وصيغ المبالغة):</u>",
-                "[جدول: المثال | المشتق العامل | نوعه ووزنه | فعله | عمله | شرط عمله]",
-                "[جدول: الشاكرُ نعمَ اللهِ محبوب | الشاكر | اسم فاعل (الفاعل) | شكر (ثلاثي) | رفع الفاعل ونصب المفعول به (نعمَ) | مقترن بـ (أل) فيعمل بدون شرط]",
-                "[جدول: ما مخلفٌ عهدَهُ مؤمنٌ | مخلفٌ | اسم فاعل (مُفْعِل) | أخلف (غير ثلاثي) | رفع الفاعل ونصب المفعول به (عهدَه) | مجرد من (أل) دال على الحال ومسبوق بنفي]",
-                "[جدول: المؤمنُ صبّارٌ عند الشدائد | صبّار | صيغة مبالغة (فَعّال) | صبر | رفع الفاعل الضمير المستتر | مجرد من (أل) ومسبوق بمبتدأ]"
+                "المجموعة 1 (صياغة اسم الفاعل وعمله):",
+                "[جدول: الجمل | اسم الفاعل | فعله | طريقة صياغته | حالته | عمله | الشرط أو السبب]",
+                "[جدول: الشاكرُ نعمَ اللهِ محبوب | الشاكر | شكر (ثلاثي) | على وزن فاعل | مقترن بـ (أل) | رفع الفاعل ونصب المفعول به (نعمَ) | يعمل بدون شرط لأنه مقترن بـ (أل)]",
+                "[جدول: ما مخلفٌ عهدَهُ مؤمنٌ | مخلفٌ | أخلف (غير ثلاثي) | ميم مضمومة وكسر ما قبل الآخر | مجرد من (أل) | رفع الفاعل ونصب المفعول به (عهدَه) | دال على الحال ومسبوق بنفي]",
+                "المجموعة 2 (صيغ المبالغة وعملها):",
+                "[جدول: الجمل | صيغة المبالغة | وزنها | فعلها | عملها]",
+                "[جدول: المؤمنُ صبّارٌ عند الشدائد | صبّار | فَعّال | صبر | رفع الفاعل الضمير المستتر]"
             )
 
             topic.contains("المفعول") -> listOf(
-                "<u>جدول الوصف والتحليل (صياغة وعمل اسم المفعول):</u>",
+                "جدول الوصف والتحليل (صياغة وعمل اسم المفعول):",
                 "[جدول: المثال | اسم المفعول | وزنه | فعله | عمله (نائب الفاعل) | شرط عمله]",
                 "[جدول: المحمودُ خُلُقُهُ ممدوحٌ | المحمود | المفعول | حُمِدَ (ثلاثي مبني للمجهول) | رفع نائب الفاعل (خُلُقُه) | مقترن بـ (أل)]",
                 "[جدول: أَمُكْرَمٌ الضيفُ في بيتكم؟ | مُكْرَمٌ | مُفْعَل | أُكْرِمَ (غير ثلاثي) | رفع نائب الفاعل (الضيفُ) | دال على الحال ومسبوق باستفهام]"
             )
 
             topic.contains("الاختصاص") -> listOf(
-                "<u>جدول الوصف والتحليل (عناصر أسلوب الاختصاص وحالات الاسم المختص):</u>",
+                "جدول الوصف والتحليل (عناصر أسلوب الاختصاص وحالات الاسم المختص):",
                 "[جدول: الجملة | الضمير ونوعه | الاسم المختص | حالته | حكمه الإعرابي]",
                 "[جدول: نحن - المغاربةَ - نعتز بوطننا | نحن (للمتكلم) | المغاربةَ | مقترن بـ (أل) | مفعول به منصوب لفعل محذوف وجوباً تقديره أخصّ]",
                 "[جدول: نحن - معشرَ الشبابِ - نبني المستقبل | نحن (للمتكلم) | معشرَ | مضاف إلى معرفة | مفعول به منصوب لفعل محذوف وجوباً تقديره أخصّ]",
@@ -1612,12 +1702,12 @@ $stagesGuide
             )
 
             else -> listOf(
-                "<u>الوصف والتحليل (الجدول الاستقرائي لظاهرة «$topic»):</u>",
+                "المجموعة 1 (أمثلة الانطلاق والجدول الاستقرائي لظاهرة «$topic»):",
                 "[جدول: المثال والشاهد | الظاهرة اللغوية («$topic») | نوعها وبنيتها | حكمها وشروطها | دلالتها وإعرابها]",
                 "[جدول: المثال الأول من مجموعة الانطلاق | الشاهد الأول | الحالة القياسية الأولى | توافر شروط الصياغة أو العمل | يعرب بحسب موقعه في التركيب]",
                 "[جدول: المثال الثاني من مجموعة الانطلاق | الشاهد الثاني | الحالة الثانية | اقترانه بالقرائن السياقية | يؤدي وظيفة دلالية وتركيبية في الجملة]",
-                "- <u>المفهوم والتعريف:</u> تحديد ماهية «$topic» ووظيفته المعنوية واللغوية في الجملة.",
-                "- <u>الأقسام والأحكام:</u> تصنيف حالات وصيغ «$topic» واستنباط شروط صياغتها أو إعمالها."
+                "* استنتاج جزئي 1: تحديد ماهية «$topic» ووظيفته المعنوية واللغوية في الجملة.",
+                "* استنتاج جزئي 2: تصنيف حالات وصيغ «$topic» واستنباط شروط صياغتها أو إعمالها."
             )
         }
     }
@@ -1625,19 +1715,19 @@ $stagesGuide
     private fun buildLanguageSynthesisContent(topic: String): List<String> {
         return when {
             topic.contains("الزمان") || topic.contains("المكان") -> listOf(
-                "<u>القاعدة والاستنتاج العام:</u>",
-                "- <u>تعريفهما:</u> اسم الزمان اسم مشتق يدل على زمان وقوع الفعل، واسم المكان اسم مشتق يدل على مكان وقوع الفعل.",
-                "- <u>صياغتهما من الفعل الثلاثي:</u>",
-                "  1. يصاغان على وزن <u>(مَفْعَل)</u> بفتح العين من كل فعل ثلاثي صحيح مفتوح العين أو مضمومها في المضارع، ومن كل فعل ثلاثي معتل الآخر (ناقص).",
-                "  2. يصاغان على وزن <u>(مَفْعِل)</u> بكسر العين من كل فعل ثلاثي صحيح مكسور العين في المضارع، ومن كل فعل ثلاثي مثال واوي صحيح الآخر.",
-                "- <u>صياغتهما من غير الثلاثي:</u> يصاغان على وزن اسم المفعول، وذلك بإبدال حرف المضارعة ميماً مضمومة وفتح ما قبل الآخر (مثل: مُسْتَوْدَع، مُلْتَقَى، مُنْطَلَق)."
+                "القاعدة والاستنتاج العام:",
+                "- تعريفهما: اسم الزمان اسم مشتق يدل على زمان وقوع الفعل، واسم المكان اسم مشتق يدل على مكان وقوع الفعل.",
+                "- صياغتهما من الفعل الثلاثي:",
+                "  1. يصاغان على وزن (مَفْعَل) بفتح العين من كل فعل ثلاثي صحيح مفتوح العين أو مضمومها في المضارع، ومن كل فعل ثلاثي معتل الآخر (ناقص).",
+                "  2. يصاغان على وزن (مَفْعِل) بكسر العين من كل فعل ثلاثي صحيح مكسور العين في المضارع، ومن كل فعل ثلاثي مثال واوي صحيح الآخر.",
+                "- صياغتهما من غير الثلاثي: يصاغان على وزن اسم المفعول، وذلك بإبدال حرف المضارعة ميماً مضمومة وفتح ما قبل الآخر (مثل: مُسْتَوْدَع، مُلْتَقَى، مُنْطَلَق)."
             )
 
             else -> listOf(
-                "<u>القاعدة والاستنتاج العام:</u>",
-                "- <u>تعريف «$topic»:</u> ظاهرة لغوية تؤدي وظيفة دلالية وتركيبية محددة في الكلام العربي.",
-                "- <u>أحكامه وشروطه:</u> يصاغ أو يعمل وفق ضوابط وشروط صرفية ونحوية مضبوطة.",
-                "- <u>إعرابه:</u> يعرب بحسب موقعه وعلاقته بالعناصر المجاورة له في التركيب."
+                "القاعدة والاستنتاج العام:",
+                "- تعريف «$topic»: ظاهرة لغوية تؤدي وظيفة دلالية وتركيبية محددة في الكلام العربي.",
+                "- أحكامه وشروطه: يصاغ أو يعمل وفق ضوابط وشروط صرفية ونحوية مضبوطة.",
+                "- إعرابه: يعرب بحسب موقعه وعلاقته بالعناصر المجاورة له في التركيب."
             )
         }
     }
@@ -1646,7 +1736,9 @@ $stagesGuide
         if (arr == null) return emptyList()
         val list = mutableListOf<String>()
         for (i in 0 until arr.length()) {
-            val item = arr.optString(i, "").trim()
+            val item = arr.optString(i, "")
+                .replace(Regex("""</?(?:u|b|i|strong|em)\s*>""", RegexOption.IGNORE_CASE), "")
+                .trim()
             if (item.isNotBlank()) list.add(item)
         }
         return list

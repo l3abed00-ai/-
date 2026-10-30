@@ -874,14 +874,27 @@ object DocumentFileReader {
                                 if (tableStack.isNotEmpty()) {
                                     val finishedTable = Table(tableStack.removeLast().rows.toList())
                                     if (cellStack.isNotEmpty()) {
-                                        // Nested table inside a cell: do NOT treat as independent table;
-                                        // extract its texts as merged paragraphs inside the parent cell.
+                                        // Nested table inside a cell: preserve multi-column analytical/diagnosis tables
+                                        // as [جدول: col1 | col2 | ...], and merge smaller 1-2 col layout tables as paragraphs.
                                         val parentCell = cellStack.last()
-                                        for (row in finishedTable.rows) {
-                                            for (cell in row) {
-                                                for (para in cell.paragraphs) {
-                                                    if (para.text.isNotEmpty()) {
-                                                        parentCell.paragraphs.add(para)
+                                        val isAnalyticalSubTable = finishedTable.rows.size >= 2 &&
+                                            finishedTable.rows.first().size >= 3
+                                        if (isAnalyticalSubTable) {
+                                            for (row in finishedTable.rows) {
+                                                val rowCellsText = row.map { cell ->
+                                                    cell.paragraphs.map { it.text.trim() }.filter { it.isNotEmpty() }.joinToString(" ")
+                                                }.filter { it.isNotEmpty() }
+                                                if (rowCellsText.isNotEmpty()) {
+                                                    parentCell.paragraphs.add(Para("[جدول: ${rowCellsText.joinToString(" | ")}]"))
+                                                }
+                                            }
+                                        } else {
+                                            for (row in finishedTable.rows) {
+                                                for (cell in row) {
+                                                    for (para in cell.paragraphs) {
+                                                        if (para.text.isNotEmpty()) {
+                                                            parentCell.paragraphs.add(para)
+                                                        }
                                                     }
                                                 }
                                             }
@@ -1248,9 +1261,12 @@ object DocumentFileReader {
         val hasExplicitStageCol = normFirst.contains("المراحل") ||
             normFirst.contains("الخطوات") ||
             normFirst.contains("خطواتالقراءه") ||
+            normFirst.contains("المقاطع") ||
+            normFirst.contains("مقاطعالدرس") ||
             normFirst.contains("انشطهالمدرس") ||
             normFirst.contains("انشطهالاستاذ") ||
-            normFirst.contains("انشطهالمتعلم")
+            normFirst.contains("انشطهالمتعلم") ||
+            normFirst.contains("الانشطهالتعليميه")
 
         if (hasExplicitStageCol) return false
 
@@ -1270,10 +1286,43 @@ object DocumentFileReader {
             "الوسائلالتعليميه",
             "الكفايهالتواصليه",
             "الكفايهالمنهجيه",
-            "الكفايهالثقافيه"
+            "الكفايهالثقافيه",
+            "كفايهتواصليه",
+            "كفايهمنهجيه",
+            "كفايهمعرفيه",
+            "المرجع",
+            "الاستاذ",
+            "المؤسسه"
         ).count { normAll.contains(it) }
 
         return headerHits >= 2
+    }
+
+    private fun isGenericSegmentLabel(text: String): Boolean {
+        val norm = normalizeArabicForMatch(text)
+        return norm in setOf(
+            "المقطعالتمهيدي",
+            "المقطعالوسيطي",
+            "المقطعالنهائي",
+            "المقطعالاستهلالي",
+            "المقطعالختامي",
+            "مقاطعالدرس",
+            "المقاطع",
+            "المراحل"
+        )
+    }
+
+    private fun isRepeatedTableHeaderRow(distinctCells: List<CellNode>): Boolean {
+        if (distinctCells.size < 3) return false
+        val normCells = distinctCells.map { normalizeArabicForMatch(it.flatParagraphs.joinToString(" ")) }
+        val headerMatches = normCells.count { n ->
+            n == "المراحل" || n == "المقاطع" || n == "مقاطعالدرس" || n == "الخطوات" ||
+                n.contains("القدراتوالمهارات") || n == "القدرات" || n == "المهارات" ||
+                n.contains("الانشطهالتعليميه") || n.contains("انشطهالمدرس") || n.contains("انشطهالمتعلم") ||
+                n == "المحتوي" || n.contains("المحتويالديداكتيكي") ||
+                n.contains("التقويموالدعم") || n.contains("تقويمودعم") || n == "التقويم"
+        }
+        return headerMatches >= 3
     }
 
     private fun formatTableGridToLines(
@@ -1287,7 +1336,7 @@ object DocumentFileReader {
             return formatHeaderGridToLines(grid, result)
         }
 
-        // Detect header rows (1..3, inspecting row 1 and row 2 together for split headers) and multi-column mapping
+        // Detect header rows (1..3, inspecting row 1 and row 2 together for split headers or session banner row 0)
         var bestHeaderRows = -1
         var bestMultiColMap = mapOf<TableColType, List<Int>>()
         var bestScore = -1
@@ -1303,7 +1352,8 @@ object DocumentFileReader {
                     val norm = normalizeArabicForMatch(cell.flatParagraphs.joinToString(" "))
                     norm.contains("انشطهالمدرس") || norm.contains("انشطهالاستاذ") ||
                         norm.contains("انشطهالمتعلم") || norm.contains("مهامالمدرس") ||
-                        norm.contains("مهامالمتعلم") || norm.contains("مؤشراتالتقويم")
+                        norm.contains("مهامالمتعلم") || norm.contains("مؤشراتالتقويم") ||
+                        norm.contains("القدراتوالمهارات") || norm.contains("الانشطهالتعليميه")
                 }
                 if (currRowDistinct.size <= 1 || (!prevRowHasSpan && !sharesVerticalMerge && !currRowHasSubHeaders)) {
                     break
@@ -1336,9 +1386,26 @@ object DocumentFileReader {
             var lastMergedStageCellId = -1
             var lastMergedStageText = ""
 
+            // If row 0 before the header row was a single-cell session banner, emit [حصة: ...]
+            for (hIdx in 0 until bestHeaderRows) {
+                val hDistinct = grid[hIdx].filterNotNull().distinctBy { it.id }
+                if (hDistinct.size == 1) {
+                    val bannerText = hDistinct[0].flatParagraphs.joinToString(" ").trim()
+                    if (bannerText.contains("الحصة") || bannerText.contains("أنشطة")) {
+                        result.add("[حصة: $bannerText]")
+                    }
+                }
+            }
+
             for (rIdx in bestHeaderRows until grid.size) {
                 val row = grid[rIdx]
                 val distinctCells = row.filterNotNull().distinctBy { it.id }
+
+                // Skip repeated table header rows (e.g. after Session 2 banner in Reading)
+                if (isRepeatedTableHeaderRow(distinctCells)) {
+                    distinctCells.forEach { seenIds.add(it.id) }
+                    continue
+                }
 
                 // Check if this is a single-cell spanned banner row (e.g., Session Banner)
                 if (distinctCells.size == 1) {
@@ -1350,6 +1417,10 @@ object DocumentFileReader {
                             bannerText.contains("أنشطة التطبيق") ||
                             bannerText.contains("أنشطة الإنتاج") ||
                             bannerText.contains("أنشطة التصحيح") ||
+                            bannerText.contains("حصة الاكتساب") ||
+                            bannerText.contains("حصة التطبيق") ||
+                            bannerText.contains("حصة الإنتاج") ||
+                            bannerText.contains("حصة التصحيح") ||
                             bannerText.contains("الحصة الأولى") ||
                             bannerText.contains("الحصة الثانية") ||
                             bannerText.contains("الحصة الثالثة") ||
@@ -1380,6 +1451,7 @@ object DocumentFileReader {
 
                 val stageCells = takeCells(TableColType.STAGE)
                 val segmentCells = takeCells(TableColType.SEGMENT)
+                // Always consume and discard TIME column cells
                 takeCells(TableColType.TIME)
                 val abilCells = takeCells(TableColType.ABIL)
                 val teacherCells = takeCells(TableColType.TEACHER)
@@ -1388,7 +1460,7 @@ object DocumentFileReader {
                 val contentCells = takeCells(TableColType.CONTENT)
                 val evalCells = takeCells(TableColType.EVAL)
 
-                // Also collect any unmapped non-empty cells so nothing is ever lost
+                // Also collect any unmapped non-empty cells (excluding generic segments and durations)
                 val mappedIndices = bestMultiColMap.values.flatten().toSet()
                 val extraContentLines = mutableListOf<String>()
                 for (cIdx in row.indices) {
@@ -1396,13 +1468,15 @@ object DocumentFileReader {
                         val extraCell = row[cIdx]
                         if (extraCell != null && extraCell.id !in seenIds) {
                             seenIds.add(extraCell.id)
-                            extraContentLines.addAll(extraCell.contentLinesWithTables)
+                            extraContentLines.addAll(
+                                extraCell.contentLinesWithTables.filter { !isGenericSegmentLabel(it) }
+                            )
                         }
                     }
                 }
 
-                val rawStageLines = stageCells.flatMap { it.flatParagraphs }
-                val rawSegmentLines = segmentCells.flatMap { it.flatParagraphs }
+                val rawStageLines = stageCells.flatMap { it.flatParagraphs }.filter { !isGenericSegmentLabel(it) }
+                val rawSegmentLines = segmentCells.flatMap { it.flatParagraphs }.filter { !isGenericSegmentLabel(it) }
                 if (rawStageLines.isNotEmpty() && rawStageCellInRow != null) {
                     lastMergedStageCellId = rawStageCellInRow.id
                     lastMergedStageText = rawStageLines.joinToString(" - ")
@@ -1483,10 +1557,50 @@ object DocumentFileReader {
                 }
             }
             result.add("[نهاية الجدول]")
+        } else if (isTwoColumnLessonTable(grid)) {
+            return formatTwoColumnLessonGridToLines(grid, result)
         } else {
             return formatHeaderGridToLines(grid, result)
         }
 
+        return result
+    }
+
+    private fun isTwoColumnLessonTable(grid: List<List<CellNode?>>): Boolean {
+        if (grid.isEmpty()) return false
+        val allText = normalizeArabicForMatch(
+            grid.flatten().filterNotNull().distinctBy { it.id }.joinToString(" ") { it.flatParagraphs.joinToString(" ") }
+        )
+        val stageKeywords = listOf(
+            "تقويمتشخيصي", "تشخيصالمكتسبات", "تشخيصاخطاء", "التصحيحالفردي", "الدعموالتعزيز",
+            "ملاحظهالنص", "فهمالنص", "القراءهالتحليليه", "التركيب", "الاستثمار", "الاستنتاج", "تطبيق"
+        )
+        return stageKeywords.count { allText.contains(it) } >= 2
+    }
+
+    private fun formatTwoColumnLessonGridToLines(
+        grid: List<List<CellNode?>>,
+        result: MutableList<String>
+    ): List<String> {
+        val seenCells = mutableSetOf<Int>()
+        for (row in grid) {
+            val distinctCells = row.filterNotNull().filter { seenCells.add(it.id) }
+            if (distinctCells.isEmpty()) continue
+            if (distinctCells.size == 1) {
+                val text = distinctCells[0].flatParagraphs.joinToString(" ").trim()
+                if (text.isNotEmpty()) result.add(text)
+            } else {
+                val firstColText = distinctCells[0].flatParagraphs.joinToString(" - ").trim()
+                val restLines = distinctCells.drop(1).flatMap { it.contentLinesWithTables }.filter { it.isNotBlank() }
+                if (firstColText.isNotEmpty() && firstColText.length <= 65) {
+                    result.add("[مرحلة: $firstColText]")
+                    restLines.forEach { result.add(it) }
+                } else {
+                    distinctCells.flatMap { it.contentLinesWithTables }.filter { it.isNotBlank() }.forEach { result.add(it) }
+                }
+            }
+        }
+        result.add("[نهاية الجدول]")
         return result
     }
 
@@ -1500,21 +1614,38 @@ object DocumentFileReader {
             var cIdx = 0
             while (cIdx < distinctRowCells.size) {
                 val cellParas = distinctRowCells[cIdx].filter { it.isNotBlank() }
-                if (cellParas.size == 1 && !cellParas[0].contains(":") && cellParas[0].length <= 35 && cIdx + 1 < distinctRowCells.size) {
+                val rawFirst = cellParas.firstOrNull().orEmpty().trim()
+                val strippedFirst = rawFirst.trimEnd(':', ' ').trim()
+                val hasInternalColonValue = rawFirst.contains(":") && !rawFirst.trimEnd().endsWith(":")
+
+                if (cellParas.size == 1 && !hasInternalColonValue && strippedFirst.length <= 35 && cIdx + 1 < distinctRowCells.size) {
                     val nextParas = distinctRowCells[cIdx + 1].filter { it.isNotBlank() }
-                    if (nextParas.isNotEmpty() && !nextParas[0].contains(":")) {
-                        val firstIsLabel = isKnownHeaderFieldLabel(cellParas[0])
-                        val secondIsLabel = nextParas.size == 1 && isKnownHeaderFieldLabel(nextParas[0])
+                    val nextFirst = nextParas.firstOrNull().orEmpty().trim()
+                    val nextStripped = nextFirst.trimEnd(':', ' ').trim()
+                    val nextHasInternalColonValue = nextFirst.contains(":") && !nextFirst.trimEnd().endsWith(":")
+
+                    if (nextParas.isNotEmpty() && !nextHasInternalColonValue) {
+                        val firstIsLabel = isKnownHeaderFieldLabel(strippedFirst)
+                        val secondIsLabel = nextParas.size == 1 && isKnownHeaderFieldLabel(nextStripped)
                         if (secondIsLabel && !firstIsLabel) {
-                            result.add("${nextParas[0]}: ${cellParas.joinToString(" - ")}")
-                        } else {
-                            result.add("${cellParas[0]}: ${nextParas.joinToString(" - ")}")
+                            result.add("$nextStripped: ${cellParas.joinToString(" - ")}")
+                            cIdx += 2
+                            continue
+                        } else if (firstIsLabel || !rawFirst.endsWith(":")) {
+                            val nextNorm = normalizeArabicForMatch(nextStripped)
+                            if (nextNorm != "الكفاياتالمستهدفه" && nextNorm != "الاهدافالتعلميه") {
+                                result.add("$strippedFirst: ${nextParas.joinToString(" - ")}")
+                                cIdx += 2
+                                continue
+                            }
                         }
-                        cIdx += 2
-                        continue
                     }
                 }
-                result.addAll(cellParas)
+                for (p in cellParas) {
+                    val pNorm = normalizeArabicForMatch(p)
+                    if (pNorm == "الكفاياتالمستهدفه" || pNorm == "الاهدافالتعلميه") continue
+                    result.add(p)
+                }
                 cIdx++
             }
         }
@@ -1528,6 +1659,7 @@ object DocumentFileReader {
             "المكون", "الموضوع", "موضوعالدرس", "عنوانالدرس", "المهارهالمستهدفه",
             "مدهالانجاز", "الحصيصالزمني", "المده", "الغلافالزمني",
             "الوسائلالتعليميه", "الوسائلالديداكتيكيه", "الوسائلالديدكتيكيه", "المرجع",
+            "الاستاذ", "المؤسسه", "الكفاياتالمستهدفه", "الاهدافالتعلميه",
             "القدرهالخاصهبالدرس", "الكفايهالتواصليه", "الكفايهالمنهجيه", "الكفايهالثقافيه", "الهدف"
         )
     }
@@ -1743,7 +1875,11 @@ object DocumentFileReader {
             }
         }
 
-        // If SEGMENT was matched and STAGE was not, STAGE can use SEGMENT
+        // If SEGMENT was matched and STAGE was not, promote SEGMENT to STAGE
+        if (!result.containsKey(TableColType.STAGE) && result.containsKey(TableColType.SEGMENT)) {
+            result[TableColType.STAGE] = result.remove(TableColType.SEGMENT)!!
+        }
+
         // Resolve generic ACTIVITIES column if neither TEACHER nor LEARNER was matched
         if (!result.containsKey(TableColType.TEACHER) && !result.containsKey(TableColType.LEARNER)) {
             val actHit = colHeaders.indices.firstOrNull { idx ->
@@ -1808,13 +1944,7 @@ object DocumentFileReader {
                 if (afterBlank || blocks.isEmpty()) {
                     blocks.add(mutableListOf(t))
                 } else {
-                    val lastBlock = blocks.last()
-                    val prevLine = lastBlock.last()
-                    if (startsNewItem(t) || endsWithTerminal(prevLine)) {
-                        lastBlock.add(t)
-                    } else {
-                        lastBlock[lastBlock.lastIndex] = "$prevLine $t"
-                    }
+                    blocks.last().add(t)
                 }
                 afterBlank = false
             }
@@ -1834,10 +1964,26 @@ object DocumentFileReader {
                 out.add(extractParagraphText(blockXml))
             } else {
                 val trList = extractDirectChildrenIgnoreNestedTables(blockXml, "tr", stripOuterTableTag = true)
-                for (trXml in trList) {
-                    val tcList = extractDirectChildrenIgnoreNestedTables(trXml, "tc", stripOuterTableTag = false)
-                    for (nestedTcXml in tcList) {
-                        out.addAll(extractCellMergedParagraphsLegacy(nestedTcXml))
+                val firstRowCells = trList.firstOrNull()?.let {
+                    extractDirectChildrenIgnoreNestedTables(it, "tc", stripOuterTableTag = false)
+                }.orEmpty()
+                val isAnalyticalSubTable = trList.size >= 2 && firstRowCells.size >= 3
+                if (isAnalyticalSubTable) {
+                    for (trXml in trList) {
+                        val tcList = extractDirectChildrenIgnoreNestedTables(trXml, "tc", stripOuterTableTag = false)
+                        val rowCellsText = tcList.map { nestedTcXml ->
+                            extractCellMergedParagraphsLegacy(nestedTcXml).map { it.trim() }.filter { it.isNotEmpty() }.joinToString(" ")
+                        }.filter { it.isNotEmpty() }
+                        if (rowCellsText.isNotEmpty()) {
+                            out.add("[جدول: ${rowCellsText.joinToString(" | ")}]")
+                        }
+                    }
+                } else {
+                    for (trXml in trList) {
+                        val tcList = extractDirectChildrenIgnoreNestedTables(trXml, "tc", stripOuterTableTag = false)
+                        for (nestedTcXml in tcList) {
+                            out.addAll(extractCellMergedParagraphsLegacy(nestedTcXml))
+                        }
                     }
                 }
             }

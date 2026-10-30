@@ -334,7 +334,7 @@ fun ModelEditorScreen(
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Text(
-                            text = "مراحل الدرس اللغوي: التقويم التشخيصي، الملاحظة، الوصف والتحليل، الاستنتاج، والتطبيقات",
+                            text = "مراحل الدرس اللغوي: تقويم تشخيصي، ملاحظة الأمثلة ووصفها وتحليلها، الاستنتاج، وتطبيق",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.padding(10.dp)
@@ -563,10 +563,13 @@ fun HeaderSummaryCard(
                 ) {
                     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                     HeaderInfoRow("المجال:", info.domain)
-                    HeaderInfoRow("الوسائل الديداكتيكية:", info.materials)
+                    HeaderInfoRow("المرجع:", info.reference)
+                    HeaderInfoRow("الأستاذ:", info.teacherName)
+                    HeaderInfoRow("المؤسسة:", info.schoolName)
+                    HeaderInfoRow("الوسائل التعليمية:", info.materials)
                     HeaderInfoRow("كفاية تواصلية:", info.communicativeComp)
                     HeaderInfoRow("كفاية منهجية:", info.methodologicalComp)
-                    HeaderInfoRow("كفاية ثقافية / معرفية:", info.culturalComp)
+                    HeaderInfoRow("كفاية معرفية:", info.culturalComp)
 
                     AppTextButton(
                         onClick = onEditClick,
@@ -1068,6 +1071,9 @@ fun EditInfoDialog(
     var component by remember { mutableStateOf(currentInfo.component) }
     var duration by remember { mutableStateOf(currentInfo.duration) }
     var materials by remember { mutableStateOf(currentInfo.materials) }
+    var reference by remember { mutableStateOf(currentInfo.reference) }
+    var teacherName by remember { mutableStateOf(currentInfo.teacherName) }
+    var schoolName by remember { mutableStateOf(currentInfo.schoolName) }
     var commComp by remember { mutableStateOf(currentInfo.communicativeComp) }
     var methComp by remember { mutableStateOf(currentInfo.methodologicalComp) }
     var cultComp by remember { mutableStateOf(currentInfo.culturalComp) }
@@ -1271,7 +1277,31 @@ fun EditInfoDialog(
                         OutlinedTextField(
                             value = materials,
                             onValueChange = { materials = it },
-                            label = { Text("الوسائل الديداكتيكية / المرجع") },
+                            label = { Text("الوسائل التعليمية") },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                    item {
+                        OutlinedTextField(
+                            value = reference,
+                            onValueChange = { reference = it },
+                            label = { Text("المرجع المعتمد") },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                    item {
+                        OutlinedTextField(
+                            value = teacherName,
+                            onValueChange = { teacherName = it },
+                            label = { Text("الأستاذ(ة)") },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                    item {
+                        OutlinedTextField(
+                            value = schoolName,
+                            onValueChange = { schoolName = it },
+                            label = { Text("المؤسسة") },
                             modifier = Modifier.fillMaxWidth()
                         )
                     }
@@ -1323,6 +1353,9 @@ fun EditInfoDialog(
                                 component = component.trim(),
                                 duration = duration.trim(),
                                 materials = materials.trim(),
+                                reference = reference.trim(),
+                                teacherName = teacherName.trim(),
+                                schoolName = schoolName.trim(),
                                 communicativeComp = commComp.trim(),
                                 methodologicalComp = methComp.trim(),
                                 culturalComp = cultComp.trim()

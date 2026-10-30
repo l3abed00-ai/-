@@ -17,10 +17,12 @@ import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Book
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Code
+import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -60,6 +62,7 @@ fun QuickToolsModalSheet(
     onSelectTab: (AppTab) -> Unit,
     currentApiKey: String = "",
     onSaveApiKey: ((String) -> Unit)? = null,
+    onClearAllStoredData: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -68,6 +71,7 @@ fun QuickToolsModalSheet(
     }
     var apiKeyInput by remember(initialKey) { mutableStateOf(initialKey) }
     var isSavedConfirmationVisible by remember { mutableStateOf(false) }
+    var isClearedConfirmationVisible by remember { mutableStateOf(false) }
 
     ModalBottomSheet(
         onDismissRequest = onDismissRequest,
@@ -264,6 +268,30 @@ fun QuickToolsModalSheet(
                         iconSize = 16.dp
                     )
                 }
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // Red Button: حذف جميع الجذاذات المخزنة
+            AppButton(
+                onClick = {
+                    onClearAllStoredData?.invoke()
+                    isClearedConfirmationVisible = true
+                },
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.error,
+                    contentColor = MaterialTheme.colorScheme.onError
+                ),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("sheet_clear_all_jadhadhat_btn")
+            ) {
+                ButtonLabel(
+                    text = if (isClearedConfirmationVisible) "تم حذف جميع الجذاذات المخزنة ✓" else "حذف جميع الجذاذات المخزنة",
+                    icon = Icons.Default.DeleteSweep,
+                    iconSize = 18.dp,
+                    fontWeight = FontWeight.Bold
+                )
             }
 
             Spacer(modifier = Modifier.height(20.dp))
