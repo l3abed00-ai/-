@@ -118,18 +118,37 @@ data class JadhadhaUiState(
         get() = StageCatalog.getStagesForComponent(activeComponent).count { stageMeta ->
             val data = currentPlan.stages[stageMeta.key]
             data != null && (
-                data.content.any { it.isNotBlank() } ||
-                    data.eval.any { it.isNotBlank() } ||
-                    data.teacher.any { it.isNotBlank() } ||
-                    data.abil.any { it.isNotBlank() }
+                (data.content.any { it.isNotBlank() } && data.sourceFor("content") != FieldSource.DEFAULT) ||
+                    (data.eval.any { it.isNotBlank() } && data.sourceFor("eval") != FieldSource.DEFAULT) ||
+                    (data.teacher.any { it.isNotBlank() } && data.sourceFor("teacher") != FieldSource.DEFAULT) ||
+                    (data.abil.any { it.isNotBlank() } && data.sourceFor("abil") != FieldSource.DEFAULT)
                 )
         }
 
     val completionPercentage: Int
         get() {
-            val total = totalStagesRequiredCount
-            if (total == 0) return 100
-            return ((stagesFilledCount.toFloat() / total) * 100).toInt().coerceIn(0, 100)
+            lastParseReport?.let { report ->
+                if (report.detectedComponent == activeComponent) {
+                    return report.verificationCompletionPercentage
+                }
+            }
+            val stageMetaList = StageCatalog.getStagesForComponent(activeComponent)
+            val totalFields = stageMetaList.size * 4
+            if (totalFields == 0) return 0
+            val verifiedFields = stageMetaList.sumOf { stageMeta ->
+                val data = currentPlan.stages[stageMeta.key] ?: return@sumOf 0
+                listOf("abil", "teacher", "content", "eval").count { field ->
+                    val items = when (field) {
+                        "abil" -> data.abil
+                        "teacher" -> data.teacher
+                        "content" -> data.content
+                        "eval" -> data.eval
+                        else -> emptyList()
+                    }
+                    items.any { it.isNotBlank() } && data.sourceFor(field) != FieldSource.DEFAULT
+                }
+            }
+            return ((verifiedFields.toFloat() / totalFields) * 100).toInt().coerceIn(0, 100)
         }
 }
 
@@ -389,16 +408,10 @@ class JadhadhaViewModel(
                 ensureActive()
                 val parseResult = withContext(Dispatchers.Default) {
                     ensureActive()
-                    val initial = JadhadhaParser.parseWithReport(
+                    JadhadhaParser.parseWithReport(
                         raw = fileInfo.textContent,
                         fallbackTopic = nextTopic.ifBlank { "درس جديد" },
                         forcedComponent = _uiState.value.extractorComponentFilter
-                    )
-                    ensureActive()
-                    GeminiAiService.classifyAndRefineExtraction(
-                        rawText = fileInfo.textContent,
-                        initialResult = initial,
-                        customKey = _uiState.value.customApiKey
                     )
                 }
                 ensureActive()
@@ -474,17 +487,10 @@ class JadhadhaViewModel(
 
                     val parsed = withContext(Dispatchers.Default) {
                         ensureActive()
-                        // Use parseRawText / parseWithReport off the main thread
-                        val initial = JadhadhaParser.parseWithReport(
+                        JadhadhaParser.parseWithReport(
                             raw = transcribedText,
                             fallbackTopic = nextTopic.ifBlank { "درس جديد" },
                             forcedComponent = _uiState.value.extractorComponentFilter
-                        )
-                        ensureActive()
-                        GeminiAiService.classifyAndRefineExtraction(
-                            rawText = transcribedText,
-                            initialResult = initial,
-                            customKey = _uiState.value.customApiKey
                         )
                     }
                     ensureActive()
@@ -835,15 +841,7 @@ class JadhadhaViewModel(
                     forcedComponent = forcedComponent
                 )
             }
-            val parseResult = if (initialResult.report.unclassifiedLines.isNotEmpty() && !initialResult.report.isAiDelegated) {
-                GeminiAiService.classifyAndRefineExtraction(
-                    rawText = rawText,
-                    initialResult = initialResult,
-                    customKey = _uiState.value.customApiKey
-                )
-            } else {
-                initialResult
-            }
+            val parseResult = initialResult
             val parsed = parseResult.plan
             repository.savePlan(parsed, isCustom = true)
             _uiState.value = _uiState.value.copy(

@@ -422,14 +422,16 @@ object GeminiAiService {
             stages = mutableStages
         )
 
-        val updatedReport = ParseReport(
-            detectedComponent = comp,
+        val updatedReport = com.example.extractor.JadhadhaParser.buildReport(
+            plan = updatedPlan,
             isComponentDefaulted = false,
-            stageSourceCounts = updatedCounts,
             unclassifiedLines = emptyList(),
             aiClassifiedLinesCount = classifiedCount,
             aiRefinedFieldsCount = aiRefinedCount,
-            isAiDelegated = true
+            isAiDelegated = true,
+            originalRawText = report.originalRawText.ifEmpty { rawText },
+            extractedUnits = report.extractedUnits,
+            unextractableItems = report.unextractableItems
         )
 
         ParseResult(plan = updatedPlan, report = updatedReport)

@@ -4,6 +4,10 @@ import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
 import android.util.Xml
+import com.example.model.ContentUnitStatus
+import com.example.model.DocumentElementType
+import com.example.model.ExtractedUnit
+import com.example.model.UnitLocation
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
@@ -16,6 +20,7 @@ import java.io.InputStream
 import java.io.StringReader
 import java.nio.charset.Charset
 import java.nio.charset.StandardCharsets
+import java.util.concurrent.ConcurrentHashMap
 import java.util.zip.ZipEntry
 import java.util.zip.ZipException
 import java.util.zip.ZipInputStream
@@ -32,15 +37,41 @@ class DocumentReadException(
     cause: Throwable? = null
 ) : Exception(arabicMessage, cause)
 
+data class StructuredDocxExtraction(
+    val rawOriginalText: String,
+    val structuredText: String,
+    val units: List<ExtractedUnit>,
+    val unextractableSegments: List<String> = emptyList()
+)
+
 data class UploadedFileInfo(
     val name: String,
     val sizeBytes: Long,
     val textContent: String,
     val detectedType: DetectedFileType = DetectedFileType.PLAIN_TEXT,
-    val pdfBytes: ByteArray? = null
+    val pdfBytes: ByteArray? = null,
+    val rawOriginalText: String = textContent,
+    val extractedUnits: List<ExtractedUnit> = emptyList(),
+    val unextractableSegments: List<String> = emptyList()
 )
 
 object DocumentFileReader {
+
+    private val recentExtractions = ConcurrentHashMap<Int, StructuredDocxExtraction>()
+
+    internal fun recordExtraction(extraction: StructuredDocxExtraction) {
+        if (recentExtractions.size > 32) {
+            recentExtractions.clear()
+        }
+        val trimmedKey = extraction.structuredText.trim().hashCode()
+        recentExtractions[trimmedKey] = extraction
+        recentExtractions[extraction.structuredText.hashCode()] = extraction
+    }
+
+    fun getRecordedExtraction(structuredText: String): StructuredDocxExtraction? {
+        return recentExtractions[structuredText.hashCode()]
+            ?: recentExtractions[structuredText.trim().hashCode()]
+    }
 
     const val MAX_FILE_SIZE_BYTES: Long = 25L * 1024 * 1024 // 25 MB
     const val MAX_DOCX_UNCOMPRESSED_BYTES: Long = 20L * 1024 * 1024 // 20 MB
@@ -228,19 +259,22 @@ object DocumentFileReader {
                 throw DocumentReadException(MSG_FILE_EMPTY)
             }
             val countedStream = BoundedCountingInputStream(buffered, MAX_FILE_SIZE_BYTES, onCheckActive)
-            val extractedText = extractTextFromDocxStreamInternal(
+            val structured = extractStructuredDocxInternal(
                 inputStream = countedStream,
                 requireDocumentXmlEntry = true,
                 onCheckActive = onCheckActive
             )
-            if (extractedText.isBlank()) {
+            if (structured.structuredText.isBlank() && structured.rawOriginalText.isBlank()) {
                 throw DocumentReadException(MSG_FILE_EMPTY)
             }
             return UploadedFileInfo(
                 name = fileName,
                 sizeBytes = if (declaredSize > 0L) declaredSize else countedStream.totalBytesRead,
-                textContent = extractedText.trim(),
-                detectedType = DetectedFileType.DOCX
+                textContent = structured.structuredText.trim(),
+                detectedType = DetectedFileType.DOCX,
+                rawOriginalText = structured.rawOriginalText,
+                extractedUnits = structured.units,
+                unextractableSegments = structured.unextractableSegments
             )
         }
 
@@ -259,11 +293,21 @@ object DocumentFileReader {
             throw DocumentReadException(MSG_FILE_EMPTY)
         }
 
+        val plainUnits = buildPlainTextUnits(decodedText)
+        val plainExtraction = StructuredDocxExtraction(
+            rawOriginalText = decodedText,
+            structuredText = decodedText.trim(),
+            units = plainUnits
+        )
+        recordExtraction(plainExtraction)
+
         return UploadedFileInfo(
             name = fileName,
             sizeBytes = if (declaredSize > 0L) declaredSize else rawBytes.size.toLong(),
             textContent = decodedText.trim(),
-            detectedType = DetectedFileType.PLAIN_TEXT
+            detectedType = DetectedFileType.PLAIN_TEXT,
+            rawOriginalText = decodedText,
+            extractedUnits = plainUnits
         )
     }
 
@@ -272,18 +316,30 @@ object DocumentFileReader {
      * word/header*.xml, and word/footer*.xml with a 20 MB uncompressed size limit.
      */
     fun extractTextFromDocx(inputStream: InputStream): String {
-        return extractTextFromDocxStreamInternal(
+        return extractStructuredDocxInternal(
+            inputStream = inputStream,
+            requireDocumentXmlEntry = false,
+            onCheckActive = {}
+        ).structuredText
+    }
+
+    /**
+     * Extracts the full [StructuredDocxExtraction] from a .docx stream, including the verbatim
+     * original text before processing, structured text, and traceable [ExtractedUnit]s with [UnitLocation].
+     */
+    fun extractStructuredDocx(inputStream: InputStream): StructuredDocxExtraction {
+        return extractStructuredDocxInternal(
             inputStream = inputStream,
             requireDocumentXmlEntry = false,
             onCheckActive = {}
         )
     }
 
-    private fun extractTextFromDocxStreamInternal(
+    private fun extractStructuredDocxInternal(
         inputStream: InputStream,
         requireDocumentXmlEntry: Boolean,
         onCheckActive: () -> Unit
-    ): String {
+    ): StructuredDocxExtraction {
         var foundDocumentXml = false
         var foundAnyEntry = false
         var totalUncompressedBytes = 0L
@@ -353,7 +409,7 @@ object DocumentFileReader {
             if (requireDocumentXmlEntry) {
                 throw DocumentReadException(MSG_FILE_CORRUPTED_OR_PROTECTED, e)
             }
-            return ""
+            return StructuredDocxExtraction("", "", emptyList())
         }
 
         if (requireDocumentXmlEntry) {
@@ -366,12 +422,18 @@ object DocumentFileReader {
         }
 
         if (!foundDocumentXml) {
-            return ""
+            return StructuredDocxExtraction("", "", emptyList())
         }
 
-        val mainText = parseDocumentXml(documentXmlRaw)
+        val mainStructured = extractStructuredXml(
+            xml = documentXmlRaw,
+            sourcePart = "word/document.xml",
+            startUnitId = 1,
+            startLineNumber = 1
+        )
         if (headerFooterXmlList.isEmpty()) {
-            return mainText
+            recordExtraction(mainStructured)
+            return mainStructured
         }
 
         // Sort headers first (header1, header2, ...) then footers (footer1, footer2, ...) deterministically
@@ -383,8 +445,15 @@ object DocumentFileReader {
 
         val outputLines = mutableListOf<String>()
         val seenNonBlankLines = mutableSetOf<String>()
-        if (mainText.isNotEmpty()) {
-            for (line in mainText.lines()) {
+        val allUnits = mainStructured.units.toMutableList()
+        val allUnextractable = mainStructured.unextractableSegments.toMutableList()
+        val rawOriginalParts = mutableListOf<String>()
+        if (mainStructured.rawOriginalText.isNotEmpty()) {
+            rawOriginalParts.add(mainStructured.rawOriginalText)
+        }
+
+        if (mainStructured.structuredText.isNotEmpty()) {
+            for (line in mainStructured.structuredText.lines()) {
                 outputLines.add(line)
                 val trimmed = line.trim()
                 if (trimmed.isNotEmpty()) {
@@ -393,19 +462,51 @@ object DocumentFileReader {
             }
         }
 
-        for ((_, hfXml) in sortedHeaderFooters) {
-            val hfParsed = parseDocumentXml(hfXml)
-            if (hfParsed.isNotEmpty()) {
-                for (line in hfParsed.lines()) {
+        for ((entryName, hfXml) in sortedHeaderFooters) {
+            val hfStructured = extractStructuredXml(
+                xml = hfXml,
+                sourcePart = entryName,
+                startUnitId = allUnits.size + 1,
+                startLineNumber = outputLines.size + 1
+            )
+            allUnextractable.addAll(hfStructured.unextractableSegments)
+            if (hfStructured.structuredText.isNotEmpty()) {
+                for (line in hfStructured.structuredText.lines()) {
                     val trimmed = line.trim()
                     if (trimmed.isNotEmpty() && trimmed != "[نهاية الجدول]" && seenNonBlankLines.add(trimmed)) {
                         outputLines.add(trimmed)
                     }
                 }
             }
+            for (u in hfStructured.units) {
+                val alreadyInStructuredOutput = outputLines.any { it.trim() == u.verbatimText.trim() }
+                val unitToAdd = if (alreadyInStructuredOutput) {
+                    u.copy(
+                        id = "unit_${allUnits.size + 1}",
+                        status = ContentUnitStatus.CLASSIFIED,
+                        assignedField = u.assignedField ?: "header_metadata"
+                    )
+                } else {
+                    u.copy(id = "unit_${allUnits.size + 1}")
+                }
+                allUnits.add(unitToAdd)
+            }
         }
 
-        return outputLines.joinToString("\n")
+        val finalStructuredText = outputLines.joinToString("\n")
+        val fullRawOriginalText = if (allUnits.isNotEmpty()) {
+            allUnits.joinToString("\n") { it.verbatimText }
+        } else {
+            rawOriginalParts.joinToString("\n")
+        }
+        val combinedExtraction = StructuredDocxExtraction(
+            rawOriginalText = fullRawOriginalText,
+            structuredText = finalStructuredText,
+            units = allUnits,
+            unextractableSegments = allUnextractable
+        )
+        recordExtraction(combinedExtraction)
+        return combinedExtraction
     }
 
     private class BoundedCountingInputStream(
@@ -560,11 +661,241 @@ object DocumentFileReader {
      */
     fun parseDocumentXml(xml: String): String {
         if (xml.isBlank()) return ""
+        val structured = extractStructuredXml(xml)
+        recordExtraction(structured)
+        return structured.structuredText
+    }
+
+    /**
+     * Parses Word XML into a [StructuredDocxExtraction] containing:
+     * 1. [StructuredDocxExtraction.rawOriginalText]: Verbatim copy of extracted text before table marker formatting.
+     * 2. [StructuredDocxExtraction.structuredText]: Formatted text for [JadhadhaParser].
+     * 3. [StructuredDocxExtraction.units]: Independent traceable [ExtractedUnit]s with unique IDs and [UnitLocation].
+     * 4. [StructuredDocxExtraction.unextractableSegments]: Any corrupted/unclosed XML segments that could not be parsed cleanly.
+     */
+    fun extractStructuredXml(
+        xml: String,
+        sourcePart: String = "word/document.xml",
+        startUnitId: Int = 1,
+        startLineNumber: Int = 1
+    ): StructuredDocxExtraction {
+        if (xml.isBlank()) return StructuredDocxExtraction("", "", emptyList())
+        val isHeaderFooter = sourcePart.lowercase().contains("header") || sourcePart.lowercase().contains("footer")
         return try {
-            parseDocumentXmlWithPullParser(xml)
+            val elements = buildDocumentElements(xml)
+            val outputLines = mutableListOf<String>()
+            val units = mutableListOf<ExtractedUnit>()
+            val rawVerbatimLines = mutableListOf<String>()
+            var nextUnitId = startUnitId
+            var nextLineNum = startLineNumber
+            var paraCounter = 0
+            var tableCounter = 0
+
+            for ((elemIdx, element) in elements.withIndex()) {
+                when (element) {
+                    is DocElement.ParaItem -> {
+                        val t = stripFormattingTags(element.para.text).trim()
+                        if (t.isNotEmpty()) {
+                            outputLines.add(t)
+                            rawVerbatimLines.add(t)
+                            units.add(
+                                ExtractedUnit(
+                                    id = "unit_${nextUnitId++}",
+                                    verbatimText = t,
+                                    elementType = if (isHeaderFooter) DocumentElementType.HEADER_FOOTER else DocumentElementType.PARAGRAPH,
+                                    location = UnitLocation(
+                                        sourcePart = sourcePart,
+                                        elementIndex = elemIdx,
+                                        paragraphIndex = paraCounter++,
+                                        tableIndex = null,
+                                        rowIndex = null,
+                                        colIndex = null,
+                                        lineNumber = nextLineNum++
+                                    ),
+                                    status = ContentUnitStatus.EXTRACTED
+                                )
+                            )
+                        }
+                    }
+                    is DocElement.TableItem -> {
+                        val currentTableIdx = tableCounter++
+                        for ((rIdx, row) in element.table.rows.withIndex()) {
+                            for ((cIdx, cell) in row.withIndex()) {
+                                if (cell.vMerge == "continue" && cell.paragraphs.all { it.text.isBlank() }) continue
+                                var cellParaIdx = 0
+                                for (para in cell.paragraphs) {
+                                    val t = stripFormattingTags(para.text).trim()
+                                    if (t.isNotEmpty()) {
+                                        rawVerbatimLines.add(t)
+                                        units.add(
+                                            ExtractedUnit(
+                                                id = "unit_${nextUnitId++}",
+                                                verbatimText = t,
+                                                elementType = if (isHeaderFooter) DocumentElementType.HEADER_FOOTER else DocumentElementType.TABLE_CELL,
+                                                location = UnitLocation(
+                                                    sourcePart = sourcePart,
+                                                    elementIndex = elemIdx,
+                                                    paragraphIndex = cellParaIdx++,
+                                                    tableIndex = currentTableIdx,
+                                                    rowIndex = rIdx,
+                                                    colIndex = cIdx,
+                                                    lineNumber = nextLineNum++
+                                                ),
+                                                status = ContentUnitStatus.EXTRACTED
+                                            )
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                        outputLines.addAll(parseTableXml(element.table).map { stripFormattingTags(it) })
+                    }
+                }
+            }
+
+            StructuredDocxExtraction(
+                rawOriginalText = rawVerbatimLines.joinToString("\n"),
+                structuredText = outputLines.joinToString("\n"),
+                units = units,
+                unextractableSegments = emptyList()
+            )
         } catch (_: Throwable) {
-            parseDocumentXmlLegacy(xml)
+            val legacyText = parseDocumentXmlLegacy(xml)
+            val units = mutableListOf<ExtractedUnit>()
+            val unextractable = detectUnclosedXmlSegments(xml)
+            var nextUnitId = startUnitId
+            var nextLineNum = startLineNumber
+            for ((idx, line) in legacyText.lines().withIndex()) {
+                val t = line.trim()
+                if (t.isNotEmpty() && t != "[نهاية الجدول]") {
+                    units.add(
+                        ExtractedUnit(
+                            id = "unit_${nextUnitId++}",
+                            verbatimText = t,
+                            elementType = if (isHeaderFooter) DocumentElementType.HEADER_FOOTER else DocumentElementType.PARAGRAPH,
+                            location = UnitLocation(
+                                sourcePart = sourcePart,
+                                elementIndex = idx,
+                                paragraphIndex = idx,
+                                lineNumber = nextLineNum++
+                            ),
+                            status = ContentUnitStatus.EXTRACTED
+                        )
+                    )
+                }
+            }
+            for (corrupted in unextractable) {
+                units.add(
+                    ExtractedUnit(
+                        id = "unit_${nextUnitId++}",
+                        verbatimText = corrupted,
+                        elementType = DocumentElementType.PARAGRAPH,
+                        location = UnitLocation(
+                            sourcePart = sourcePart,
+                            elementIndex = units.size,
+                            paragraphIndex = units.size,
+                            lineNumber = nextLineNum++
+                        ),
+                        status = ContentUnitStatus.UNEXTRACTABLE
+                    )
+                )
+            }
+            StructuredDocxExtraction(
+                rawOriginalText = units.joinToString("\n") { it.verbatimText },
+                structuredText = legacyText,
+                units = units,
+                unextractableSegments = unextractable
+            )
+        }.also { recordExtraction(it) }
+    }
+
+    private fun detectUnclosedXmlSegments(xml: String): List<String> {
+        val lastClosedP = xml.lastIndexOf("</w:p>")
+        val lastClosedTbl = xml.lastIndexOf("</w:tbl>")
+        val tailStart = maxOf(lastClosedP, lastClosedTbl)
+        val tail = if (tailStart >= 0 && tailStart + 6 < xml.length) {
+            xml.substring(tailStart + 6)
+        } else if (tailStart == -1) {
+            xml
+        } else {
+            ""
         }
+        if (tail.isBlank()) return emptyList()
+        val unclosedMatches = Regex("<w:t(?:\\s[^>]*)?>([^<]+)").findAll(tail)
+            .map { decodeXmlEntities(it.groupValues[1]).trim() }
+            .filter { it.isNotEmpty() }
+            .toList()
+        return unclosedMatches
+    }
+
+    internal fun buildPlainTextUnits(rawText: String): List<ExtractedUnit> {
+        val units = mutableListOf<ExtractedUnit>()
+        var nextId = 1
+        val lines = rawText.lines()
+        val isTabDelimited = lines.count { it.count { ch -> ch == '\t' } >= 2 } >= 2
+        val isPipeDelimited = lines.count { line ->
+            val tr = line.trim()
+            !tr.startsWith("[جدول:") && tr.count { ch -> ch == '|' } >= 2
+        } >= 2
+
+        for ((lineIdx, line) in lines.withIndex()) {
+            val trimmed = stripFormattingTags(line).trim()
+            if (trimmed.isEmpty() || trimmed == "[نهاية الجدول]") continue
+            if ((isTabDelimited && line.contains('\t')) || (isPipeDelimited && !trimmed.startsWith("[جدول:") && trimmed.count { it == '|' } >= 2)) {
+                val cells = if (isTabDelimited && line.contains('\t')) {
+                    line.split('\t').map { it.trim() }
+                } else {
+                    trimmed.removePrefix("|").removeSuffix("|").split('|').map { it.trim() }
+                }
+                if (cells.all { col -> col.isEmpty() || col.all { ch -> ch == '-' || ch == ':' || ch == ' ' } }) {
+                    continue
+                }
+                for ((colIdx, cellText) in cells.withIndex()) {
+                    if (cellText.isNotEmpty()) {
+                        units.add(
+                            ExtractedUnit(
+                                id = "unit_${nextId++}",
+                                verbatimText = cellText,
+                                elementType = DocumentElementType.TABLE_CELL,
+                                location = UnitLocation(
+                                    sourcePart = "plain_text",
+                                    elementIndex = lineIdx,
+                                    paragraphIndex = lineIdx,
+                                    tableIndex = 0,
+                                    rowIndex = lineIdx,
+                                    colIndex = colIdx,
+                                    lineNumber = lineIdx + 1
+                                ),
+                                status = ContentUnitStatus.EXTRACTED
+                            )
+                        )
+                    }
+                }
+            } else {
+                val innerText = if ((trimmed.startsWith("[مرحلة:") || trimmed.startsWith("[حصة:")) && trimmed.endsWith("]")) {
+                    trimmed.substringAfter(":").removeSuffix("]").trim()
+                } else {
+                    trimmed
+                }
+                if (innerText.isNotEmpty()) {
+                    units.add(
+                        ExtractedUnit(
+                            id = "unit_${nextId++}",
+                            verbatimText = innerText,
+                            elementType = DocumentElementType.PLAIN_LINE,
+                            location = UnitLocation(
+                                sourcePart = "plain_text",
+                                elementIndex = lineIdx,
+                                paragraphIndex = lineIdx,
+                                lineNumber = lineIdx + 1
+                            ),
+                            status = ContentUnitStatus.EXTRACTED
+                        )
+                    )
+                }
+            }
+        }
+        return units
     }
 
     private enum class AlternateContentState {
@@ -927,7 +1258,6 @@ object DocumentFileReader {
 
     private fun normalizeParagraphPart(raw: String): String {
         return stripFormattingTags(raw)
-            .replace("\u0640", "")
             .replace("\u00a0", " ")
             .replace(Regex("[ \\t]+"), " ")
             .trim()
@@ -1333,7 +1663,7 @@ object DocumentFileReader {
 
         // Isolate header/metadata tables that precede the lesson table
         if (isPreLessonHeaderGrid(grid)) {
-            return formatHeaderGridToLines(grid, result)
+            return formatHeaderGridToLines(grid, result, isPreLessonHeader = true)
         }
 
         // Detect header rows (1..3, inspecting row 1 and row 2 together for split headers or session banner row 0)
@@ -1386,13 +1716,15 @@ object DocumentFileReader {
             var lastMergedStageCellId = -1
             var lastMergedStageText = ""
 
-            // If row 0 before the header row was a single-cell session banner, emit [حصة: ...]
+            // If row 0 before the header row was a single-cell session banner or title row, emit it without losing text
             for (hIdx in 0 until bestHeaderRows) {
                 val hDistinct = grid[hIdx].filterNotNull().distinctBy { it.id }
                 if (hDistinct.size == 1) {
                     val bannerText = hDistinct[0].flatParagraphs.joinToString(" ").trim()
                     if (bannerText.contains("الحصة") || bannerText.contains("أنشطة")) {
                         result.add("[حصة: $bannerText]")
+                    } else if (bannerText.isNotEmpty()) {
+                        hDistinct[0].flatParagraphs.filter { it.isNotBlank() }.forEach { result.add(it) }
                     }
                 }
             }
@@ -1407,7 +1739,7 @@ object DocumentFileReader {
                     continue
                 }
 
-                // Check if this is a single-cell spanned banner row (e.g., Session Banner)
+                // Check if this is a single-cell spanned row (e.g., Session Banner or spanned note row)
                 if (distinctCells.size == 1) {
                     val bannerNode = distinctCells[0]
                     seenIds.add(bannerNode.id)
@@ -1427,6 +1759,9 @@ object DocumentFileReader {
                             bannerText.contains("الحصة الرابعة")
                         ) {
                             result.add("[حصة: $bannerText]")
+                        } else {
+                            // Never drop non-banner single-cell rows in a table
+                            bannerNode.contentLinesWithTables.filter { it.isNotBlank() }.forEach { result.add(it) }
                         }
                     }
                     continue
@@ -1560,7 +1895,7 @@ object DocumentFileReader {
         } else if (isTwoColumnLessonTable(grid)) {
             return formatTwoColumnLessonGridToLines(grid, result)
         } else {
-            return formatHeaderGridToLines(grid, result)
+            return formatHeaderGridToLines(grid, result, isPreLessonHeader = false)
         }
 
         return result
@@ -1606,7 +1941,8 @@ object DocumentFileReader {
 
     private fun formatHeaderGridToLines(
         grid: List<List<CellNode?>>,
-        result: MutableList<String>
+        result: MutableList<String>,
+        isPreLessonHeader: Boolean = true
     ): List<String> {
         val seenHeaderCells = mutableSetOf<Int>()
         for (row in grid) {
@@ -1631,7 +1967,7 @@ object DocumentFileReader {
                             result.add("$nextStripped: ${cellParas.joinToString(" - ")}")
                             cIdx += 2
                             continue
-                        } else if (firstIsLabel || !rawFirst.endsWith(":")) {
+                        } else if (firstIsLabel || (isPreLessonHeader && !rawFirst.endsWith(":"))) {
                             val nextNorm = normalizeArabicForMatch(nextStripped)
                             if (nextNorm != "الكفاياتالمستهدفه" && nextNorm != "الاهدافالتعلميه") {
                                 result.add("$strippedFirst: ${nextParas.joinToString(" - ")}")
@@ -1643,11 +1979,14 @@ object DocumentFileReader {
                 }
                 for (p in cellParas) {
                     val pNorm = normalizeArabicForMatch(p)
-                    if (pNorm == "الكفاياتالمستهدفه" || pNorm == "الاهدافالتعلميه") continue
+                    if (isPreLessonHeader && (pNorm == "الكفاياتالمستهدفه" || pNorm == "الاهدافالتعلميه")) continue
                     result.add(p)
                 }
                 cIdx++
             }
+        }
+        if (!isPreLessonHeader) {
+            result.add("[نهاية الجدول]")
         }
         return result
     }
@@ -1655,11 +1994,11 @@ object DocumentFileReader {
     private fun isKnownHeaderFieldLabel(text: String): Boolean {
         val norm = normalizeArabicForMatch(text)
         return norm in setOf(
-            "جذاذهتربويه", "المستوي", "المستويالدراسي", "الفئهالمستهدفه", "الوحده", "المجال",
+            "جذاذهتربويه", "المستوي", "المستويالدراسي", "الفئهالمستهدفه", "الوحده", "الدوره", "المجال",
             "المكون", "الموضوع", "موضوعالدرس", "عنوانالدرس", "المهارهالمستهدفه",
-            "مدهالانجاز", "الحصيصالزمني", "المده", "الغلافالزمني",
+            "مدهالانجاز", "الحصيصالزمني", "المده", "الغلافالزمني", "المدهالزمنيه",
             "الوسائلالتعليميه", "الوسائلالديداكتيكيه", "الوسائلالديدكتيكيه", "المرجع",
-            "الاستاذ", "المؤسسه", "الكفاياتالمستهدفه", "الاهدافالتعلميه",
+            "الاستاذ", "المؤسسه", "الكفاياتالمستهدفه", "الاهدافالتعلميه", "السنهالدراسيه",
             "القدرهالخاصهبالدرس", "الكفايهالتواصليه", "الكفايهالمنهجيه", "الكفايهالثقافيه", "الهدف"
         )
     }
@@ -2061,7 +2400,6 @@ object DocumentFileReader {
         }
 
         return stripFormattingTags(sb.toString())
-            .replace("\u0640", "")
             .replace("\u00a0", " ")
             .replace(Regex("[ \\t]+"), " ")
             .trim()

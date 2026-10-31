@@ -1,5 +1,9 @@
 package com.example.extractor
 
+import com.example.model.ContentIntegrityReport
+import com.example.model.ContentUnitStatus
+import com.example.model.DocumentElementType
+import com.example.model.ExtractedUnit
 import com.example.model.FieldSource
 import com.example.model.JadhadhaCategories
 import com.example.model.JadhadhaInfo
@@ -10,7 +14,9 @@ import com.example.model.PedagogicalComponent
 import com.example.model.StageCatalog
 import com.example.model.StageData
 import com.example.model.StageSourceCount
+import com.example.model.TextModificationRecord
 import com.example.model.UnclassifiedLine
+import com.example.model.UnitLocation
 
 object JadhadhaParser {
 
@@ -34,13 +40,103 @@ object JadhadhaParser {
     /**
      * Parses raw text or extracted .docx content and returns both the [JadhadhaPlan]
      * (with per-field [FieldSource] tags: FILE vs DEFAULT) and a detailed [ParseReport]
-     * containing component detection method, FILE/DEFAULT counts per stage, and unclassified lines.
+     * containing:
+     * - Verbatim copy of the original extracted text ([ParseReport.originalRawText])
+     * - Independent traceable content units ([ParseReport.extractedUnits]) with unique IDs and [UnitLocation]
+     * - Unclassified lines preserved for user review ([ParseReport.unclassifiedLines])
+     * - Comprehensive [ContentIntegrityReport] ([ParseReport.integrityReport])
      */
     fun parseWithReport(
         raw: String,
         fallbackTopic: String = "درس جديد",
         forcedComponent: PedagogicalComponent? = null
     ): ParseResult {
+        // 1. Retain verbatim copy of original extracted text and traceable units before any preprocessing
+        val recordedExtraction = DocumentFileReader.getRecordedExtraction(raw)
+        val originalRawText = recordedExtraction?.rawOriginalText?.takeIf { it.isNotEmpty() } ?: raw
+        val initialUnits = recordedExtraction?.units?.takeIf { it.isNotEmpty() } ?: buildTraceableUnitsFromRaw(raw)
+        val unextractableSegments = recordedExtraction?.unextractableSegments.orEmpty()
+
+        val mutableUnits = initialUnits.toMutableList()
+        val consumedUnitIds = mutableSetOf<String>()
+
+        fun claimMatchingUnit(
+            text: String,
+            fallbackLineNumber: Int,
+            newStatus: ContentUnitStatus,
+            stageKey: String? = null,
+            fieldKey: String? = null,
+            finalText: String? = null
+        ): ExtractedUnit {
+            val cleanTarget = DocumentFileReader.stripFormattingTags(text).trim()
+            // First try exact verbatim match among unconsumed units by unique unit ID
+            var matchIdx = -1
+            for (i in mutableUnits.indices) {
+                val u = mutableUnits[i]
+                if (u.id !in consumedUnitIds && u.verbatimText == cleanTarget) {
+                    matchIdx = i
+                    break
+                }
+            }
+            if (matchIdx < 0) {
+                for (i in mutableUnits.indices) {
+                    val u = mutableUnits[i]
+                    if (u.id !in consumedUnitIds && u.verbatimText.trim() == cleanTarget) {
+                        matchIdx = i
+                        break
+                    }
+                }
+            }
+            // Next try normalized bullet/prefix match or substring match (e.g., when a single line had "Header: Remainder")
+            if (matchIdx < 0 && cleanTarget.isNotEmpty()) {
+                for (i in mutableUnits.indices) {
+                    val u = mutableUnits[i]
+                    if (u.id !in consumedUnitIds) {
+                        val uText = u.verbatimText.trim()
+                        if (cleanBullet(uText) == cleanBullet(cleanTarget) ||
+                            uText.endsWith(cleanTarget) ||
+                            cleanTarget.endsWith(uText)
+                        ) {
+                            matchIdx = i
+                            break
+                        }
+                    }
+                }
+            }
+            if (matchIdx >= 0) {
+                val existing = mutableUnits[matchIdx]
+                consumedUnitIds.add(existing.id)
+                val updated = existing.copy(
+                    status = newStatus,
+                    assignedStageKey = stageKey ?: existing.assignedStageKey,
+                    assignedField = fieldKey ?: existing.assignedField,
+                    finalClassifiedText = finalText ?: existing.finalClassifiedText
+                )
+                mutableUnits[matchIdx] = updated
+                return updated
+            }
+            // Synthesize a traceable unit if not already in initialUnits
+            val newId = "unit_${mutableUnits.size + 1}"
+            consumedUnitIds.add(newId)
+            val created = ExtractedUnit(
+                id = newId,
+                verbatimText = cleanTarget,
+                elementType = DocumentElementType.PARAGRAPH,
+                location = UnitLocation(
+                    sourcePart = "raw_text",
+                    elementIndex = mutableUnits.size,
+                    paragraphIndex = mutableUnits.size,
+                    lineNumber = fallbackLineNumber
+                ),
+                status = newStatus,
+                assignedStageKey = stageKey,
+                assignedField = fieldKey,
+                finalClassifiedText = finalText
+            )
+            mutableUnits.add(created)
+            return created
+        }
+
         val normalizedRaw = preprocessTabularText(raw)
         val rawLines = normalizedRaw.lines()
         val indexedNonEmptyLines = rawLines.mapIndexedNotNull { idx, line ->
@@ -92,9 +188,16 @@ object JadhadhaParser {
         // Available stages for this component
         val stageMetaList = StageCatalog.getStagesForComponent(detectedComponent)
         val stageMap = mutableMapOf<String, MutableMap<String, MutableList<String>>>()
+        val stageUnitMap = mutableMapOf<String, MutableMap<String, MutableList<ExtractedUnit>>>()
         val stageSources = mutableMapOf<String, MutableMap<String, FieldSource>>()
         stageMetaList.forEach { sm ->
             stageMap[sm.key] = mutableMapOf(
+                "eval" to mutableListOf(),
+                "content" to mutableListOf(),
+                "teacher" to mutableListOf(),
+                "abil" to mutableListOf()
+            )
+            stageUnitMap[sm.key] = mutableMapOf(
                 "eval" to mutableListOf(),
                 "content" to mutableListOf(),
                 "teacher" to mutableListOf(),
@@ -110,12 +213,138 @@ object JadhadhaParser {
         var activeSessionNumber = 1
         val stagesWithExplicitFields = mutableSetOf<String>()
         val unclassifiedLines = mutableListOf<UnclassifiedLine>()
+        val modifications = mutableListOf<TextModificationRecord>()
+        val duplicateUnits = mutableListOf<ExtractedUnit>()
+        val duplicateItems = mutableListOf<String>()
+
+        // Track any standalone natural stage header so if no content follows for that stage, it is never swallowed
+        var pendingNaturalStageHeader: Pair<Int, String>? = null
+        var pendingNaturalStageKey: String? = null
+        var pendingNaturalStageItemCount = 0
+
+        fun flushPendingNaturalStageHeaderIfEmpty() {
+            val pending = pendingNaturalStageHeader
+            if (pending != null && pendingNaturalStageItemCount == 0) {
+                val (pLineNum, pText) = pending
+                val uUnit = claimMatchingUnit(
+                    text = pText,
+                    fallbackLineNumber = pLineNum,
+                    newStatus = ContentUnitStatus.NEEDS_REVIEW
+                )
+                unclassifiedLines.add(
+                    UnclassifiedLine(
+                        lineNumber = uUnit.location.lineNumber.takeIf { it > 0 } ?: pLineNum,
+                        text = uUnit.verbatimText,
+                        unitId = uUnit.id,
+                        verbatimText = uUnit.verbatimText,
+                        location = uUnit.location
+                    )
+                )
+            }
+            pendingNaturalStageHeader = null
+            pendingNaturalStageKey = null
+            pendingNaturalStageItemCount = 0
+        }
+
+        fun recordUnclassifiedLine(lineNumber: Int, rawLineText: String) {
+            val uUnit = claimMatchingUnit(
+                text = rawLineText,
+                fallbackLineNumber = lineNumber,
+                newStatus = ContentUnitStatus.NEEDS_REVIEW
+            )
+            unclassifiedLines.add(
+                UnclassifiedLine(
+                    lineNumber = uUnit.location.lineNumber.takeIf { it > 0 } ?: lineNumber,
+                    text = rawLineText,
+                    unitId = uUnit.id,
+                    verbatimText = uUnit.verbatimText,
+                    location = uUnit.location
+                )
+            )
+        }
+
+        fun recordClassifiedLine(
+            lineNumber: Int,
+            stageKey: String,
+            currentFieldName: String,
+            hasExplicitFields: Boolean,
+            rawItem: String,
+            originalFullLine: String = rawItem
+        ) {
+            val verbatimClean = DocumentFileReader.stripFormattingTags(rawItem).trim()
+            val strippedForCheck = cleanBullet(verbatimClean)
+            if (verbatimClean.isBlank() || isDurationOrSegmentNoise(strippedForCheck)) return
+
+            val targetField = if (hasExplicitFields) {
+                if (currentFieldName == "content") {
+                    val semanticRole = inferStrictSemanticRole(strippedForCheck)
+                    if (semanticRole == "teacher" || semanticRole == "abil") semanticRole else currentFieldName
+                } else {
+                    currentFieldName
+                }
+            } else {
+                inferFieldFromUnstructuredLine(strippedForCheck, currentFieldName)
+            }
+
+            // Preserve original text without unjustified modification
+            val formattedItem = if (targetField == "content") {
+                formatContentSubLabel(verbatimClean)
+            } else {
+                verbatimClean
+            }
+
+            val claimedUnit = claimMatchingUnit(
+                text = originalFullLine,
+                fallbackLineNumber = lineNumber,
+                newStatus = ContentUnitStatus.CLASSIFIED,
+                stageKey = stageKey,
+                fieldKey = targetField,
+                finalText = formattedItem
+            )
+
+            if (claimedUnit.verbatimText != formattedItem && originalFullLine.trim() == rawItem.trim()) {
+                modifications.add(
+                    TextModificationRecord(
+                        unitId = claimedUnit.id,
+                        originalText = claimedUnit.verbatimText,
+                        finalText = formattedItem,
+                        location = claimedUnit.location
+                    )
+                )
+            }
+
+            val targetList = stageMap[stageKey]?.get(targetField)
+            val targetUnitList = stageUnitMap[stageKey]?.get(targetField)
+            if (targetList != null && targetUnitList != null) {
+                val matchingPrevUnits = targetUnitList.filter {
+                    (it.finalClassifiedText ?: it.verbatimText) == formattedItem
+                }
+                val isUnintendedDuplicate = matchingPrevUnits.any { prevUnit ->
+                    isUnintendedSameLocationDuplicate(prevUnit, claimedUnit)
+                }
+                if (isUnintendedDuplicate) {
+                    duplicateUnits.add(claimedUnit)
+                    if (!duplicateItems.contains(formattedItem)) {
+                        duplicateItems.add(formattedItem)
+                    }
+                } else {
+                    targetList.add(formattedItem)
+                    targetUnitList.add(claimedUnit)
+                }
+            }
+            stageSources[stageKey]?.put(targetField, FieldSource.FILE)
+
+            if (pendingNaturalStageKey == stageKey) {
+                pendingNaturalStageItemCount++
+            }
+        }
 
         for ((lineNumber, line) in indexedNonEmptyLines) {
             val cleanLine = DocumentFileReader.stripFormattingTags(line).trim()
             if (cleanLine.isEmpty()) continue
 
             if (cleanLine == "[نهاية الجدول]") {
+                flushPendingNaturalStageHeaderIfEmpty()
                 currentStageKey = null
                 currentRowStageKey = null
                 continue
@@ -135,21 +364,29 @@ object JadhadhaParser {
 
             // Skip official administrative header banners or standalone duration/segment noise
             if (isAdministrativeBannerLine(strippedHeaderLine) || isDurationOrSegmentNoise(strippedHeaderLine)) {
+                claimMatchingUnit(
+                    text = cleanLine,
+                    fallbackLineNumber = lineNumber,
+                    newStatus = ContentUnitStatus.CLASSIFIED,
+                    fieldKey = "administrative_or_duration"
+                )
                 continue
             }
 
             // 1. Check explicit Stage Marker [مرحلة: ...] or [حصة: ...]
             if ((cleanLine.startsWith("[مرحلة:") || cleanLine.startsWith("[حصة:")) && cleanLine.endsWith("]")) {
+                flushPendingNaturalStageHeaderIfEmpty()
                 val inner = cleanLine.substringAfter(":").removeSuffix("]").trim()
                 detectSessionTransition(inner)?.let { newSession ->
                     activeSessionNumber = newSession
                 }
                 if (isDurationOrSegmentNoise(inner)) {
+                    claimMatchingUnit(inner, lineNumber, ContentUnitStatus.CLASSIFIED, fieldKey = "duration_noise")
                     continue
                 }
                 // Ignore if the stage cell is actually a header metadata cell
-                if (!hasEnteredStages && isHeaderIsolationLine(inner)) {
-                    extractHeaderMetadataInto(
+                if (!hasEnteredStages) {
+                    val matchedMeta = extractHeaderMetadataInto(
                         strippedHeaderLine = inner,
                         onTopic = { topic = it },
                         onLevel = { level = it },
@@ -165,7 +402,10 @@ object JadhadhaParser {
                         onMethodological = { methodological = it },
                         onCultural = { cultural = it }
                     )
-                    continue
+                    if (matchedMeta || isStandaloneHeaderLabelOnly(inner)) {
+                        claimMatchingUnit(inner, lineNumber, ContentUnitStatus.CLASSIFIED, fieldKey = "header_metadata")
+                        continue
+                    }
                 }
                 val hasComprehension = stageMap["comprehension"]?.values?.any { it.isNotEmpty() } == true
                 val matchedKey = matchStageName(inner, detectedComponent, activeSessionNumber, hasComprehension)
@@ -175,6 +415,7 @@ object JadhadhaParser {
                     currentStageKey = matchedKey
                     currentRowStageKey = matchedKey
                     currentField = "content"
+                    claimMatchingUnit(inner, lineNumber, ContentUnitStatus.CLASSIFIED, stageKey = matchedKey, fieldKey = "stage_header")
                 } else {
                     // Check if inner is a generic session header like "الحصة الأولى" or "الحصة الثانية"
                     val sessionStage = matchGenericSessionStage(inner, detectedComponent)
@@ -183,21 +424,24 @@ object JadhadhaParser {
                         currentStageKey = sessionStage
                         currentRowStageKey = sessionStage
                         currentField = "content"
+                        claimMatchingUnit(inner, lineNumber, ContentUnitStatus.CLASSIFIED, stageKey = sessionStage, fieldKey = "session_header")
                     } else if (!cleanLine.startsWith("[حصة:")) {
-                        // Unrecognized stage row in table
+                        // Unrecognized stage row in table -> preserve in unclassifiedLines
                         currentStageKey = null
                         currentRowStageKey = null
-                        if (inner.isNotBlank() && !isHeaderIsolationLine(inner)) {
-                            unclassifiedLines.add(UnclassifiedLine(lineNumber, inner))
+                        if (inner.isNotBlank() && !isStandaloneHeaderLabelOnly(inner)) {
+                            recordUnclassifiedLine(lineNumber, inner)
                         }
+                    } else {
+                        claimMatchingUnit(inner, lineNumber, ContentUnitStatus.CLASSIFIED, fieldKey = "session_banner")
                     }
                 }
                 continue
             }
 
             // 2. Header Isolation (عزل الترويسة):
-            // Any pre-lesson table or paragraphs containing header keywords are extracted ONLY to fill JadhadhaInfo
-            // and strictly prevented from entering stages, activities, or unclassifiedLines.
+            // Pre-lesson metadata lines with valid values or standalone header labels fill JadhadhaInfo,
+            // while any non-matching line is NEVER dropped and proceeds to unclassifiedLines.
             if (!hasEnteredStages || isStrictHeaderPrefix(strippedHeaderLine)) {
                 val matchedHeader = extractHeaderMetadataInto(
                     strippedHeaderLine = strippedHeaderLine,
@@ -216,7 +460,8 @@ object JadhadhaParser {
                     onMethodological = { methodological = it },
                     onCultural = { cultural = it }
                 )
-                if (matchedHeader || (!hasEnteredStages && isHeaderIsolationLine(strippedHeaderLine))) {
+                if (matchedHeader || (!hasEnteredStages && isStandaloneHeaderLabelOnly(strippedHeaderLine))) {
+                    claimMatchingUnit(cleanLine, lineNumber, ContentUnitStatus.CLASSIFIED, fieldKey = "header_metadata")
                     continue
                 }
             }
@@ -225,8 +470,6 @@ object JadhadhaParser {
             val detectedField = detectField(strippedHeaderLine)
             if (detectedField != null) {
                 hasEnteredStages = true
-                // When switching between explicit table columns (abil, teacher, content, eval) of a row,
-                // anchor abil/teacher/eval to the row's base stage if one was set, while allowing content to split stages.
                 val baseKey = if (detectedField in setOf("abil", "teacher", "eval") && currentRowStageKey != null) {
                     currentRowStageKey!!
                 } else {
@@ -248,13 +491,13 @@ object JadhadhaParser {
                     } else {
                         baseKey
                     }
-                    addClassifiedItem(
-                        stageMap = stageMap,
-                        stageSources = stageSources,
+                    recordClassifiedLine(
+                        lineNumber = lineNumber,
                         stageKey = effectiveStageKey,
-                        currentField = currentField,
+                        currentFieldName = currentField,
                         hasExplicitFields = true,
-                        rawItem = rest
+                        rawItem = rest,
+                        originalFullLine = cleanLine
                     )
                 }
                 continue
@@ -262,23 +505,30 @@ object JadhadhaParser {
 
             // Skip raw table header lines if pasted directly
             if (isTableHeaderLine(strippedHeaderLine)) {
+                claimMatchingUnit(cleanLine, lineNumber, ContentUnitStatus.CLASSIFIED, fieldKey = "table_header")
                 continue
             }
 
             // 4. Intra-Cell Stage Splitting (التقسيم المرحلي الداخلي):
-            // While reading lines inside a content cell or unstructured stage block, inspect each line:
-            // if it starts with a new stage heading, switch the active stage pointer immediately.
             val hasComprehensionNow = stageMap["comprehension"]?.values?.any { it.isNotEmpty() } == true
             if (hasEnteredStages && (currentField == "content" || currentStageKey !in stagesWithExplicitFields)) {
                 val intraStageKey = detectIntraCellStageSwitch(cleanLine, detectedComponent, activeSessionNumber, hasComprehensionNow)
                 if (intraStageKey != null && stageMap.containsKey(intraStageKey)) {
+                    flushPendingNaturalStageHeaderIfEmpty()
                     val wasExplicit = currentStageKey != null && currentStageKey in stagesWithExplicitFields
                     currentStageKey = intraStageKey
                     if (wasExplicit) {
                         stagesWithExplicitFields.add(intraStageKey)
                     }
-                    // If the line is purely a standalone stage title (without colon/details), don't duplicate the title as content
+                    // If the line is purely a standalone stage title (without colon/details), mark unit as stage_header
                     if (isPureStageHeadingOnly(cleanLine, detectedComponent, activeSessionNumber, hasComprehensionNow)) {
+                        if (!wasExplicit) {
+                            pendingNaturalStageHeader = lineNumber to cleanLine
+                            pendingNaturalStageKey = intraStageKey
+                            pendingNaturalStageItemCount = stageMap[intraStageKey]?.values?.sumOf { it.size } ?: 0
+                        } else {
+                            claimMatchingUnit(cleanLine, lineNumber, ContentUnitStatus.CLASSIFIED, stageKey = intraStageKey, fieldKey = "stage_header")
+                        }
                         continue
                     }
                 }
@@ -288,19 +538,24 @@ object JadhadhaParser {
             if (currentStageKey == null || currentStageKey !in stagesWithExplicitFields) {
                 val stageMatch = detectStageWithRemainder(cleanLine, detectedComponent, activeSessionNumber, hasComprehensionNow)
                 if (stageMatch != null && stageMap.containsKey(stageMatch.first)) {
+                    flushPendingNaturalStageHeaderIfEmpty()
                     hasEnteredStages = true
                     currentStageKey = stageMatch.first
                     currentField = "content"
                     val remainder = stageMatch.second
                     if (!remainder.isNullOrBlank() && !isDurationOrSegmentNoise(remainder)) {
-                        addClassifiedItem(
-                            stageMap = stageMap,
-                            stageSources = stageSources,
+                        recordClassifiedLine(
+                            lineNumber = lineNumber,
                             stageKey = stageMatch.first,
-                            currentField = currentField,
+                            currentFieldName = currentField,
                             hasExplicitFields = stageMatch.first in stagesWithExplicitFields,
-                            rawItem = remainder
+                            rawItem = remainder,
+                            originalFullLine = cleanLine
                         )
+                    } else {
+                        pendingNaturalStageHeader = lineNumber to cleanLine
+                        pendingNaturalStageKey = stageMatch.first
+                        pendingNaturalStageItemCount = stageMap[stageMatch.first]?.values?.sumOf { it.size } ?: 0
                     }
                     continue
                 }
@@ -309,28 +564,62 @@ object JadhadhaParser {
             // 5. Classify into active stage or record as UnclassifiedLine
             val activeStageKey = currentStageKey
             if (activeStageKey == null) {
-                if (isHeaderIsolationLine(strippedHeaderLine)) {
+                if (isStandaloneHeaderLabelOnly(strippedHeaderLine)) {
+                    claimMatchingUnit(cleanLine, lineNumber, ContentUnitStatus.CLASSIFIED, fieldKey = "header_metadata")
                     continue
                 }
-                // Line appears before any stage header or after table end
-                unclassifiedLines.add(UnclassifiedLine(lineNumber = lineNumber, text = cleanLine))
+                // Line appears before any stage header or after table end -> NEVER drop it!
+                recordUnclassifiedLine(lineNumber, cleanLine)
                 continue
             }
 
             val hasExplicitFields = activeStageKey in stagesWithExplicitFields
             if (!hasExplicitFields && isUnclassifiedInUnstructuredStage(cleanLine, stageMap[activeStageKey])) {
-                unclassifiedLines.add(UnclassifiedLine(lineNumber = lineNumber, text = cleanLine))
+                recordUnclassifiedLine(lineNumber, cleanLine)
                 continue
             }
 
-            addClassifiedItem(
-                stageMap = stageMap,
-                stageSources = stageSources,
+            recordClassifiedLine(
+                lineNumber = lineNumber,
                 stageKey = activeStageKey,
-                currentField = currentField,
+                currentFieldName = currentField,
                 hasExplicitFields = hasExplicitFields,
-                rawItem = cleanLine
+                rawItem = cleanLine,
+                originalFullLine = cleanLine
             )
+        }
+
+        // If a trailing standalone stage heading had no content items at all, flush it so no short line is ever lost
+        flushPendingNaturalStageHeaderIfEmpty()
+        if (pendingNaturalStageHeader != null && pendingNaturalStageItemCount > 0) {
+            claimMatchingUnit(
+                text = pendingNaturalStageHeader!!.second,
+                fallbackLineNumber = pendingNaturalStageHeader!!.first,
+                newStatus = ContentUnitStatus.CLASSIFIED,
+                stageKey = pendingNaturalStageKey,
+                fieldKey = "stage_header"
+            )
+            pendingNaturalStageHeader = null
+        }
+
+        // Mark any remaining unconsumed header/table-header units
+        for (i in mutableUnits.indices) {
+            val u = mutableUnits[i]
+            if (u.id !in consumedUnitIds) {
+                val stripped = u.verbatimText.removePrefix("•").removePrefix("-").removePrefix("+").removePrefix("*").trim()
+                if (isAdministrativeBannerLine(stripped) ||
+                    isDurationOrSegmentNoise(stripped) ||
+                    isTableHeaderLine(stripped) ||
+                    isStandaloneHeaderLabelOnly(stripped) ||
+                    isKnownColumnHeaderCell(stripped)
+                ) {
+                    consumedUnitIds.add(u.id)
+                    mutableUnits[i] = u.copy(
+                        status = ContentUnitStatus.CLASSIFIED,
+                        assignedField = "structural_header"
+                    )
+                }
+            }
         }
 
         // Fill any missing fields across all stages with DEFAULT items and tag their source as DEFAULT
@@ -340,10 +629,10 @@ object JadhadhaParser {
             val fieldMap = stageMap[sm.key] ?: emptyMap()
             val sourcesForStage = stageSources[sm.key]?.toMap() ?: emptyMap()
             sm.key to StageData(
-                eval = fieldMap["eval"]?.distinct() ?: emptyList(),
-                content = fieldMap["content"]?.distinct() ?: emptyList(),
-                teacher = fieldMap["teacher"]?.distinct() ?: emptyList(),
-                abil = fieldMap["abil"]?.distinct() ?: emptyList(),
+                eval = fieldMap["eval"]?.toList() ?: emptyList(),
+                content = fieldMap["content"]?.toList() ?: emptyList(),
+                teacher = fieldMap["teacher"]?.toList() ?: emptyList(),
+                abil = fieldMap["abil"]?.toList() ?: emptyList(),
                 sources = sourcesForStage
             )
         }.toMutableMap()
@@ -400,10 +689,461 @@ object JadhadhaParser {
         val report = buildReport(
             plan = plan,
             isComponentDefaulted = isComponentDefaulted,
-            unclassifiedLines = unclassifiedLines
+            unclassifiedLines = unclassifiedLines,
+            originalRawText = originalRawText,
+            extractedUnits = mutableUnits,
+            unextractableItems = unextractableSegments,
+            recordedModifications = modifications,
+            recordedDuplicateUnits = duplicateUnits,
+            recordedDuplicateItems = duplicateItems
         )
 
         return ParseResult(plan = plan, report = report)
+    }
+
+    /**
+     * Builds traceable [ExtractedUnit]s from raw text (supporting both plain paragraphs and
+     * pipe/tab-separated tables) before [preprocessTabularText] runs.
+     */
+    internal fun buildTraceableUnitsFromRaw(raw: String): List<ExtractedUnit> {
+        if (raw.isBlank()) return emptyList()
+        val rawLines = raw.lines()
+        val tabLinesCount = rawLines.count { it.count { ch -> ch == '\t' } >= 2 }
+        val pipeLinesCount = rawLines.count { line ->
+            val trimmed = line.trim()
+            !trimmed.startsWith("[جدول:") && trimmed.count { ch -> ch == '|' } >= 2
+        }
+        val isTabular = tabLinesCount >= 2 || pipeLinesCount >= 2
+        val delimiter = if (tabLinesCount >= 2) '\t' else '|'
+
+        val units = mutableListOf<ExtractedUnit>()
+        var nextUnitId = 1
+        var paraIdx = 0
+        var tableRowIdx = 0
+
+        for ((lineIdx, line) in rawLines.withIndex()) {
+            val trimmed = line.trim()
+            if (trimmed.isEmpty() || trimmed == "[نهاية الجدول]") continue
+
+            if ((trimmed.startsWith("[مرحلة:") || trimmed.startsWith("[حصة:")) && trimmed.endsWith("]")) {
+                val inner = trimmed.substringAfter(":").removeSuffix("]").trim()
+                if (inner.isNotEmpty()) {
+                    units.add(
+                        ExtractedUnit(
+                            id = "unit_${nextUnitId++}",
+                            verbatimText = inner,
+                            elementType = DocumentElementType.TABLE_CELL,
+                            location = UnitLocation(
+                                sourcePart = "raw_text",
+                                elementIndex = lineIdx,
+                                tableIndex = 0,
+                                rowIndex = tableRowIdx++,
+                                colIndex = 0,
+                                lineNumber = lineIdx + 1
+                            ),
+                            status = ContentUnitStatus.EXTRACTED
+                        )
+                    )
+                }
+                continue
+            }
+
+            if (detectField(trimmed) != null && extractAfterColon(trimmed).isBlank()) {
+                continue
+            }
+
+            if (isTabular && !trimmed.startsWith("[جدول:")) {
+                val cols = if (delimiter == '\t') {
+                    line.split('\t').map { it.trim() }
+                } else {
+                    trimmed.removePrefix("|").removeSuffix("|").split('|').map { it.trim() }
+                }
+                if (cols.size >= 2) {
+                    val isSeparator = cols.all { c -> c.isEmpty() || c.all { ch -> ch == '-' || ch == ':' || ch == ' ' } }
+                    if (isSeparator) continue
+                    val currentRow = tableRowIdx++
+                    for ((colIdx, cell) in cols.withIndex()) {
+                        if (cell.isNotEmpty()) {
+                            units.add(
+                                ExtractedUnit(
+                                    id = "unit_${nextUnitId++}",
+                                    verbatimText = cell,
+                                    elementType = DocumentElementType.TABLE_CELL,
+                                    location = UnitLocation(
+                                        sourcePart = "raw_text",
+                                        elementIndex = lineIdx,
+                                        tableIndex = 0,
+                                        rowIndex = currentRow,
+                                        colIndex = colIdx,
+                                        lineNumber = lineIdx + 1
+                                    ),
+                                    status = ContentUnitStatus.EXTRACTED
+                                )
+                            )
+                        }
+                    }
+                    continue
+                }
+            }
+
+            val clean = DocumentFileReader.stripFormattingTags(trimmed).trim()
+            if (clean.isNotEmpty()) {
+                units.add(
+                    ExtractedUnit(
+                        id = "unit_${nextUnitId++}",
+                        verbatimText = clean,
+                        elementType = DocumentElementType.PARAGRAPH,
+                        location = UnitLocation(
+                            sourcePart = "raw_text",
+                            elementIndex = lineIdx,
+                            paragraphIndex = paraIdx++,
+                            lineNumber = lineIdx + 1
+                        ),
+                        status = ContentUnitStatus.EXTRACTED
+                    )
+                )
+            }
+        }
+        return units
+    }
+
+    /**
+     * Distinguishes unintended same-location duplication from legitimate repetition across different
+     * locations in the document by comparing [ExtractedUnit.id] and [UnitLocation].
+     */
+    internal fun isUnintendedSameLocationDuplicate(
+        prevUnit: ExtractedUnit,
+        currentUnit: ExtractedUnit
+    ): Boolean {
+        if (prevUnit.id == currentUnit.id) return true
+        val locA = prevUnit.location
+        val locB = currentUnit.location
+        if (locA.sourcePart != locB.sourcePart) return false
+
+        // Both inside tables: unintended duplicate only if inside the exact same table cell (same table, row, and col)
+        if (locA.tableIndex != null && locB.tableIndex != null) {
+            return locA.tableIndex == locB.tableIndex &&
+                locA.rowIndex == locB.rowIndex &&
+                locA.colIndex == locB.colIndex
+        }
+
+        // One in a table and one outside a table -> distinct locations (legitimate repetition)
+        if (locA.tableIndex != locB.tableIndex) return false
+
+        // Both are non-table paragraphs: unintended duplicate only if immediately adjacent in the same block
+        val paraA = locA.paragraphIndex ?: locA.elementIndex
+        val paraB = locB.paragraphIndex ?: locB.elementIndex
+        val isAdjacentParagraph = kotlin.math.abs(paraB - paraA) <= 1
+        val isAdjacentLine = kotlin.math.abs(locB.lineNumber - locA.lineNumber) <= 1
+        return isAdjacentParagraph && isAdjacentLine
+    }
+
+    private data class FinalPlanEntry(
+        val stageKey: String,
+        val fieldKey: String,
+        val text: String,
+        var consumedByUnitId: String? = null
+    )
+
+    /**
+     * Content Integrity Monitor (مراقبة سلامة المحتوى - المهمة الثالثة):
+     * Compares:
+     * 1. المحتوى الأصلي ([originalRawText])
+     * 2. المحتوى المستخرج ([extractedUnits])
+     * 3. المحتوى المصنف (classified units)
+     * 4. المحتوى النهائي المستخدم لإنشاء الجذاذة ([plan] non-default items)
+     *
+     * Relies on [ExtractedUnit.id] and [UnitLocation] so that identical text in two different document
+     * locations is treated as two distinct traceable units rather than collapsed into one.
+     */
+    fun verifyContentIntegrity(
+        originalRawText: String,
+        extractedUnits: List<ExtractedUnit>,
+        plan: JadhadhaPlan,
+        unclassifiedLines: List<UnclassifiedLine>,
+        unextractableItems: List<String> = emptyList(),
+        recordedModifications: List<TextModificationRecord> = emptyList(),
+        recordedDuplicateUnits: List<ExtractedUnit> = emptyList(),
+        recordedDuplicateItems: List<String> = emptyList()
+    ): ContentIntegrityReport {
+        val stageMetaList = StageCatalog.getStagesForComponent(plan.componentType)
+        val fields = listOf("abil", "teacher", "content", "eval")
+
+        // Collect all non-default final items used in the JadhadhaPlan as individual occurrences
+        val finalUsedItems = mutableListOf<String>()
+        val finalPlanEntries = mutableListOf<FinalPlanEntry>()
+        val duplicateItemsInPlan = recordedDuplicateItems.toMutableList()
+        val duplicateUnitsList = recordedDuplicateUnits.toMutableList()
+        val recordedDuplicateUnitIds = recordedDuplicateUnits.map { it.id }.toSet()
+        var totalRequiredStageFields = 0
+        var verifiedNonDefaultStageFields = 0
+
+        for (sm in stageMetaList) {
+            val stData = plan.stages[sm.key] ?: StageData()
+            for (f in fields) {
+                totalRequiredStageFields++
+                val src = stData.sourceFor(f)
+                val items = when (f) {
+                    "abil" -> stData.abil
+                    "teacher" -> stData.teacher
+                    "content" -> stData.content
+                    "eval" -> stData.eval
+                    else -> emptyList()
+                }
+                if (src != FieldSource.DEFAULT && items.any { it.isNotBlank() }) {
+                    verifiedNonDefaultStageFields++
+                    items.filter { it.isNotBlank() }.forEach { item ->
+                        val trimmed = item.trim()
+                        finalUsedItems.add(trimmed)
+                        finalPlanEntries.add(
+                            FinalPlanEntry(
+                                stageKey = sm.key,
+                                fieldKey = f,
+                                text = trimmed
+                            )
+                        )
+                    }
+                }
+            }
+        }
+
+        val unclassifiedUnitIds = unclassifiedLines.mapNotNull { it.unitId.takeIf { id -> id.isNotBlank() } }.toSet()
+
+        val classifiedUnits = mutableListOf<ExtractedUnit>()
+        val needsReviewUnits = mutableListOf<ExtractedUnit>()
+        val unextractableUnits = mutableListOf<ExtractedUnit>()
+        val missingUnits = mutableListOf<ExtractedUnit>()
+        val modifiedUnits = recordedModifications.toMutableList()
+
+        // Include any unextractable segments as UNEXTRACTABLE units
+        unextractableItems.forEachIndexed { idx, seg ->
+            unextractableUnits.add(
+                ExtractedUnit(
+                    id = "unextractable_${idx + 1}",
+                    verbatimText = seg,
+                    elementType = DocumentElementType.PARAGRAPH,
+                    location = UnitLocation(sourcePart = "corrupted_xml", elementIndex = idx, lineNumber = idx + 1),
+                    status = ContentUnitStatus.UNEXTRACTABLE
+                )
+            )
+        }
+
+        fun matchesEntryText(unitText: String, unitFinalText: String?, entryText: String): Boolean {
+            if (unitFinalText != null && unitFinalText.trim() == entryText) return true
+            return unitText == entryText ||
+                unitText.endsWith(entryText) ||
+                entryText.endsWith(unitText)
+        }
+
+        for (u in extractedUnits) {
+            if (u.status == ContentUnitStatus.UNEXTRACTABLE) {
+                unextractableUnits.add(u)
+                continue
+            }
+
+            // Match unclassified status strictly by unit ID or exact UnitLocation (never by text alone)
+            val isUnclassifiedByIdOrLocation = u.id in unclassifiedUnitIds ||
+                u.status == ContentUnitStatus.NEEDS_REVIEW ||
+                unclassifiedLines.any { uLine ->
+                    uLine.unitId.isBlank() &&
+                        uLine.location == u.location &&
+                        (uLine.verbatimText.trim() == u.verbatimText.trim() || uLine.text.trim() == u.verbatimText.trim())
+                }
+            if (isUnclassifiedByIdOrLocation) {
+                needsReviewUnits.add(u.copy(status = ContentUnitStatus.NEEDS_REVIEW))
+                continue
+            }
+
+            val isStructural = u.assignedField in setOf(
+                "header_metadata",
+                "stage_header",
+                "session_header",
+                "session_banner",
+                "table_header",
+                "structural_header",
+                "administrative_or_duration",
+                "duration_noise"
+            )
+            if (isStructural) {
+                classifiedUnits.add(u.copy(status = ContentUnitStatus.CLASSIFIED))
+                continue
+            }
+
+            // If this unit was explicitly recorded as an unintended same-location duplicate, verify its text is still in finalUsedItems
+            val vText = u.verbatimText.trim()
+            val expectedText = u.finalClassifiedText?.trim() ?: vText
+            if (u.id in recordedDuplicateUnitIds) {
+                val stillPresent = finalPlanEntries.any { matchesEntryText(vText, u.finalClassifiedText, it.text) }
+                if (stillPresent) {
+                    classifiedUnits.add(u.copy(status = ContentUnitStatus.CLASSIFIED))
+                } else {
+                    missingUnits.add(u)
+                }
+                continue
+            }
+
+            // Each distinct-location ExtractedUnit (by u.id and u.location) must claim its own unconsumed FinalPlanEntry
+            val matchedEntry = finalPlanEntries.firstOrNull { entry ->
+                entry.consumedByUnitId == null &&
+                    (u.assignedStageKey == null || entry.stageKey == u.assignedStageKey) &&
+                    (u.assignedField == null || entry.fieldKey == u.assignedField) &&
+                    matchesEntryText(vText, u.finalClassifiedText, entry.text)
+            } ?: finalPlanEntries.firstOrNull { entry ->
+                entry.consumedByUnitId == null &&
+                    matchesEntryText(vText, u.finalClassifiedText, entry.text)
+            }
+
+            if (matchedEntry != null) {
+                matchedEntry.consumedByUnitId = u.id
+                classifiedUnits.add(
+                    u.copy(
+                        status = ContentUnitStatus.CLASSIFIED,
+                        assignedStageKey = u.assignedStageKey ?: matchedEntry.stageKey,
+                        assignedField = u.assignedField ?: matchedEntry.fieldKey,
+                        finalClassifiedText = matchedEntry.text
+                    )
+                )
+                if (vText != matchedEntry.text &&
+                    !vText.endsWith(matchedEntry.text) &&
+                    !matchedEntry.text.endsWith(vText) &&
+                    modifiedUnits.none { it.unitId == u.id }
+                ) {
+                    modifiedUnits.add(
+                        TextModificationRecord(
+                            unitId = u.id,
+                            originalText = vText,
+                            finalText = matchedEntry.text,
+                            location = u.location
+                        )
+                    )
+                }
+            } else {
+                // Check if this unit was modified into an unconsumed entry in the target stage/field
+                val cleanV = cleanBullet(expectedText)
+                val modifiedEntry = finalPlanEntries.firstOrNull { entry ->
+                    entry.consumedByUnitId == null &&
+                        (u.assignedStageKey == null || entry.stageKey == u.assignedStageKey) &&
+                        (u.assignedField == null || entry.fieldKey == u.assignedField) &&
+                        (
+                            cleanBullet(entry.text) == cleanV ||
+                                (cleanV.length >= 10 && entry.text.contains(cleanV.take(15))) ||
+                                (entry.text.length >= 10 && cleanV.contains(entry.text.take(15)))
+                            )
+                } ?: finalPlanEntries.firstOrNull { entry ->
+                    entry.consumedByUnitId == null &&
+                        (
+                            cleanBullet(entry.text) == cleanV ||
+                                (cleanV.length >= 10 && entry.text.contains(cleanV.take(15))) ||
+                                (entry.text.length >= 10 && cleanV.contains(entry.text.take(15)))
+                            )
+                }
+
+                if (modifiedEntry != null) {
+                    modifiedEntry.consumedByUnitId = u.id
+                    classifiedUnits.add(
+                        u.copy(
+                            status = ContentUnitStatus.CLASSIFIED,
+                            assignedStageKey = u.assignedStageKey ?: modifiedEntry.stageKey,
+                            assignedField = u.assignedField ?: modifiedEntry.fieldKey,
+                            finalClassifiedText = modifiedEntry.text
+                        )
+                    )
+                    if (modifiedUnits.none { it.unitId == u.id }) {
+                        modifiedUnits.add(
+                            TextModificationRecord(
+                                unitId = u.id,
+                                originalText = vText,
+                                finalText = modifiedEntry.text,
+                                location = u.location
+                            )
+                        )
+                    }
+                } else {
+                    // No unconsumed entry in the final plan matches this unit (by ID & location) -> MISSING!
+                    missingUnits.add(u)
+                }
+            }
+        }
+
+        // Detect any unbacked duplicate entries in the final plan (entries repeated inside a stage field without a distinct-location source unit)
+        val entriesByStageField = finalPlanEntries.groupBy { it.stageKey to it.fieldKey }
+        for ((_, entries) in entriesByStageField) {
+            val seenConsumedTexts = mutableSetOf<String>()
+            for (entry in entries) {
+                if (entry.consumedByUnitId == null && entry.text in seenConsumedTexts) {
+                    if (!duplicateItemsInPlan.contains(entry.text)) {
+                        duplicateItemsInPlan.add(entry.text)
+                    }
+                } else {
+                    seenConsumedTexts.add(entry.text)
+                }
+            }
+        }
+
+        // Also check if any non-structural line in originalRawText was completely missed when extractedUnits is empty
+        if (originalRawText.isNotBlank() && extractedUnits.isEmpty()) {
+            val finalUsedSet = finalUsedItems.toSet()
+            val unclassifiedTextSet = unclassifiedLines.flatMap { listOf(it.text.trim(), it.verbatimText.trim()) }.toSet()
+            originalRawText.lines().forEachIndexed { idx, rawLine ->
+                val trimmed = rawLine.trim()
+                if (trimmed.isNotEmpty() && trimmed !in finalUsedSet && trimmed !in unclassifiedTextSet) {
+                    missingUnits.add(
+                        ExtractedUnit(
+                            id = "missing_raw_${idx + 1}",
+                            verbatimText = trimmed,
+                            elementType = DocumentElementType.PARAGRAPH,
+                            location = UnitLocation(sourcePart = "original_raw", elementIndex = idx, lineNumber = idx + 1),
+                            status = ContentUnitStatus.EXTRACTED
+                        )
+                    )
+                }
+            }
+        }
+
+        // Calculate realistic completion percentage based on actual verification
+        val fieldCoverageRatio = if (totalRequiredStageFields > 0) {
+            verifiedNonDefaultStageFields.toDouble() / totalRequiredStageFields.toDouble()
+        } else {
+            0.0
+        }
+
+        val totalTrackedUnits = classifiedUnits.size + needsReviewUnits.size + missingUnits.size + unextractableUnits.size
+        val intactClassifiedCount = (classifiedUnits.size - modifiedUnits.size).coerceAtLeast(0)
+        val unitIntegrityRatio = if (totalTrackedUnits > 0) {
+            intactClassifiedCount.toDouble() / totalTrackedUnits.toDouble()
+        } else if (originalRawText.isBlank()) {
+            0.0
+        } else {
+            1.0
+        }
+
+        val rawPercentage = ((fieldCoverageRatio * unitIntegrityRatio) * 100.0).toInt().coerceIn(0, 100)
+        val hasAnyDeficiency = verifiedNonDefaultStageFields < totalRequiredStageFields ||
+            needsReviewUnits.isNotEmpty() ||
+            missingUnits.isNotEmpty() ||
+            unextractableUnits.isNotEmpty() ||
+            modifiedUnits.isNotEmpty() ||
+            totalTrackedUnits == 0
+
+        val actualCompletionPercentage = if (hasAnyDeficiency) {
+            rawPercentage.coerceAtMost(99)
+        } else {
+            100
+        }
+
+        return ContentIntegrityReport(
+            originalRawText = originalRawText,
+            extractedUnits = extractedUnits,
+            classifiedUnits = classifiedUnits,
+            unclassifiedUnits = needsReviewUnits,
+            unextractableUnits = unextractableUnits,
+            finalUsedItems = finalUsedItems,
+            missingUnits = missingUnits,
+            duplicateUnits = duplicateUnitsList,
+            duplicateItems = duplicateItemsInPlan,
+            modifiedUnits = modifiedUnits,
+            actualCompletionPercentage = actualCompletionPercentage
+        )
     }
 
     /**
@@ -415,7 +1155,13 @@ object JadhadhaParser {
         unclassifiedLines: List<UnclassifiedLine>,
         aiClassifiedLinesCount: Int = 0,
         aiRefinedFieldsCount: Int = 0,
-        isAiDelegated: Boolean = false
+        isAiDelegated: Boolean = false,
+        originalRawText: String = "",
+        extractedUnits: List<ExtractedUnit> = emptyList(),
+        unextractableItems: List<String> = emptyList(),
+        recordedModifications: List<TextModificationRecord> = emptyList(),
+        recordedDuplicateUnits: List<ExtractedUnit> = emptyList(),
+        recordedDuplicateItems: List<String> = emptyList()
     ): ParseReport {
         val stageMetaList = StageCatalog.getStagesForComponent(plan.componentType)
         val stageCounts = stageMetaList.associate { sm ->
@@ -434,6 +1180,18 @@ object JadhadhaParser {
                 userCount = userCount
             )
         }
+
+        val integrity = verifyContentIntegrity(
+            originalRawText = originalRawText,
+            extractedUnits = extractedUnits,
+            plan = plan,
+            unclassifiedLines = unclassifiedLines,
+            unextractableItems = unextractableItems,
+            recordedModifications = recordedModifications,
+            recordedDuplicateUnits = recordedDuplicateUnits,
+            recordedDuplicateItems = recordedDuplicateItems
+        )
+
         return ParseReport(
             detectedComponent = plan.componentType,
             isComponentDefaulted = isComponentDefaulted,
@@ -442,14 +1200,19 @@ object JadhadhaParser {
             unclassifiedLines = unclassifiedLines,
             aiClassifiedLinesCount = aiClassifiedLinesCount,
             aiRefinedFieldsCount = aiRefinedFieldsCount,
-            isAiDelegated = isAiDelegated
+            isAiDelegated = isAiDelegated,
+            originalRawText = originalRawText,
+            extractedUnits = extractedUnits,
+            unextractableItems = unextractableItems,
+            integrityReport = integrity
         )
     }
 
     /**
      * Assigns an [UnclassifiedLine] to a specific [targetStageKey] and [targetField] ("abil", "teacher", "content", "eval").
-     * Updates that field's source to [FieldSource.FILE], removes any DEFAULT placeholder in that cell,
-     * removes the line from [ParseReport.unclassifiedLines], and updates the report counts.
+     * Preserves the verbatim text of the unit without unjustified modification, updates that field's source
+     * to [FieldSource.FILE], removes any DEFAULT placeholder in that cell, removes the line from
+     * [ParseReport.unclassifiedLines], and updates the integrity report.
      */
     fun assignUnclassifiedLine(
         currentResult: ParseResult,
@@ -459,29 +1222,31 @@ object JadhadhaParser {
     ): ParseResult {
         val plan = currentResult.plan
         val currentStage = plan.stages[targetStageKey] ?: StageData()
-        val cleanText = cleanBullet(line.text).ifBlank { line.text.trim() }
+        val verbatimItem = line.verbatimText.ifBlank { line.text }.let {
+            DocumentFileReader.stripFormattingTags(it).trim()
+        }
         val formattedItem = if (targetField == "content") {
-            formatContentSubLabel(cleanText)
+            formatContentSubLabel(verbatimItem)
         } else {
-            cleanText.replace("<u>", "").replace("</u>", "").trim()
+            verbatimItem
         }
 
         val wasDefault = currentStage.sourceFor(targetField) == FieldSource.DEFAULT
         val updatedStage = when (targetField) {
             "abil" -> currentStage.copy(
-                abil = if (wasDefault) listOf(formattedItem) else (currentStage.abil + formattedItem).distinct(),
+                abil = if (wasDefault) listOf(formattedItem) else (currentStage.abil + formattedItem),
                 sources = currentStage.sources + ("abil" to FieldSource.FILE)
             )
             "teacher" -> currentStage.copy(
-                teacher = if (wasDefault) listOf(formattedItem) else (currentStage.teacher + formattedItem).distinct(),
+                teacher = if (wasDefault) listOf(formattedItem) else (currentStage.teacher + formattedItem),
                 sources = currentStage.sources + ("teacher" to FieldSource.FILE)
             )
             "eval" -> currentStage.copy(
-                eval = if (wasDefault) listOf(formattedItem) else (currentStage.eval + formattedItem).distinct(),
+                eval = if (wasDefault) listOf(formattedItem) else (currentStage.eval + formattedItem),
                 sources = currentStage.sources + ("eval" to FieldSource.FILE)
             )
             else -> currentStage.copy(
-                content = if (wasDefault) listOf(formattedItem) else (currentStage.content + formattedItem).distinct(),
+                content = if (wasDefault) listOf(formattedItem) else (currentStage.content + formattedItem),
                 sources = currentStage.sources + ("content" to FieldSource.FILE)
             )
         }
@@ -491,12 +1256,36 @@ object JadhadhaParser {
         }
         val updatedPlan = plan.copy(stages = updatedStages)
         val remainingUnclassified = currentResult.report.unclassifiedLines.filterNot {
-            it.lineNumber == line.lineNumber && it.text == line.text
+            (line.unitId.isNotBlank() && it.unitId == line.unitId) ||
+                (it.lineNumber == line.lineNumber && it.text == line.text)
+        }
+        val updatedUnits = currentResult.report.extractedUnits.map { u ->
+            if ((line.unitId.isNotBlank() && u.id == line.unitId) ||
+                (u.location.lineNumber == line.lineNumber && u.verbatimText == verbatimItem)
+            ) {
+                u.copy(
+                    status = ContentUnitStatus.CLASSIFIED,
+                    assignedStageKey = targetStageKey,
+                    assignedField = targetField,
+                    finalClassifiedText = formattedItem
+                )
+            } else {
+                u
+            }
         }
         val updatedReport = buildReport(
             plan = updatedPlan,
             isComponentDefaulted = currentResult.report.isComponentDefaulted,
-            unclassifiedLines = remainingUnclassified
+            unclassifiedLines = remainingUnclassified,
+            aiClassifiedLinesCount = currentResult.report.aiClassifiedLinesCount,
+            aiRefinedFieldsCount = currentResult.report.aiRefinedFieldsCount,
+            isAiDelegated = currentResult.report.isAiDelegated,
+            originalRawText = currentResult.report.originalRawText,
+            extractedUnits = updatedUnits,
+            unextractableItems = currentResult.report.unextractableItems,
+            recordedModifications = currentResult.report.integrityReport?.modifiedUnits.orEmpty(),
+            recordedDuplicateUnits = currentResult.report.integrityReport?.duplicateUnits.orEmpty(),
+            recordedDuplicateItems = currentResult.report.integrityReport?.duplicateItems.orEmpty()
         )
         return ParseResult(plan = updatedPlan, report = updatedReport)
     }
@@ -509,7 +1298,8 @@ object JadhadhaParser {
         line: UnclassifiedLine
     ): ParseResult {
         val remaining = currentResult.report.unclassifiedLines.filterNot {
-            it.lineNumber == line.lineNumber && it.text == line.text
+            (line.unitId.isNotBlank() && it.unitId == line.unitId) ||
+                (it.lineNumber == line.lineNumber && it.text == line.text)
         }
         return currentResult.copy(
             report = currentResult.report.copy(unclassifiedLines = remaining)
@@ -576,36 +1366,74 @@ object JadhadhaParser {
     }
 
     /**
-     * Header Isolation check: matches pre-lesson header lines/cells that contain
-     * ("جذاذة تربوية", "الفئة المستهدفة", "المكون", "الموضوع", "الوسائل الديدكتيكية",
-     * "الكفاية التواصلية", "الكفاية المنهجية", "الهدف") so they never leak into stages or unclassified lines.
+     * Matches ONLY standalone header labels (without sentence content) so normal paragraphs
+     * or short sentences starting with words like "الهدف" or "الموضوع" are never swallowed.
+     */
+    private fun isStandaloneHeaderLabelOnly(s: String): Boolean {
+        val norm = normalizeHeaderToken(s)
+        return norm in setOf(
+            "جذاذه تربويه",
+            "الفئه المستهدفه",
+            "المكون",
+            "الموضوع",
+            "عنوان الدرس",
+            "موضوع الدرس",
+            "الوسائل الديدكتيكيه",
+            "الوسائل الديداكتيكيه",
+            "الوسائل التعليميه",
+            "الكفايه التواصليه",
+            "الكفايه المنهجيه",
+            "الكفايه الثقافيه",
+            "الكفايه المعرفيه",
+            "الكفايات المتوخاه",
+            "الكفايات المستهدفه",
+            "الاهداف التعليميه",
+            "الاهداف التعلميه",
+            "الهدف",
+            "الاهداف",
+            "المرجع",
+            "الاستاذ",
+            "المؤسسه",
+            "الوحده",
+            "الدوره",
+            "المجال",
+            "مده الانجاز",
+            "المده الزمنيه",
+            "الغلاف الزمني",
+            "الحصيص الزمني"
+        )
+    }
+
+    /**
+     * Used when inspecting tabular cells in [preprocessTabularText] to identify pre-lesson header tables.
      */
     private fun isHeaderIsolationLine(s: String): Boolean {
+        if (isStandaloneHeaderLabelOnly(s) || isStrictHeaderPrefix(s)) return true
         val norm = normalizeHeaderToken(s)
         return norm.contains("جذاذه تربويه") ||
-                norm.contains("الفئه المستهدفه") ||
-                norm.startsWith("المكون ") || norm == "المكون" ||
-                norm.startsWith("الموضوع ") || norm == "الموضوع" ||
-                norm.startsWith("عنوان الدرس") || norm.startsWith("موضوع الدرس") ||
-                norm.contains("الوسائل الديدكتيكيه") ||
-                norm.contains("الوسائل الديداكتيكيه") ||
-                norm.contains("الوسائل التعليميه") ||
-                norm.contains("الكفايه التواصليه") ||
-                norm.contains("الكفايه المنهجيه") ||
-                norm.contains("الكفايه الثقافيه") ||
-                norm.contains("الكفايه المعرفيه") ||
-                norm.contains("الكفايات المتوخاه") ||
-                norm.contains("الكفايات المستهدفه") ||
-                norm.startsWith("الهدف ") || norm == "الهدف" ||
-                norm.startsWith("الاهداف ") || norm == "الاهداف" ||
-                norm.startsWith("الفئه ") ||
-                norm.startsWith("المرجع ") || norm == "المرجع" ||
-                norm.startsWith("الاستاذ ") || norm == "الاستاذ" ||
-                norm.startsWith("المؤسسه ") || norm == "المؤسسه" ||
-                norm.startsWith("الدعامات ") ||
-                norm.startsWith("المده الزمنيه") ||
-                norm.startsWith("الغلاف الزمني") ||
-                norm.startsWith("الحصيص الزمني")
+            norm.contains("الفئه المستهدفه") ||
+            norm.contains("الوسائل الديدكتيكيه") ||
+            norm.contains("الوسائل الديداكتيكيه") ||
+            norm.contains("الوسائل التعليميه") ||
+            norm.contains("الكفايه التواصليه") ||
+            norm.contains("الكفايه المنهجيه") ||
+            norm.contains("الكفايه الثقافيه") ||
+            norm.contains("الكفايه المعرفيه") ||
+            norm.contains("الكفايات المتوخاه") ||
+            norm.contains("الكفايات المستهدفه")
+    }
+
+    private fun isKnownColumnHeaderCell(s: String): Boolean {
+        val norm = normalizeHeaderToken(s)
+        if (norm.isEmpty() || norm.length > 40) return false
+        return norm in setOf(
+            "المراحل", "المقاطع", "مقاطع الدرس", "المقاطع والمراحل", "الخطوات", "خطوات القراءه",
+            "الحصيص الزمني", "المده الزمنيه",
+            "القدرات والمهارات", "القدرات المستهدفه", "القدرات", "المهارات", "الاهداف",
+            "الانشطه التعليميه التعلميه", "الانشطه التعليميه", "انشطه المدرس", "انشطه الاستاذ",
+            "انشطه المتعلم", "انشطه المتعلمين", "المحتوي", "المحتوي الديداكتيكي", "المضامين",
+            "التقويم والدعم", "تقويم ودعم", "التقويم", "مؤشرات التقويم", "الدعم"
+        )
     }
 
     private fun extractHeaderMetadataInto(
@@ -717,12 +1545,20 @@ object JadhadhaParser {
             }
         } else if (strippedHeaderLine.contains("كفاية تواصلية") || strippedHeaderLine.startsWith("الكفاية التواصلية")) {
             val extracted = extractAfterColon(strippedHeaderLine)
-            if (extracted.isNotBlank()) onCommunicative(extracted)
-            matchedHeader = true
+            if (extracted.isNotBlank()) {
+                onCommunicative(extracted)
+                matchedHeader = true
+            } else if (isStandaloneHeaderLabelOnly(strippedHeaderLine)) {
+                matchedHeader = true
+            }
         } else if (strippedHeaderLine.contains("كفاية منهجية") || strippedHeaderLine.startsWith("الكفاية المنهجية")) {
             val extracted = extractAfterColon(strippedHeaderLine)
-            if (extracted.isNotBlank()) onMethodological(extracted)
-            matchedHeader = true
+            if (extracted.isNotBlank()) {
+                onMethodological(extracted)
+                matchedHeader = true
+            } else if (isStandaloneHeaderLabelOnly(strippedHeaderLine)) {
+                matchedHeader = true
+            }
         } else if (strippedHeaderLine.contains("كفاية ثقافية") ||
             strippedHeaderLine.contains("كفاية معرفية") ||
             strippedHeaderLine.startsWith("الكفاية الثقافية") ||
@@ -732,8 +1568,12 @@ object JadhadhaParser {
             (!hasEnteredStages && (strippedHeaderLine.startsWith("الهدف:") || strippedHeaderLine.startsWith("الهدف العام:") || strippedHeaderLine.startsWith("الأهداف:")))
         ) {
             val extracted = extractAfterColon(strippedHeaderLine)
-            if (extracted.isNotBlank()) onCultural(extracted)
-            matchedHeader = true
+            if (extracted.isNotBlank()) {
+                onCultural(extracted)
+                matchedHeader = true
+            } else if (isStandaloneHeaderLabelOnly(strippedHeaderLine)) {
+                matchedHeader = true
+            }
         }
 
         return matchedHeader
@@ -761,7 +1601,7 @@ object JadhadhaParser {
         }
 
         // If it matches a known pedagogical verb/prefix for abil, teacher, learner/content, or eval, it's classified
-        val inferred = inferFieldFromUnstructuredLine(trimmed, "unknown")
+        val inferred = inferFieldFromUnstructuredLine(cleanBullet(trimmed), "unknown")
         if (inferred != "unknown") {
             return false
         }
@@ -798,7 +1638,7 @@ object JadhadhaParser {
     /**
      * Converts tab-separated or pipe-separated table rows (e.g. pasted from Word/Excel)
      * into explicit stage and field blocks, inspecting the first two rows of the lesson table
-     * together for split headers and isolating pre-lesson header tables.
+     * together for split headers and isolating pre-lesson header tables without altering cell text.
      */
     private fun preprocessTabularText(raw: String): String {
         val rawLines = raw.lines()
@@ -817,11 +1657,11 @@ object JadhadhaParser {
             if (delimiter != '|') {
                 return line.split('\t').map { it.trim() }
             }
-            val raw = trimmed.removePrefix("|").removeSuffix("|")
+            val rawRow = trimmed.removePrefix("|").removeSuffix("|")
             val parts = mutableListOf<String>()
             val current = StringBuilder()
             var bracketDepth = 0
-            for (ch in raw) {
+            for (ch in rawRow) {
                 when (ch) {
                     '[' -> {
                         bracketDepth++
@@ -915,19 +1755,7 @@ object JadhadhaParser {
                         if (combinedLines.isEmpty()) return
                         sb.appendLine(headerLabel)
                         combinedLines.forEach { cellLine ->
-                            val formatted = if (
-                                cellLine.startsWith("-") ||
-                                cellLine.startsWith("+") ||
-                                cellLine.startsWith("•") ||
-                                cellLine.startsWith("*") ||
-                                cellLine.startsWith("<u>") ||
-                                cellLine.startsWith("[جدول:")
-                            ) {
-                                cellLine
-                            } else {
-                                "- $cellLine"
-                            }
-                            sb.appendLine(formatted)
+                            sb.appendLine(cellLine)
                         }
                     }
 
@@ -973,8 +1801,6 @@ object JadhadhaParser {
 
         if (row2 != null && row2.size >= 2) {
             val map2 = matchHeaderColumns(row2)
-            // Second row is a sub-header if it contains recognized column headers (like teacher/content/eval)
-            // and is not a normal data row with long sentences
             val row2LooksLikeSubHeader = map2.isNotEmpty() &&
                 row2.all { it.length <= 45 } &&
                 (map2.containsValue("teacher") || map2.containsValue("content") || map2.containsValue("eval") || map2.containsValue("abil")) &&
@@ -1001,13 +1827,7 @@ object JadhadhaParser {
     }
 
     /**
-     * Dynamically matches column header titles from any table format (3, 4, 8, or 9 columns, RTL or LTR):
-     * - عمود المحتوى: ("محتوى", "مضامين", "سير الدرس", "الأمثلة", "النصوص")
-     * - عمود أنشطة المدرس: ("أنشطة المدرس", "أنشطة الأستاذ", "توجيهات", "مهام المدرس")
-     * - عمود أنشطة المتعلم: ("أنشطة المتعلم", "أنشطة المتعلمين", "مهام المتعلم")
-     * - عمود التقويم: ("التقويم", "الدعم", "مؤشرات التقويم") — supports multiple eval/indicator columns
-     * - عمود القدرات: ("القدرات", "الأهداف", "المهارات")
-     * - عمود المراحل: ("المراحل", "الخطوات", "خطوات القراءة", "المقاطع")
+     * Dynamically matches column header titles from any table format (3, 4, 8, or 9 columns, RTL or LTR).
      */
     internal fun matchHeaderColumns(cols: List<String>): Map<Int, String> {
         val result = mutableMapOf<Int, String>()
@@ -1031,7 +1851,6 @@ object JadhadhaParser {
                 (norm.contains("الاستاذ") && norm.contains("المتعلم"))
 
             val role = when {
-                // 1. عمود المراحل: ("المراحل", "الخطوات", "خطوات القراءة", or "المقاطع" if no separate "المراحل" column exists)
                 !hasStage && (
                     norm.contains("المراحل") || norm.contains("مراحل") ||
                         norm.contains("الخطوات") || norm.contains("خطوات القراءه") ||
@@ -1041,28 +1860,22 @@ object JadhadhaParser {
                     "stage"
                 }
 
-                // 2. عمود التقويم: ("التقويم", "الدعم", "مؤشرات التقويم") — multiple columns allowed and merged
                 norm.contains("التقويم") || norm.contains("تقويم") ||
                     norm.contains("الدعم") || norm.contains("مؤشرات") -> "eval"
 
-                // 3. عمود القدرات: ("القدرات", "الأهداف", "المهارات")
                 norm.contains("القدرات") || norm.contains("قدرات") ||
                     norm.contains("الاهداف") || norm.contains("اهداف") ||
                     norm.contains("الكفايات") ||
                     norm.contains("المهارات") || norm.contains("مهارات") -> "abil"
 
-                // 4. Combined activities column -> "content" (sub-lines inside will split teacher/learner by verb prefix)
                 isCombinedActivities -> "content"
 
-                // 5. عمود أنشطة المدرس: ("أنشطة المدرس", "أنشطة الأستاذ", "توجيهات", "مهام المدرس")
                 norm.contains("انشطه المدرس") || norm.contains("انشطه الاستاذ") ||
                     norm.contains("توجيهات") || norm.contains("مهام المدرس") ||
                     norm.contains("دور المدرس") || norm.contains("دور الاستاذ") ||
                     norm.contains("الاستاذ") || norm.contains("المدرس") ||
                     (norm.contains("التعليميه") && !norm.contains("التعلميه")) -> "teacher"
 
-                // 6. عمود أنشطة المتعلم & عمود المحتوى:
-                // ("أنشطة المتعلم", "أنشطة المتعلمين", "مهام المتعلم", "محتوى", "مضامين", "سير الدرس", "الأمثلة", "النصوص")
                 norm.contains("انشطه المتعلم") || norm.contains("انشطه المتعلمين") ||
                     norm.contains("مهام المتعلم") || norm.contains("دور المتعلم") ||
                     norm.contains("المتعلم") || norm.contains("التلميذ") ||
@@ -1085,7 +1898,6 @@ object JadhadhaParser {
     private fun inferFallbackColumnMap(cols: List<String>): Map<Int, String> {
         val n = cols.size
         if (n < 3) return emptyMap()
-        // Check if last column is a stage name (LTR table without explicit header row)
         val firstLooksLikeStage = looksLikeStageCell(cols.first())
         val lastLooksLikeStage = looksLikeStageCell(cols.last())
         val isLtr = lastLooksLikeStage && !firstLooksLikeStage
@@ -1164,40 +1976,6 @@ object JadhadhaParser {
         return s == "المقاطع والمراحل" || s == "المراحل" || s == "المقاطع" || s == "مقاطع الدرس" || (hasStage && hasOtherCol)
     }
 
-    private fun addClassifiedItem(
-        stageMap: MutableMap<String, MutableMap<String, MutableList<String>>>,
-        stageSources: MutableMap<String, MutableMap<String, FieldSource>>,
-        stageKey: String,
-        currentField: String,
-        hasExplicitFields: Boolean,
-        rawItem: String
-    ) {
-        val clean = cleanBullet(DocumentFileReader.stripFormattingTags(rawItem))
-        if (clean.isBlank() || isDurationOrSegmentNoise(clean)) return
-
-        val targetField = if (hasExplicitFields) {
-            // Even when inside a "content" cell (e.g., 2-column or 3-column table or combined activities column),
-            // if a paragraph begins with an explicit teacher verb or ability prefix, route it semantically.
-            if (currentField == "content") {
-                val semanticRole = inferStrictSemanticRole(clean)
-                if (semanticRole == "teacher" || semanticRole == "abil") semanticRole else currentField
-            } else {
-                currentField
-            }
-        } else {
-            inferFieldFromUnstructuredLine(clean, currentField)
-        }
-
-        val formattedItem = if (targetField == "content") {
-            formatContentSubLabel(clean)
-        } else {
-            DocumentFileReader.stripFormattingTags(clean).trim()
-        }
-
-        stageMap[stageKey]?.get(targetField)?.add(formattedItem)
-        stageSources[stageKey]?.put(targetField, FieldSource.FILE)
-    }
-
     private val KNOWN_SUB_LABELS = listOf(
         "مكتسبات قبلية", "التمهيد", "العنوان", "الصورة", "صاحب النص", "مصدر النص",
         "نوعية النص", "مجال النص", "فرضية القراءة", "الفرضيات", "الشروح اللغوية",
@@ -1249,7 +2027,7 @@ object JadhadhaParser {
      * as specified in the hybrid architecture.
      */
     private fun inferStrictSemanticRole(clean: String): String? {
-        val plain = DocumentFileReader.stripFormattingTags(clean)
+        val plain = cleanBullet(DocumentFileReader.stripFormattingTags(clean))
             .removePrefix("أنشطة المدرس:")
             .removePrefix("أنشطة الأستاذ:")
             .trim()
@@ -1265,7 +2043,7 @@ object JadhadhaParser {
     }
 
     private fun inferFieldFromUnstructuredLine(clean: String, fallbackField: String): String {
-        val plain = DocumentFileReader.stripFormattingTags(clean).trim()
+        val plain = cleanBullet(DocumentFileReader.stripFormattingTags(clean)).trim()
         val strict = inferStrictSemanticRole(plain)
         if (strict != null) return strict
 
@@ -1340,7 +2118,6 @@ object JadhadhaParser {
             val normKw = normalizeHeaderToken(kw)
             if (normKw.isEmpty()) continue
             val normCand = normalizeHeaderToken(normalizedCandidate)
-            // Also check without leading "ال" on first word so "تمهيد" matches "التمهيد" and vice versa
             val normCandNoAl = normCand.removePrefix("ال")
             val normKwNoAl = normKw.removePrefix("ال")
             if (normCand == normKw ||
@@ -1367,7 +2144,6 @@ object JadhadhaParser {
         val candidate = stripLeadingOrdinalsAndBullets(line)
         if (candidate.isEmpty() || candidate.startsWith("[جدول:")) return null
 
-        // Extract heading prefix (before colon/dash if present, or first 45 chars if standalone heading)
         val colonIdx = candidate.indexOf(':')
         val headerPrefix = when {
             colonIdx in 1..48 -> candidate.substring(0, colonIdx).trim()
@@ -1375,7 +2151,6 @@ object JadhadhaParser {
             else -> return null
         }
 
-        // First check direct stage name match for EXPRESSION sub-stages
         if (component == PedagogicalComponent.EXPRESSION) {
             val directMatch = matchStageName(headerPrefix, component, activeSessionNumber, hasComprehension)
             if (directMatch != null) return directMatch
@@ -1439,7 +2214,6 @@ object JadhadhaParser {
         val stripped = stripLeadingOrdinalsAndBullets(line)
         val colonIdx = stripped.indexOf(':')
         if (colonIdx >= 0 && colonIdx < stripped.length - 1) {
-            // Has content after colon (e.g., "التركيب: خلاصة جامعة...") -> keep the line so its content is added
             return false
         }
         val cleanHeading = stripped.removeSuffix(":").trim()
@@ -1570,7 +2344,7 @@ object JadhadhaParser {
         }
 
         // Stage header part must be concise (not a long paragraph)
-        if (headerPart.length > 50) return null
+        if (headerPart.length > 42) return null
 
         // Do NOT confuse content sub-labels (like الفكرة العامة:, الحقول المعجمية:, العنوان:) with standalone stage headers
         if (KNOWN_SUB_LABELS.any { headerPart == it || headerPart.startsWith(it) }) {
@@ -1587,7 +2361,7 @@ object JadhadhaParser {
             return diagKey to "التمهيد: $remainderPart"
         }
 
-        val stageKey = matchStageName(headerPart, component, activeSessionNumber, hasComprehension) ?: return null
+        val stageKey = matchNaturalStageHeading(headerPart, component, activeSessionNumber, hasComprehension) ?: return null
 
         // If remainder is just a session subtitle (e.g. "الحصة الأولى: القراءة الاستكشافية"), ignore remainder
         val cleanRemainder = if (!remainderPart.isNullOrBlank() &&
@@ -1605,6 +2379,46 @@ object JadhadhaParser {
         }
 
         return stageKey to cleanRemainder
+    }
+
+    /**
+     * Strict natural stage heading matcher for plain paragraphs outside `[مرحلة: ...]`, preventing
+     * arbitrary short sentences containing words like "ملاحظة" or "خلاصة" or "تشخيص" from being
+     * mistaken for stage headings.
+     */
+    private fun matchNaturalStageHeading(
+        headerPart: String,
+        component: PedagogicalComponent,
+        activeSessionNumber: Int,
+        hasComprehension: Boolean
+    ): String? {
+        val stripped = stripLeadingOrdinalsAndBullets(headerPart).removeSuffix(":").trim()
+        val norm = normalizeHeaderToken(stripped)
+        if (norm.isEmpty() || norm.split(" ").size > 5) return null
+
+        val isKnownStageTitle = norm in setOf(
+            "تمهيد", "التمهيد", "تشخيص المكتسبات", "تقويم تشخيصي", "تشخيص المكتسبات والتمهيد",
+            "التقويم التشخيصي والتمهيد", "استحضار المكتسبات", "مراقبه الاعداد القبلي",
+            "ملاحظه النص", "تاطير النص", "ملاحظه النص وتاطيره", "التاطير والملاحظه", "الملاحظه والتاطير",
+            "القراءه الاستكشافيه", "عتبات النص",
+            "فهم النص", "القراءه التوجيهيه", "القراءه النموذجيه", "فهم المضامين", "الفهم",
+            "تحليل النص", "القراءه التحليليه", "الدراسه المعجميه", "التحليل والمناقشه", "التحليل",
+            "التركيب", "الخلاصه التركيبيه", "خلاصه تركيبيه", "القراءه التركيبيه", "التركيب والتقويم",
+            "الاستثمار", "الاستثمار والبحث", "الانشطه الاستثماريه", "الامتداد", "امتدادات",
+            "الوصف والتحليل", "الملاحظه والوصف", "البناء والتحليل", "العرض والتحليل",
+            "ملاحظه الظاهره", "ملاحظه الامثله", "قراءه الامثله", "امثله الانطلاق",
+            "الاستنتاج", "استنتاج", "القاعده", "القاعده التركيبيه",
+            "التطبيقات", "تطبيقات", "تقويم اجمالي",
+            "قراءه نص الانطلاق", "نص الانطلاق", "استخراج عناصر الدرس", "عناصر المهاره", "خطوات المهاره",
+            "تقديم الدرس", "تقديم الموضوع", "انجاز المهاره", "التدرب علي المهاره",
+            "تشخيص اخطاء المتعلمين", "تشخيص الاخطاء", "التصحيح الفردي", "الدعم والتعزيز", "التصحيح والدعم"
+        ) || headerPart.trim().startsWith("مرحلة ") || headerPart.trim().startsWith("مقطع ")
+
+        return if (isKnownStageTitle) {
+            matchStageName(stripped, component, activeSessionNumber, hasComprehension)
+        } else {
+            null
+        }
     }
 
     private fun matchStageName(
@@ -1686,7 +2500,6 @@ object JadhadhaParser {
                     4 -> "insha_corr_support"
                     else -> "insha_app_correction"
                 }
-                // Generic 4-session titles
                 t.contains("اكتساب") || t.contains("الحصة الأولى") || t.contains("تقديم المهارة") -> "insha_acq_elements"
                 t.contains("تطبيق") || t.contains("الحصة الثانية") -> "insha_app_presentation"
                 t.contains("إنتاج") || t.contains("انتاج") || t.contains("الحصة الثالثة") -> "insha_prod_presentation"
@@ -1696,29 +2509,35 @@ object JadhadhaParser {
         }
     }
 
+    /**
+     * Requires a colon `:` for single-word labels so short 1-word paragraphs (like "الأمثلة", "توجيهات",
+     * "النصوص", "المهارات") without colons are never swallowed as empty field switches.
+     */
     private fun detectField(line: String): String? {
         val t = line.trim()
         val colonIdx = t.indexOf(':')
-        val label = if (colonIdx >= 0) t.substring(0, colonIdx).trim() else t
+        val hasColon = colonIdx >= 0
+        val label = if (hasColon) t.substring(0, colonIdx).trim() else t
         if (label.length > 45) return null
 
         return when {
-            label == "التقويم" || label == "التقويم والدعم" || label == "تقويم ودعم" || label == "مؤشرات التقويم" ||
-                    label == "مؤشرات التقويم والدعم" || label == "التقويم المرحلي" || label == "معايير التقويم" ||
-                    label == "الدعم" -> "eval"
+            label == "التقويم والدعم" || label == "تقويم ودعم" || label == "مؤشرات التقويم" ||
+                label == "مؤشرات التقويم والدعم" || label == "التقويم المرحلي" || label == "معايير التقويم" ||
+                (hasColon && (label == "التقويم" || label == "الدعم")) -> "eval"
 
             label == "أنشطة المدرس" || label == "أنشطة الأستاذ" || label == "الأنشطة التعليمية" ||
-                    label == "الأنشطة التعليمية التعلمية" ||
-                    label == "مهام المدرس" || label == "دور المدرس" || label == "توجيهات" -> "teacher"
+                label == "الأنشطة التعليمية التعلمية" ||
+                label == "مهام المدرس" || label == "دور المدرس" ||
+                (hasColon && label == "توجيهات") -> "teacher"
 
-            label == "القدرات المستهدفة" || label == "القدرات والمهارات" || label == "القدرات" || label == "الأهداف" ||
-                    label == "الأهداف التعلمية" || label == "الأهداف التعليمية" || label == "الكفايات المستهدفة" ||
-                    label == "المهارات" -> "abil"
+            label == "القدرات المستهدفة" || label == "القدرات والمهارات" ||
+                label == "الأهداف التعلمية" || label == "الأهداف التعليمية" || label == "الكفايات المستهدفة" ||
+                (hasColon && (label == "القدرات" || label == "الأهداف" || label == "المهارات")) -> "abil"
 
-            label == "المحتوى" || label == "المحتوى الديداكتيكي" || label == "الأنشطة التعلمية" ||
-                    label == "المحتوى الديداكتيكي والأنشطة التعلمية" || label == "أنشطة المتعلم" ||
-                    label == "أنشطة المتعلمين" || label == "مهام المتعلم" || label == "المضامين" ||
-                    label == "سير الدرس" || label == "الأمثلة" || label == "النصوص" -> "content"
+            label == "المحتوى الديداكتيكي" || label == "الأنشطة التعلمية" ||
+                label == "المحتوى الديداكتيكي والأنشطة التعلمية" || label == "أنشطة المتعلم" ||
+                label == "أنشطة المتعلمين" || label == "مهام المتعلم" || label == "سير الدرس" ||
+                (hasColon && (label == "المحتوى" || label == "المضامين" || label == "الأمثلة" || label == "النصوص")) -> "content"
 
             else -> null
         }

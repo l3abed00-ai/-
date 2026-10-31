@@ -388,9 +388,78 @@ data class SuggestedObjectives(
     val source: FieldSource = FieldSource.AI
 )
 
+enum class DocumentElementType(val arabicLabel: String) {
+    PARAGRAPH("فقرة نصية"),
+    TABLE_CELL("خلية جدول"),
+    HEADER_FOOTER("ترويسة/تذييل"),
+    PLAIN_LINE("سطر نصي")
+}
+
+enum class ContentUnitStatus(val arabicLabel: String) {
+    EXTRACTED("مستخرج"),
+    CLASSIFIED("مصنّف"),
+    NEEDS_REVIEW("يحتاج إلى مراجعة"),
+    UNEXTRACTABLE("تعذر استخراجه")
+}
+
+data class UnitLocation(
+    val sourcePart: String = "word/document.xml",
+    val elementIndex: Int = 0,
+    val paragraphIndex: Int = 0,
+    val tableIndex: Int? = null,
+    val rowIndex: Int? = null,
+    val colIndex: Int? = null,
+    val lineNumber: Int = 0
+)
+
+data class ExtractedUnit(
+    val id: String,
+    val verbatimText: String,
+    val elementType: DocumentElementType = DocumentElementType.PLAIN_LINE,
+    val location: UnitLocation = UnitLocation(),
+    val status: ContentUnitStatus = ContentUnitStatus.EXTRACTED,
+    val assignedStageKey: String? = null,
+    val assignedField: String? = null,
+    val finalClassifiedText: String? = null
+)
+
+data class TextModificationRecord(
+    val unitId: String,
+    val originalText: String,
+    val finalText: String,
+    val location: UnitLocation = UnitLocation()
+)
+
+data class ContentIntegrityReport(
+    val originalRawText: String,
+    val extractedUnits: List<ExtractedUnit> = emptyList(),
+    val classifiedUnits: List<ExtractedUnit> = emptyList(),
+    val unclassifiedUnits: List<ExtractedUnit> = emptyList(),
+    val unextractableUnits: List<ExtractedUnit> = emptyList(),
+    val unextractableItems: List<String> = emptyList(),
+    val finalUsedItems: List<String> = emptyList(),
+    val missingUnits: List<ExtractedUnit> = emptyList(),
+    val duplicateUnits: List<ExtractedUnit> = emptyList(),
+    val duplicateItems: List<String> = emptyList(),
+    val modifiedUnits: List<TextModificationRecord> = emptyList(),
+    val actualCompletionPercentage: Int = 0,
+    val extractionFidelityPercentage: Int = 100
+) {
+    val hasIssues: Boolean
+        get() = missingUnits.isNotEmpty() ||
+            duplicateUnits.isNotEmpty() ||
+            duplicateItems.isNotEmpty() ||
+            modifiedUnits.isNotEmpty() ||
+            unextractableItems.isNotEmpty() ||
+            unclassifiedUnits.isNotEmpty()
+}
+
 data class UnclassifiedLine(
     val lineNumber: Int,
-    val text: String
+    val text: String,
+    val unitId: String = "unit_$lineNumber",
+    val verbatimText: String = text,
+    val location: UnitLocation = UnitLocation(lineNumber = lineNumber)
 )
 
 data class StageSourceCount(
@@ -410,7 +479,11 @@ data class ParseReport(
     val unclassifiedLines: List<UnclassifiedLine> = emptyList(),
     val aiClassifiedLinesCount: Int = 0,
     val aiRefinedFieldsCount: Int = 0,
-    val isAiDelegated: Boolean = false
+    val isAiDelegated: Boolean = false,
+    val originalRawText: String = "",
+    val extractedUnits: List<ExtractedUnit> = emptyList(),
+    val unextractableItems: List<String> = emptyList(),
+    val integrityReport: ContentIntegrityReport? = null
 ) {
     val totalFileFields: Int
         get() = stageSourceCounts.values.sumOf { it.fileCount }
@@ -420,9 +493,25 @@ data class ParseReport(
 
     val totalAiFields: Int
         get() = stageSourceCounts.values.sumOf { it.aiCount }
+
+    val totalUserFields: Int
+        get() = stageSourceCounts.values.sumOf { it.userCount }
+
+    val verificationCompletionPercentage: Int
+        get() = integrityReport?.actualCompletionPercentage ?: run {
+            val total = totalFileFields + totalDefaultFields + totalAiFields + totalUserFields
+            if (total == 0) 0
+            else {
+                val verifiedFields = totalFileFields + totalUserFields
+                val fieldRatio = verifiedFields.toFloat() / total.toFloat()
+                val penalty = if (unclassifiedLines.isNotEmpty() || unextractableItems.isNotEmpty()) 0.85f else 1.0f
+                (fieldRatio * penalty * 100f).toInt().coerceIn(0, if (unclassifiedLines.isNotEmpty() || totalDefaultFields > 0) 99 else 100)
+            }
+        }
 }
 
 data class ParseResult(
     val plan: JadhadhaPlan,
     val report: ParseReport
 )
+

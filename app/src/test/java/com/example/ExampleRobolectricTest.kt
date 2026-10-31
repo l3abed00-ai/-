@@ -1079,5 +1079,434 @@ class ExampleRobolectricTest {
 
         db.close()
     }
+
+    @Test
+    fun `task 4_1 - extract all paragraphs of Word docx file with unique IDs and original text copy`() {
+        val paragraphs = listOf(
+            "المكون: النصوص القرائية",
+            "الموضوع: التسامح والسلام",
+            "الفقرة الأولى: مدخل تمهيدي عام حول قيم التعايش الإنساني.",
+            "الفقرة الثانية: ملاحظة خارجية حول سياق النص التاريخي والاجتماعي.",
+            "الفقرة الثالثة: إشارة مرجعية لكتاب المختار في اللغة العربية ص 52.",
+            "الفقرة الرابعة: توصية تربوية خاصة بتدبير النقاش التفاعلي.",
+            "الفقرة الخامسة: خاتمة وتوجيهات عامة لأنشطة البحث المنزلي."
+        )
+        val zipOut = java.io.ByteArrayOutputStream()
+        java.util.zip.ZipOutputStream(zipOut).use { zos ->
+            zos.putNextEntry(java.util.zip.ZipEntry("word/document.xml"))
+            val xmlBuilder = StringBuilder()
+            xmlBuilder.append("<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body>")
+            for (p in paragraphs) {
+                xmlBuilder.append("<w:p><w:r><w:t>").append(p).append("</w:t></w:r></w:p>")
+            }
+            xmlBuilder.append("</w:body></w:document>")
+            zos.write(xmlBuilder.toString().toByteArray(java.nio.charset.StandardCharsets.UTF_8))
+            zos.closeEntry()
+        }
+
+        val structured = com.example.extractor.DocumentFileReader.extractStructuredDocx(
+            java.io.ByteArrayInputStream(zipOut.toByteArray())
+        )
+
+        // 1. Original raw text is retained verbatim before processing
+        assertEquals(paragraphs.joinToString("\n"), structured.rawOriginalText)
+
+        // 2. All 7 paragraphs are extracted as independent traceable units with unique IDs
+        assertEquals(7, structured.units.size)
+        val uniqueIds = structured.units.map { it.id }.toSet()
+        assertEquals(7, uniqueIds.size)
+        for ((idx, expectedPara) in paragraphs.withIndex()) {
+            assertEquals("unit_${idx + 1}", structured.units[idx].id)
+            assertEquals(expectedPara, structured.units[idx].verbatimText)
+            assertEquals(com.example.model.DocumentElementType.PARAGRAPH, structured.units[idx].elementType)
+            assertEquals(idx, structured.units[idx].location.paragraphIndex)
+        }
+
+        // 3. Parse and verify zero missing units in integrity report
+        val parseResult = com.example.extractor.JadhadhaParser.parseWithReport(structured.structuredText)
+        val integrity = parseResult.report.integrityReport
+        assertNotNull(integrity)
+        assertEquals(paragraphs.joinToString("\n"), integrity!!.originalRawText)
+        assertEquals(7, integrity.extractedUnits.size)
+        assertTrue("No paragraph may be lost during parsing", integrity.missingUnits.isEmpty())
+    }
+
+    @Test
+    fun `task 4_2 - preserve short lines without dropping`() {
+        val docXml = """
+            <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <w:body>
+                <w:p><w:r><w:t>همزة</w:t></w:r></w:p>
+                <w:p><w:r><w:t>أ ب</w:t></w:r></w:p>
+                <w:p><w:r><w:t>الأمثلة</w:t></w:r></w:p>
+                <w:p><w:r><w:t>توجيهات</w:t></w:r></w:p>
+                <w:p><w:r><w:t>تنبيه!</w:t></w:r></w:p>
+                <w:p><w:r><w:t>تمهيد</w:t></w:r></w:p>
+              </w:body>
+            </w:document>
+        """.trimIndent()
+
+        val extracted = com.example.extractor.DocumentFileReader.parseDocumentXml(docXml)
+        val parseResult = com.example.extractor.JadhadhaParser.parseWithReport(extracted, "درس قصير")
+        val report = parseResult.report
+        val integrity = report.integrityReport!!
+
+        val expectedShortLines = listOf("همزة", "أ ب", "الأمثلة", "توجيهات", "تنبيه!", "تمهيد")
+        assertEquals(6, integrity.extractedUnits.size)
+        for (shortLine in expectedShortLines) {
+            assertTrue(
+                "Short line '$shortLine' must be extracted",
+                integrity.extractedUnits.any { it.verbatimText == shortLine }
+            )
+            assertTrue(
+                "Short line '$shortLine' must be preserved in unclassifiedLines or finalUsedItems without being dropped",
+                report.unclassifiedLines.any { it.verbatimText == shortLine || it.text == shortLine } ||
+                    integrity.finalUsedItems.contains(shortLine)
+            )
+        }
+        assertTrue("No short line should be reported missing", integrity.missingUnits.isEmpty())
+    }
+
+    @Test
+    fun `task 4_3 - never delete unclassified lines and allow manual classification`() {
+        val rawText = """
+            المكون: الدرس اللغوي
+            الموضوع: اسم الفاعل وعمله
+            ملاحظة تربوية أولى غير مصنفة قبل الجدول
+            الهدف من هذا التمرين تعميق الفهم الصرفي
+            [مرحلة: تشخيص المكتسبات]
+            المحتوى الديداكتيكي:
+            مراجعة الفعل الثلاثي وغير الثلاثي.
+            [نهاية الجدول]
+            توصية ختامية بعد الجدول للمراجعة المنزلية
+        """.trimIndent()
+
+        val initialResult = com.example.extractor.JadhadhaParser.parseWithReport(rawText, "اسم الفاعل وعمله")
+        val unclassified = initialResult.report.unclassifiedLines
+
+        // Verify all 3 unclassified lines (before table, starting with "الهدف من...", and after table) are preserved
+        assertEquals(3, unclassified.size)
+        assertTrue(unclassified.any { it.text.contains("ملاحظة تربوية أولى غير مصنفة") })
+        assertTrue(unclassified.any { it.text.contains("الهدف من هذا التمرين تعميق الفهم الصرفي") })
+        assertTrue(unclassified.any { it.text.contains("توصية ختامية بعد الجدول") })
+
+        // Verify each unclassified line has a unique unitId, verbatimText, and location
+        unclassified.forEach { uLine ->
+            assertTrue(uLine.unitId.startsWith("unit_"))
+            assertTrue(uLine.verbatimText.isNotBlank())
+            assertTrue(uLine.location.lineNumber > 0)
+        }
+
+        // Verify completion is NOT 100% while unclassified lines and DEFAULT fields exist
+        assertTrue(initialResult.report.verificationCompletionPercentage < 100)
+
+        // Manually classify the first unclassified line into lang_observation -> teacher
+        val firstLine = unclassified.first { it.text.contains("ملاحظة تربوية أولى") }
+        val afterFirstAssign = com.example.extractor.JadhadhaParser.assignUnclassifiedLine(
+            currentResult = initialResult,
+            line = firstLine,
+            targetStageKey = "lang_observation",
+            targetField = "teacher"
+        )
+        assertEquals(2, afterFirstAssign.report.unclassifiedLines.size)
+        assertTrue(afterFirstAssign.plan.stages["lang_observation"]!!.teacher.contains(firstLine.verbatimText))
+        assertEquals(
+            com.example.model.FieldSource.FILE,
+            afterFirstAssign.plan.stages["lang_observation"]!!.sourceFor("teacher")
+        )
+    }
+
+    @Test
+    fun `task 4_4 - no content duplication and detect duplicates in integrity report`() {
+        // Part A: Unintended adjacent duplication inside the same cell/block -> deduplicated and recorded in duplicateUnits
+        val rawWithUnintendedDuplicates = """
+            المكون: النصوص القرائية
+            الموضوع: القيم الإنسانية
+            [مرحلة: تشخيص المكتسبات]
+            المحتوى الديداكتيكي:
+            عنصر مكرر في نفس الخانة لا ينبغي أن يتكرر في المخرج النهائي.
+            عنصر مكرر في نفس الخانة لا ينبغي أن يتكرر في المخرج النهائي.
+            عنصر فريد ثانٍ في الخانة.
+        """.trimIndent()
+
+        val result = com.example.extractor.JadhadhaParser.parseWithReport(rawWithUnintendedDuplicates, "القيم الإنسانية")
+        val diagContent = result.plan.stages["diagnostic"]!!.content
+
+        // 1. Final stage content has NO unintended duplicate entries
+        assertEquals(
+            1,
+            diagContent.count { it == "عنصر مكرر في نفس الخانة لا ينبغي أن يتكرر في المخرج النهائي." }
+        )
+        assertEquals(2, diagContent.size)
+
+        // 2. Integrity report recorded the unintended duplicate unit/item from the input
+        val integrity = result.report.integrityReport!!
+        assertTrue(integrity.duplicateItems.contains("عنصر مكرر في نفس الخانة لا ينبغي أن يتكرر في المخرج النهائي."))
+        assertTrue(integrity.duplicateUnits.isNotEmpty())
+
+        // Part B: Legitimate repetition of identical text in two different document locations (e.g., Row 1 vs Row 2 of a table)
+        val repeatedSentence = "تقويم تكويني مرحلي لقياس استيعاب المتعلمين للظاهرة."
+        val docxWithLegitimateRepetitionInTwoRows = """
+            <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <w:body>
+                <w:p><w:r><w:t>المكون: الدرس اللغوي</w:t></w:r></w:p>
+                <w:p><w:r><w:t>الموضوع: اسم الفاعل وعمله</w:t></w:r></w:p>
+                <w:tbl>
+                  <w:tr>
+                    <w:tc><w:p><w:r><w:t>المراحل</w:t></w:r></w:p></w:tc>
+                    <w:tc><w:p><w:r><w:t>المحتوى الديداكتيكي</w:t></w:r></w:p></w:tc>
+                    <w:tc><w:p><w:r><w:t>التقويم والدعم</w:t></w:r></w:p></w:tc>
+                  </w:tr>
+                  <w:tr>
+                    <w:tc><w:p><w:r><w:t>ملاحظة الظاهرة ووصفها</w:t></w:r></w:p></w:tc>
+                    <w:tc><w:p><w:r><w:t>المجموعة الأولى: صياغة اسم الفاعل من الفعل الثلاثي.</w:t></w:r></w:p></w:tc>
+                    <w:tc><w:p><w:r><w:t>$repeatedSentence</w:t></w:r></w:p></w:tc>
+                  </w:tr>
+                  <w:tr>
+                    <w:tc><w:p><w:r><w:t>ملاحظة الظاهرة ووصفها</w:t></w:r></w:p></w:tc>
+                    <w:tc><w:p><w:r><w:t>المجموعة الثانية: صياغة اسم الفاعل من غير الثلاثي.</w:t></w:r></w:p></w:tc>
+                    <w:tc><w:p><w:r><w:t>$repeatedSentence</w:t></w:r></w:p></w:tc>
+                  </w:tr>
+                </w:tbl>
+              </w:body>
+            </w:document>
+        """.trimIndent()
+
+        val structuredLegit = com.example.extractor.DocumentFileReader.extractStructuredXml(docxWithLegitimateRepetitionInTwoRows)
+        val legitResult = com.example.extractor.JadhadhaParser.parseWithReport(structuredLegit.structuredText, "اسم الفاعل وعمله")
+        val legitIntegrity = legitResult.report.integrityReport!!
+
+        // Verify two distinct ExtractedUnits exist with distinct IDs and distinct UnitLocations (rowIndex = 1 vs rowIndex = 2)
+        val repeatedUnits = legitIntegrity.extractedUnits.filter { it.verbatimText == repeatedSentence }
+        assertEquals(2, repeatedUnits.size)
+        assertTrue(repeatedUnits[0].id != repeatedUnits[1].id)
+        assertEquals(1, repeatedUnits[0].location.rowIndex)
+        assertEquals(2, repeatedUnits[1].location.rowIndex)
+
+        // Verify legitimate repetition across two different table rows is NOT deleted and NOT flagged as an unintended duplicate
+        val obsEval = legitResult.plan.stages["lang_observation"]!!.eval
+        assertEquals(2, obsEval.count { it == repeatedSentence })
+        assertTrue(legitIntegrity.duplicateUnits.none { it.verbatimText == repeatedSentence })
+        assertTrue(legitIntegrity.missingUnits.isEmpty())
+
+        // Verify ContentIntegrityMonitor compares units by ID and location (not text Set):
+        // If one of the two legitimate occurrences is dropped from the final plan, the second unit is flagged in missingUnits!
+        val stagesWithOneDropped = legitResult.plan.stages.toMutableMap()
+        stagesWithOneDropped["lang_observation"] = legitResult.plan.stages["lang_observation"]!!.copy(
+            eval = listOf(repeatedSentence) // Only 1 occurrence left instead of 2
+        )
+        val integrityAfterDroppingSecondOccurrence = com.example.extractor.JadhadhaParser.verifyContentIntegrity(
+            originalRawText = legitResult.report.originalRawText,
+            extractedUnits = legitResult.report.extractedUnits,
+            plan = legitResult.plan.copy(stages = stagesWithOneDropped),
+            unclassifiedLines = legitResult.report.unclassifiedLines
+        )
+        assertEquals(1, integrityAfterDroppingSecondOccurrence.missingUnits.size)
+        assertEquals(repeatedUnits[1].id, integrityAfterDroppingSecondOccurrence.missingUnits.first().id)
+        assertEquals(2, integrityAfterDroppingSecondOccurrence.missingUnits.first().location.rowIndex)
+    }
+
+    @Test
+    fun `task 4_5 - do not alter original text without reason and detect modifications in integrity report`() {
+        val originalLine1 = "1- الملاحظة والتأطير: دلالة العنوان وصاحب النص (ص: 44)."
+        val originalLine2 = "- يطرح الأستاذ أسئلة تمهيدية؛ لاستحضار المكتسبات القبلية!"
+        val raw = """
+            المكون: النصوص القرائية
+            الموضوع: المنفى
+            [مرحلة: ملاحظة النص]
+            أنشطة المدرس:
+            $originalLine2
+            المحتوى الديداكتيكي:
+            $originalLine1
+        """.trimIndent()
+
+        val result = com.example.extractor.JadhadhaParser.parseWithReport(raw, "المنفى")
+        val obsStage = result.plan.stages["observation"]!!
+
+        // 1. Original text (including "1- " numbering and "- " bullet) is preserved verbatim without alteration
+        assertTrue("Exact numbered line must be preserved verbatim", obsStage.content.contains(originalLine1))
+        assertTrue("Exact bulleted line must be preserved verbatim", obsStage.teacher.contains(originalLine2))
+        assertTrue(
+            "No unjustified text modification should occur during normal parsing",
+            result.report.integrityReport!!.modifiedUnits.isEmpty()
+        )
+
+        // 2. If a caller alters the text in the final plan, verifyContentIntegrity detects and reports it
+        val alteredStages = result.plan.stages.toMutableMap()
+        alteredStages["observation"] = obsStage.copy(
+            content = listOf("الملاحظة والتأطير: دلالة العنوان وصاحب النص (نسخة معدلة)")
+        )
+        val alteredPlan = result.plan.copy(stages = alteredStages)
+        val integrityAfterAlteration = com.example.extractor.JadhadhaParser.verifyContentIntegrity(
+            originalRawText = result.plan.let { result.report.originalRawText },
+            extractedUnits = result.report.extractedUnits,
+            plan = alteredPlan,
+            unclassifiedLines = result.report.unclassifiedLines
+        )
+        assertTrue("Altered text must be flagged in modifiedUnits", integrityAfterAlteration.modifiedUnits.isNotEmpty())
+        assertEquals(originalLine1, integrityAfterAlteration.modifiedUnits.first().originalText)
+    }
+
+    @Test
+    fun `task 4_6 - handle files with mixed tables and paragraphs preserving source locations`() {
+        val mixedXml = """
+            <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <w:body>
+                <w:p><w:r><w:t>تمهيد عام خارج الجداول حول منهجية تدريس المكون</w:t></w:r></w:p>
+                <w:tbl>
+                  <w:tr>
+                    <w:tc><w:p><w:r><w:t>المكون: الدرس اللغوي</w:t></w:r></w:p></w:tc>
+                    <w:tc><w:p><w:r><w:t>الموضوع: اسم الآلة</w:t></w:r></w:p></w:tc>
+                  </w:tr>
+                </w:tbl>
+                <w:p><w:r><w:t>فقرة انتقالية بين جدول الترويسة وجدول سير الدرس</w:t></w:r></w:p>
+                <w:tbl>
+                  <w:tr>
+                    <w:tc><w:p><w:r><w:t>المراحل</w:t></w:r></w:p></w:tc>
+                    <w:tc><w:p><w:r><w:t>المحتوى الديداكتيكي</w:t></w:r></w:p></w:tc>
+                  </w:tr>
+                  <w:tr>
+                    <w:tc><w:p><w:r><w:t>تشخيص المكتسبات</w:t></w:r></w:p></w:tc>
+                    <w:tc><w:p><w:r><w:t>تذكير بالمشتقات السابقة: اسم الفاعل واسم المفعول.</w:t></w:r></w:p></w:tc>
+                  </w:tr>
+                </w:tbl>
+                <w:p><w:r><w:t>ملحق ختامي بعد الجداول يتضمن تمارين منزلية إضافية</w:t></w:r></w:p>
+              </w:body>
+            </w:document>
+        """.trimIndent()
+
+        val structured = com.example.extractor.DocumentFileReader.extractStructuredXml(mixedXml)
+        val parseResult = com.example.extractor.JadhadhaParser.parseWithReport(structured.structuredText)
+        val report = parseResult.report
+        val integrity = report.integrityReport!!
+
+        // Verify paragraphs and table cells are all extracted with accurate locations
+        val introParaUnit = integrity.extractedUnits.first { it.verbatimText.contains("تمهيد عام خارج الجداول") }
+        assertEquals(com.example.model.DocumentElementType.PARAGRAPH, introParaUnit.elementType)
+        assertEquals(0, introParaUnit.location.paragraphIndex)
+
+        val midParaUnit = integrity.extractedUnits.first { it.verbatimText.contains("فقرة انتقالية بين جدول الترويسة") }
+        assertEquals(com.example.model.DocumentElementType.PARAGRAPH, midParaUnit.elementType)
+        assertEquals(1, midParaUnit.location.paragraphIndex)
+
+        val lessonCellUnit = integrity.extractedUnits.first { it.verbatimText.contains("تذكير بالمشتقات السابقة") }
+        assertEquals(com.example.model.DocumentElementType.TABLE_CELL, lessonCellUnit.elementType)
+        assertEquals(1, lessonCellUnit.location.tableIndex)
+        assertEquals(1, lessonCellUnit.location.rowIndex)
+        assertEquals(1, lessonCellUnit.location.colIndex)
+
+        val outroParaUnit = integrity.extractedUnits.first { it.verbatimText.contains("ملحق ختامي بعد الجداول") }
+        assertEquals(com.example.model.DocumentElementType.PARAGRAPH, outroParaUnit.elementType)
+        assertEquals(2, outroParaUnit.location.paragraphIndex)
+
+        // Verify all 3 free paragraphs outside the lesson stages are preserved in unclassifiedLines and nothing is lost
+        assertEquals(3, report.unclassifiedLines.size)
+        assertTrue(parseResult.plan.stages["lang_diagnostic"]!!.content.any { it.contains("تذكير بالمشتقات السابقة") })
+        assertTrue("Zero units may be missing in mixed document", integrity.missingUnits.isEmpty())
+    }
+
+    @Test
+    fun `task 4_7 - preserve Arabic text tatweel diacritics and punctuation marks`() {
+        val arabicRichText = "قَالَ الشَّاعِرُ فِي قَصِيدَتِهِ «المَنْفَى» — بَعْدَ التَّأَمُّلِ —: أَلَا يَا طَائِرَ البَانِ، مَتَى العَوْدَةُ؟! (ص: ٤٤؛ فَقْرَة: ١-أ) مَعَ تَطْوِيلٍ: اللـهـمَّ احْفَظِ الوَطَنَ..."
+        val docXml = """
+            <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <w:body>
+                <w:p><w:r><w:t>المكون: النصوص القرائية</w:t></w:r></w:p>
+                <w:p><w:r><w:t>الموضوع: المنفى</w:t></w:r></w:p>
+                <w:tbl>
+                  <w:tr>
+                    <w:tc><w:p><w:r><w:t>المراحل</w:t></w:r></w:p></w:tc>
+                    <w:tc><w:p><w:r><w:t>المحتوى الديداكتيكي</w:t></w:r></w:p></w:tc>
+                  </w:tr>
+                  <w:tr>
+                    <w:tc><w:p><w:r><w:t>فهم النص</w:t></w:r></w:p></w:tc>
+                    <w:tc><w:p><w:r><w:t>$arabicRichText</w:t></w:r></w:p></w:tc>
+                  </w:tr>
+                </w:tbl>
+              </w:body>
+            </w:document>
+        """.trimIndent()
+
+        val extracted = com.example.extractor.DocumentFileReader.parseDocumentXml(docXml)
+        val parseResult = com.example.extractor.JadhadhaParser.parseWithReport(extracted, "المنفى")
+        val compContent = parseResult.plan.stages["comprehension"]!!.content
+
+        // Verify exact preservation of diacritics (حركات التشكيل), tatweel (\u0640), guillemets («»), punctuation (، ؛ ؟ ! : — ...), and Eastern Arabic numerals (٤٤، ١)
+        assertTrue("Rich Arabic text with diacritics, tatweel, and punctuation must match verbatim", compContent.contains(arabicRichText))
+        assertTrue(compContent.first().contains("\u0640"))
+        assertTrue(compContent.first().contains("«المَنْفَى»"))
+        assertTrue(compContent.first().contains("؟!"))
+        assertTrue(compContent.first().contains("؛"))
+        assertTrue(parseResult.report.integrityReport!!.modifiedUnits.isEmpty())
+        assertTrue(parseResult.report.integrityReport!!.missingUnits.isEmpty())
+    }
+
+    @Test
+    fun `task 4_8 - rawOriginalText contains all units across document body tables headers and footers`() {
+        val headerXml = """
+            <w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <w:p><w:r><w:t>الأستاذ: محمد العابد</w:t></w:r></w:p>
+              <w:p><w:r><w:t>المؤسسة: مدرسة أنوال الإعدادية</w:t></w:r></w:p>
+            </w:hdr>
+        """.trimIndent()
+        val documentXml = """
+            <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <w:body>
+                <w:p><w:r><w:t>المكون: الدرس اللغوي</w:t></w:r></w:p>
+                <w:p><w:r><w:t>الموضوع: اسم المفعول وعمله</w:t></w:r></w:p>
+                <w:tbl>
+                  <w:tr>
+                    <w:tc><w:p><w:r><w:t>المراحل</w:t></w:r></w:p></w:tc>
+                    <w:tc><w:p><w:r><w:t>المحتوى الديداكتيكي</w:t></w:r></w:p></w:tc>
+                  </w:tr>
+                  <w:tr>
+                    <w:tc><w:p><w:r><w:t>تشخيص المكتسبات</w:t></w:r></w:p></w:tc>
+                    <w:tc><w:p><w:r><w:t>يصاغ اسم المفعول من الفعل المبني للمجهول.</w:t></w:r></w:p></w:tc>
+                  </w:tr>
+                </w:tbl>
+              </w:body>
+            </w:document>
+        """.trimIndent()
+        val footerXml = """
+            <w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <w:p><w:r><w:t>المرجع: المختار في اللغة العربية - السنة الثالثة إعدادي</w:t></w:r></w:p>
+            </w:ftr>
+        """.trimIndent()
+
+        val zipOut = java.io.ByteArrayOutputStream()
+        java.util.zip.ZipOutputStream(zipOut).use { zos ->
+            zos.putNextEntry(java.util.zip.ZipEntry("word/header1.xml"))
+            zos.write(headerXml.toByteArray(java.nio.charset.StandardCharsets.UTF_8))
+            zos.closeEntry()
+
+            zos.putNextEntry(java.util.zip.ZipEntry("word/document.xml"))
+            zos.write(documentXml.toByteArray(java.nio.charset.StandardCharsets.UTF_8))
+            zos.closeEntry()
+
+            zos.putNextEntry(java.util.zip.ZipEntry("word/footer1.xml"))
+            zos.write(footerXml.toByteArray(java.nio.charset.StandardCharsets.UTF_8))
+            zos.closeEntry()
+        }
+
+        val extraction = com.example.extractor.DocumentFileReader.extractStructuredDocx(
+            java.io.ByteArrayInputStream(zipOut.toByteArray())
+        )
+
+        // Verify units from body paragraphs, table cells, header1.xml, and footer1.xml are all present in extraction.units
+        assertTrue(extraction.units.any { it.location.sourcePart == "word/document.xml" && it.elementType == com.example.model.DocumentElementType.PARAGRAPH })
+        assertTrue(extraction.units.any { it.location.sourcePart == "word/document.xml" && it.elementType == com.example.model.DocumentElementType.TABLE_CELL })
+        assertTrue(extraction.units.any { it.location.sourcePart == "word/header1.xml" && it.elementType == com.example.model.DocumentElementType.HEADER_FOOTER })
+        assertTrue(extraction.units.any { it.location.sourcePart == "word/footer1.xml" && it.elementType == com.example.model.DocumentElementType.HEADER_FOOTER })
+
+        // Verify EVERY SINGLE ExtractedUnit in extraction.units appears verbatim in rawOriginalText
+        val rawLines = extraction.rawOriginalText.lines()
+        for (unit in extraction.units) {
+            assertTrue(
+                "Unit ${unit.id} ('${unit.verbatimText}') from ${unit.location.sourcePart} must appear in rawOriginalText",
+                rawLines.contains(unit.verbatimText)
+            )
+        }
+    }
 }
+
 
