@@ -4,11 +4,17 @@ import android.content.Context
 import android.util.Base64
 import com.example.BuildConfig
 import com.example.extractor.DocumentFileReader
+import com.example.model.ClassificationSource
+import com.example.model.ContentUnitStatus
+import com.example.model.ExtractedUnit
 import com.example.model.FieldSource
+import com.example.model.GeminiClassificationValidationResult
 import com.example.model.JadhadhaInfo
 import com.example.model.JadhadhaPlan
 import com.example.model.ParseReport
 import com.example.model.ParseResult
+import com.example.model.PedagogicalCategory
+import com.example.model.PedagogicalClassificationItem
 import com.example.model.PedagogicalComponent
 import com.example.model.StageCatalog
 import com.example.model.StageData
@@ -31,16 +37,60 @@ import kotlin.coroutines.coroutineContext
 
 object GeminiAiService {
 
+    /**
+     * Pluggable HTTP transport for Gemini requests.
+     * Uses OkHttp in production and can be overridden in unit tests via [setTransportForTesting]
+     * to verify real JSON parsing, network failures, invalid responses, and confidence thresholds.
+     */
+    fun interface GeminiTransport {
+        suspend fun executePost(url: String, jsonBody: String, apiKey: String): Pair<Int, String>
+    }
+
     private val client = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)
         .build()
 
+    private val defaultTransport = GeminiTransport { url, jsonBody, apiKey ->
+        val reqBuilder = Request.Builder()
+            .url(url)
+            .addHeader("Content-Type", "application/json")
+        if (apiKey.isNotBlank()) {
+            reqBuilder.addHeader("x-goog-api-key", apiKey)
+        }
+        val request = reqBuilder
+            .post(jsonBody.toRequestBody("application/json".toMediaType()))
+            .build()
+        val response = client.newCall(request).execute()
+        val body = response.body?.string().orEmpty()
+        response.code to body
+    }
+
+    @Volatile
+    private var customTransportForTesting: GeminiTransport? = null
+
+    fun setTransportForTesting(transport: GeminiTransport?) {
+        customTransportForTesting = transport
+    }
+
+    fun resetTransportForTesting() {
+        customTransportForTesting = null
+    }
+
+    private suspend fun executePostRequest(url: String, jsonBody: String, apiKey: String): Pair<Int, String> {
+        val transport = customTransportForTesting ?: defaultTransport
+        return transport.executePost(url, jsonBody, apiKey)
+    }
+
     private const val API_BASE = "https://generativelanguage.googleapis.com/v1beta"
     const val PRIMARY_MODEL = "gemini-3.8-flash"
     private val API_MODELS = listOf("gemini-3.8-flash", "gemini-2.5-flash", "gemini-2.0-flash")
     const val MAX_PDF_INLINE_BYTES = 10 * 1024 * 1024 // 10 MB
+    const val DEFAULT_CONFIDENCE_THRESHOLD = 0.65
+    const val LOCAL_RULE_HIGH_CONFIDENCE_THRESHOLD = 0.75
     const val MSG_PDF_NEEDS_KEY = "تفريغ PDF يحتاج مفتاح Gemini؛ أدخله أو حوّل الملف إلى docx"
+    const val MSG_GEMINI_KEY_MISSING = "مفتاح Gemini غير متوفر أو غير صالح؛ يرجى إدخال مفتاح صالح في الإعدادات."
+    const val MSG_LOCAL_FALLBACK_NOTICE = "تعذر الاتصال بـ Gemini؛ تم تطبيق القواعد المحلية فقط وتحتاج النتيجة إلى مراجعة يدوية."
     const val PREFS_NAME = "jadhadha_gemini_prefs"
     const val PREF_KEY_GEMINI_API_KEY = "gemini_api_key"
 
@@ -97,6 +147,10 @@ object GeminiAiService {
         return key.isNotBlank() && !key.startsWith("AQ.", ignoreCase = true)
     }
 
+    private fun canReachGemini(customKey: String?): Boolean {
+        return customTransportForTesting != null || hasValidApiKey(customKey)
+    }
+
     /**
      * Transcribes a PDF document inline (base64, max 10 MB) via Gemini using the same model list,
      * passing the key in the `x-goog-api-key` header and omitting temperature, top_p, and top_k.
@@ -119,7 +173,7 @@ object GeminiAiService {
         }
 
         val apiKey = getEffectiveApiKey(customKey)
-        if (apiKey.isBlank() || apiKey.startsWith("AQ.", ignoreCase = true)) {
+        if (customTransportForTesting == null && (apiKey.isBlank() || apiKey.startsWith("AQ.", ignoreCase = true))) {
             return@withContext Result.failure(IllegalStateException(MSG_PDF_NEEDS_KEY))
         }
 
@@ -150,21 +204,12 @@ object GeminiAiService {
                     })
                 }
 
-                val request = Request.Builder()
-                    .url(url)
-                    .addHeader("x-goog-api-key", apiKey)
-                    .addHeader("Content-Type", "application/json")
-                    .post(bodyJson.toString().toRequestBody("application/json".toMediaType()))
-                    .build()
+                val (code, responseBody) = executePostRequest(url, bodyJson.toString(), apiKey)
 
-                val response = client.newCall(request).execute()
-                val responseBody = response.body?.string().orEmpty()
-
-                if (!response.isSuccessful) {
-                    val code = response.code
+                if (code !in 200..299) {
                     val rawErrMsg = runCatching {
                         JSONObject(responseBody).getJSONObject("error").getString("message")
-                    }.getOrDefault(response.message)
+                    }.getOrDefault("HTTP $code")
                     val rawStatus = runCatching {
                         JSONObject(responseBody).getJSONObject("error").optString("status", "")
                     }.getOrDefault("")
@@ -187,7 +232,6 @@ object GeminiAiService {
                         )
                     }
 
-                    // Model-not-found (404) or transient error -> try next model in API_MODELS
                     lastArabicError = "تعذر التفريغ من الخادم ($code): $rawErrMsg"
                     continue
                 }
@@ -283,170 +327,36 @@ object GeminiAiService {
     }
 
     /**
-     * Delegates the classification of unclassified lines and completion/refinement of missing or
-     * default stage fields to the built-in AI model (matching the reference AI refinement workflow).
+     * Phase 2 Context-Aware Pedagogical Classifier (Local Rules Engine).
+     *
+     * Analyzes the full syntactic and pedagogical structure of [rawLine] rather than isolated keywords:
+     * - Distinguishes all 9 [PedagogicalCategory] values:
+     *   1. [PedagogicalCategory.OBJECTIVES_COMPETENCIES]
+     *   2. [PedagogicalCategory.MATERIALS_METHODS]
+     *   3. [PedagogicalCategory.INTRODUCTION_LAUNCH]
+     *   4. [PedagogicalCategory.TEACHER_ACTIVITIES]
+     *   5. [PedagogicalCategory.LEARNER_ACTIVITIES]
+     *   6. [PedagogicalCategory.EDUCATIONAL_CONTENT]
+     *   7. [PedagogicalCategory.ANALYSIS_DISCUSSION]
+     *   8. [PedagogicalCategory.EVALUATION]
+     *   9. [PedagogicalCategory.SUPPORT_REMEDIATION]
+     * - Does NOT classify an item based on a single isolated keyword (e.g., "تقويم" or "تحليل" or "فرضية")
+     *   when the grammatical head/subject of the sentence proves a different function.
+     * - Always tags its output with [ClassificationSource.LOCAL_RULE] (never [ClassificationSource.GEMINI]).
+     * - Returns `null` when the sentence is ambiguous so it can be escalated to Gemini or human review.
      */
-    suspend fun classifyAndRefineExtraction(
-        rawText: String,
-        initialResult: ParseResult,
-        customKey: String? = null
-    ): ParseResult = withContext(Dispatchers.Default) {
-        val plan = initialResult.plan
-        val report = initialResult.report
-        val comp = plan.componentType
-        val cleanedTopic = DocumentFileReader.cleanTopicFromFilename(plan.topic).ifBlank { plan.topic }
-        val expectedStages = StageCatalog.getStagesForComponent(comp)
-        val stageKeys = expectedStages.map { it.key }
-
-        val mutableStages = plan.stages.toMutableMap()
-        var classifiedCount = 0
-
-        // 1. Classify all unclassified lines using the built-in pedagogical AI classifier
-        for (uLine in report.unclassifiedLines) {
-            val text = uLine.text.trim()
-            if (text.isBlank()) continue
-
-            val classification = classifyLineWithBuiltInAi(text, comp, stageKeys, mutableStages)
-            if (classification != null) {
-                val (targetStageKey, targetField) = classification
-                val currentStage = mutableStages[targetStageKey] ?: StageData()
-                val currentFieldSource = currentStage.sourceFor(targetField)
-                val cleanItem = text.removePrefix("+").removePrefix("-").removePrefix("•").trim()
-                val formattedItem = if (text.startsWith("[جدول:")) text else cleanItem
-
-                val updatedList = when (targetField) {
-                    "abil" -> if (currentFieldSource == FieldSource.DEFAULT) listOf(formattedItem) else (currentStage.abil + formattedItem).distinct()
-                    "teacher" -> if (currentFieldSource == FieldSource.DEFAULT) listOf(formattedItem) else (currentStage.teacher + formattedItem).distinct()
-                    "content" -> if (currentFieldSource == FieldSource.DEFAULT) listOf(formattedItem) else (currentStage.content + formattedItem).distinct()
-                    "eval" -> if (currentFieldSource == FieldSource.DEFAULT) listOf(formattedItem) else (currentStage.eval + formattedItem).distinct()
-                    else -> emptyList()
-                }
-
-                val updatedStage = when (targetField) {
-                    "abil" -> currentStage.copy(abil = updatedList)
-                    "teacher" -> currentStage.copy(teacher = updatedList)
-                    "content" -> currentStage.copy(content = updatedList)
-                    "eval" -> currentStage.copy(eval = updatedList)
-                    else -> currentStage
-                }.withFieldSource(targetField, FieldSource.FILE)
-
-                mutableStages[targetStageKey] = updatedStage
-                classifiedCount++
-            }
-        }
-
-        // 2. Refine & complete any remaining DEFAULT fields using topic-specific AI synthesis
-        val smartAiPlan = synthesizeSmartPlan(cleanedTopic, rawText, comp)
-        var aiRefinedCount = 0
-
-        for (stageMeta in expectedStages) {
-            val sKey = stageMeta.key
-            val currentStage = mutableStages[sKey] ?: StageData()
-            val aiStage = smartAiPlan.stages[sKey] ?: StageData()
-
-            var newAbil = currentStage.abil
-            var newTeacher = currentStage.teacher
-            var newContent = currentStage.content
-            var newEval = currentStage.eval
-            val newSources = currentStage.sources.toMutableMap()
-
-            if (currentStage.sourceFor("abil") == FieldSource.DEFAULT && aiStage.abil.isNotEmpty()) {
-                newAbil = aiStage.abil
-                newSources["abil"] = FieldSource.AI
-                aiRefinedCount++
-            }
-            if (currentStage.sourceFor("teacher") == FieldSource.DEFAULT && aiStage.teacher.isNotEmpty()) {
-                newTeacher = aiStage.teacher
-                newSources["teacher"] = FieldSource.AI
-                aiRefinedCount++
-            }
-            if (currentStage.sourceFor("content") == FieldSource.DEFAULT && aiStage.content.isNotEmpty()) {
-                newContent = aiStage.content
-                newSources["content"] = FieldSource.AI
-                aiRefinedCount++
-            }
-            if (currentStage.sourceFor("eval") == FieldSource.DEFAULT && aiStage.eval.isNotEmpty()) {
-                newEval = aiStage.eval
-                newSources["eval"] = FieldSource.AI
-                aiRefinedCount++
-            }
-
-            mutableStages[sKey] = StageData(
-                eval = newEval,
-                content = newContent,
-                teacher = newTeacher,
-                abil = newAbil,
-                sources = newSources
-            )
-        }
-        if (comp == PedagogicalComponent.LANGUAGE) {
-            mutableStages["lang_observation"]?.let { mutableStages["lang_analysis"] = it }
-        }
-
-        // 3. Recompute StageSourceCount per stage
-        val updatedCounts = mutableMapOf<String, StageSourceCount>()
-        val fields = listOf("abil", "teacher", "content", "eval")
-        for (stageMeta in expectedStages) {
-            val st = mutableStages[stageMeta.key] ?: StageData()
-            var fileCnt = 0
-            var defCnt = 0
-            var aiCnt = 0
-            var userCnt = 0
-            for (f in fields) {
-                when (st.sourceFor(f)) {
-                    FieldSource.FILE -> fileCnt++
-                    FieldSource.DEFAULT, null -> defCnt++
-                    FieldSource.AI -> aiCnt++
-                    FieldSource.USER -> userCnt++
-                }
-            }
-            updatedCounts[stageMeta.key] = StageSourceCount(
-                stageKey = stageMeta.key,
-                stageTitle = stageMeta.title,
-                fileCount = fileCnt,
-                defaultCount = defCnt,
-                aiCount = aiCnt,
-                userCount = userCnt
-            )
-        }
-
-        val updatedInfo = plan.info.copy(
-            communicativeComp = plan.info.communicativeComp.ifBlank { smartAiPlan.info.communicativeComp },
-            methodologicalComp = plan.info.methodologicalComp.ifBlank { smartAiPlan.info.methodologicalComp },
-            culturalComp = plan.info.culturalComp.ifBlank { smartAiPlan.info.culturalComp }
-        )
-
-        val updatedPlan = plan.copy(
-            topic = cleanedTopic,
-            info = updatedInfo,
-            stages = mutableStages
-        )
-
-        val updatedReport = com.example.extractor.JadhadhaParser.buildReport(
-            plan = updatedPlan,
-            isComponentDefaulted = false,
-            unclassifiedLines = emptyList(),
-            aiClassifiedLinesCount = classifiedCount,
-            aiRefinedFieldsCount = aiRefinedCount,
-            isAiDelegated = true,
-            originalRawText = report.originalRawText.ifEmpty { rawText },
-            extractedUnits = report.extractedUnits,
-            unextractableItems = report.unextractableItems
-        )
-
-        ParseResult(plan = updatedPlan, report = updatedReport)
-    }
-
-    private fun classifyLineWithBuiltInAi(
+    fun classifyPedagogicalContextLocally(
         rawLine: String,
         component: PedagogicalComponent,
-        stageKeys: List<String>,
-        currentStages: Map<String, StageData>
-    ): Pair<String, String>? {
-        val clean = rawLine.removePrefix("+").removePrefix("-").removePrefix("•").trim()
+        unitId: String = "",
+        stageKeys: List<String> = StageCatalog.getStagesForComponent(component).map { it.key },
+        currentStages: Map<String, StageData> = emptyMap()
+    ): PedagogicalClassificationItem? {
+        val verbatim = rawLine.trim()
+        val clean = verbatim.removePrefix("+").removePrefix("-").removePrefix("•").removePrefix("*").trim()
         if (clean.length < 3) return null
 
-        // Skip pure metadata or noise lines or standalone durations/segments
+        // Skip administrative header labels or standalone duration noise
         if (clean.startsWith("الأستاذ") || clean.startsWith("المؤسسة") ||
             clean.startsWith("السنة الدراسية") || clean.startsWith("المديرية") ||
             clean.startsWith("الأكاديمية") ||
@@ -455,93 +365,1049 @@ object GeminiAiService {
             return null
         }
 
-        // Determine field type: abil, teacher, eval, or content
-        val field = when {
-            clean.startsWith("[جدول:") -> "content"
-            clean.startsWith("القدرة على") || clean.startsWith("أن يتمكن") ||
-                clean.startsWith("أن يتعرف") || clean.startsWith("أن يوظف") ||
-                clean.startsWith("أن يميز") || clean.startsWith("أن يصوغ") ||
-                clean.startsWith("مهارة ") || clean.startsWith("تذكير ب") ||
-                clean.startsWith("استحضار مكتسبات") -> "abil"
-            clean.startsWith("تقويم") || clean.startsWith("دعم") ||
-                clean.contains("تقويم تشخيصي") || clean.contains("تقويم تكويني") ||
-                clean.contains("تقويم إجمالي") || clean.startsWith("مراقبة") ||
-                clean.startsWith("اختبار قدرة") || clean.startsWith("رصد قدرة") -> "eval"
-            rawLine.trim().startsWith("+") ||
-                clean.startsWith("يتأملون") || clean.startsWith("يصفون") ||
-                clean.startsWith("يلاحظون") || clean.startsWith("يستنتجون") ||
-                clean.startsWith("يجيبون") || clean.startsWith("يقرؤون") ||
-                clean.startsWith("يقارنون") || clean.startsWith("يميزون") ||
-                clean.startsWith("يطبقون") || clean.startsWith("ينجزون") ||
-                clean.startsWith("يطرح") || clean.startsWith("يوجه") ||
-                clean.startsWith("يناقش") || clean.startsWith("يدون") ||
-                clean.startsWith("يرسم") || clean.startsWith("يطالب") ||
-                clean.startsWith("يكلف") || clean.startsWith("يقدم") ||
-                clean.startsWith("يستدرج") || clean.startsWith("يسطر") ||
-                clean.startsWith("يساعد") -> "teacher"
-            else -> "content"
+        // Determine pedagogical category and target field from sentence-level syntactic frame
+        val categoryAndConfidence: Pair<PedagogicalCategory, Pair<Double, String>>? = when {
+            // 1. OBJECTIVES_COMPETENCIES: Nominal competency/objective head ("القدرة على...", "أن يتمكن...", "مهارة...")
+            // Even if the object clause mentions "تقويم" or "تحليل" or "فرضية", the syntactic head is an objective.
+            Regex("""^(القدرة على|قدرة المتعلم|قدرة التلاميذ|أن يتمكن|أن يتعرف|أن يوظف|أن يميز|أن يصوغ|أن يحلل|أن يستنتج|أن يدرك|أن يقرأ|أن يكتسب|مهارة |كفاية |استحضار المتعلم مكتسباته|استحضار مكتسبات المتعلمين|تنمية قدرة المتعلمين)""")
+                .containsMatchIn(clean) -> {
+                PedagogicalCategory.OBJECTIVES_COMPETENCIES to (0.92 to "بنية مصدرية/مؤولية تدل على قدرة أو هدف تعلمي مستهدف")
+            }
+
+            // 4. TEACHER_ACTIVITIES: Explicit teacher subject or didactic directive verb directed at learners
+            // Even if the complement mentions "لتقويم الفهم" or "لتحليل النص" or "فرضية القراءة", the grammatical agent is the teacher.
+            Regex("""^(يطرح الأستاذ|يوجه الأستاذ|يدون الأستاذ|يرسم الأستاذ|يطالب الأستاذ|يكلف الأستاذ|يستدرج الأستاذ|يسطر الأستاذ|يناقش الأستاذ|يقرأ الأستاذ|يمهد الأستاذ|يسجل الأستاذ|يوزع الأستاذ|يطلب الأستاذ|يساعد الأستاذ|يطرح أسئلة|يوجه المتعلمين|يستدرج المتعلمين|يطالب المتعلمين|يكلف المتعلمين|يدعو المتعلمين|يساعد المتعلمين|يرسم جدول|يدون أمثلة|القراءة النموذجية للنص|إضاءة النص وتذليل المعجم)""")
+                .containsMatchIn(clean) -> {
+                PedagogicalCategory.TEACHER_ACTIVITIES to (0.90 to "فعل ديداكتيكي مسند إلى الأستاذ أو موجه للمتعلمين")
+            }
+
+            // 5. LEARNER_ACTIVITIES: Plural learner verbs or explicit learner subject
+            // Note: In the official 5-column template, learner activities are placed in the didactic content/activities column ("content") or alongside teacher activities when unstructured.
+            Regex("""^(يجيب المتعلمون|يقرأ المتعلمون|يتأمل المتعلمون|يلاحظ المتعلمون|يستنتج المتعلمون|ينجز المتعلمون|يصوغ المتعلمون|يستخرج المتعلمون|يحدد المتعلمون|يشتغل المتعلمون|يتأملون|يصفون|يلاحظون|يستنتجون|يجيبون|يقرؤون|يقارنون|يميزون|يطبقون|ينجزون)""")
+                .containsMatchIn(clean) -> {
+                PedagogicalCategory.LEARNER_ACTIVITIES to (0.88 to "فعل مسند إلى المتعلمين يصف نشاطهم التعلمي")
+            }
+
+            // 9. SUPPORT_REMEDIATION: Remediation, error treatment, and learner support
+            Regex("""^(دعم |الدعم |معالجة |تقديم الدعم|أنشطة الدعم|تصحيح تعثرات|معالجة تعثرات|يدعم الأستاذ جوانب التعثر|إشراك أكبر عدد من المتعلمين في التصحيح|تشجيع التنافس الإيجابي)""")
+                .containsMatchIn(clean) -> {
+                PedagogicalCategory.SUPPORT_REMEDIATION to (0.88 to "عبارة تدل في سياقها على الدعم التربوي ومعالجة التعثرات")
+            }
+
+            // 8. EVALUATION: Assessment criteria, verification of understanding, or diagnostic/formative/summative check
+            Regex("""^(تقويم |مؤشرات التقويم|اختبار قدرة|اختبار مكتسبات|رصد قدرة|رصد إمكانات|مراقبة سلامة|تقويم مدى|تقويم تشخيصي|تقويم تكويني|تقويم إجمالي|تصحيح إجابات المتعلمين|كل الفرضيات مقبولة شرط تمحيصها)""")
+                .containsMatchIn(clean) -> {
+                PedagogicalCategory.EVALUATION to (0.88 to "مؤشر تقويمي لقياس درجة تحقق التعلمات")
+            }
+
+            // 2. MATERIALS_METHODS: Pedagogical tools, media, and teaching methods
+            Regex("""^(الوسائل التعليمية|الوسائل الديداكتيكية|الطرائق البيداغوجية|اعتماد الطريقة|الاعتماد على السبورة|السبورة\s*-|الكتاب المدرسي والسبورة|طريقة حوارية|عمل في مجموعات)""")
+                .containsMatchIn(clean) -> {
+                PedagogicalCategory.MATERIALS_METHODS to (0.86 to "تحديد للوسائل الديداكتيكية أو الطرائق البيداغوجية")
+            }
+
+            // 3. INTRODUCTION_LAUNCH: Introductory context, prior lesson recall, or problem launch
+            Regex("""^(وضعية الانطلاق|تمهيد إشكالي|تذكير بالدرس السابق|تذكير بالحصة السابقة|معطيات تمهيدية|معطيات تاريخية مرتبطة|إجابات المتعلمين تستثمر للربط)""")
+                .containsMatchIn(clean) -> {
+                PedagogicalCategory.INTRODUCTION_LAUNCH to (0.85 to "سياق تمهيدي أو انطلاق للربط بالتعلمات السابقة")
+            }
+
+            // 7. ANALYSIS_DISCUSSION: Analytical tables, lexical fields, stylistic analysis, error diagnosis grids
+            clean.startsWith("[جدول:") ||
+                Regex("""^(جدول الوصف والتحليل|شبكة تشخيص أخطاء|الحقول الدلالية|الحقول المعجمية|الخصائص الأسلوبية|عناصر التحليل|أحداث النص:|الشخصيات:|الزمان والمكان:|مناقشة الأمثلة وتفكيكها)""")
+                    .containsMatchIn(clean) -> {
+                PedagogicalCategory.ANALYSIS_DISCUSSION to (0.87 to "بنية تحليلية أو جدول تفكيك ومناقشة للمعطيات")
+            }
+
+            // 6. EDUCATIONAL_CONTENT: Structured lesson content (definitions, text thresholds, rules, examples, synthesis)
+            Regex("""^(صاحب النص|مصدر النص|نوعية النص|العنوان:|دلالة العنوان|بداية النص|نهاية النص|الفرضية:|فرضية القراءة|الشروح اللغوية|المضمون العام|الفكرة العامة|الأفكار الأساسية|القاعدة العامة|القاعدة والاستنتاج|استنتاج جزئي|الاستنتاج:|خلاصة تركيبية|المجموعة [0-9١-٩]|أمثلة الانطلاق|تثبيت إملائي|تثبيت تركيبي|إغناء معجم)""")
+                .containsMatchIn(clean) -> {
+                PedagogicalCategory.EDUCATIONAL_CONTENT to (0.86 to "محتوى معرفي/ديداكتيكي منظم خاص بالدرس")
+            }
+
+            else -> null
         }
 
-        // Determine target stage key based on semantic markers
-        val stageKey = when (component) {
+        if (categoryAndConfidence == null) {
+            return null
+        }
+
+        val (category, confAndRationale) = categoryAndConfidence
+        val (confidence, rationale) = confAndRationale
+
+        // Map category to the 4 stage fields ("abil", "teacher", "content", "eval")
+        val targetField = when (category) {
+            PedagogicalCategory.OBJECTIVES_COMPETENCIES -> "abil"
+            PedagogicalCategory.TEACHER_ACTIVITIES -> "teacher"
+            PedagogicalCategory.EVALUATION,
+            PedagogicalCategory.SUPPORT_REMEDIATION -> "eval"
+            PedagogicalCategory.LEARNER_ACTIVITIES -> {
+                // In Language lessons where unstructured "+" lines represent analytical steps in teacher/activity column,
+                // keep compatibility if explicitly prefixed with "+" and teacher is DEFAULT
+                if (component == PedagogicalComponent.LANGUAGE && verbatim.startsWith("+")) "teacher" else "content"
+            }
+            PedagogicalCategory.MATERIALS_METHODS,
+            PedagogicalCategory.INTRODUCTION_LAUNCH,
+            PedagogicalCategory.EDUCATIONAL_CONTENT,
+            PedagogicalCategory.ANALYSIS_DISCUSSION -> "content"
+        }
+
+        val stageKey = inferContextStageKey(clean, category, component, targetField, stageKeys, currentStages)
+
+        return PedagogicalClassificationItem(
+            unitId = unitId,
+            originalText = verbatim,
+            proposedCategory = category,
+            targetField = targetField,
+            component = component,
+            stageKey = stageKey,
+            confidence = confidence,
+            source = ClassificationSource.LOCAL_RULE,
+            rationale = rationale
+        )
+    }
+
+    private fun inferContextStageKey(
+        clean: String,
+        category: PedagogicalCategory,
+        component: PedagogicalComponent,
+        field: String,
+        stageKeys: List<String>,
+        currentStages: Map<String, StageData>
+    ): String {
+        val officialSet = StageCatalog.getStagesForComponent(component).map { it.key }.toSet()
+        val candidate = when (component) {
             PedagogicalComponent.LANGUAGE -> when {
-                clean.contains("تمهيد") || clean.contains("تشخيص") || clean.contains("الدرس السابق") || clean.contains("يستحضرون") ->
+                category == PedagogicalCategory.INTRODUCTION_LAUNCH -> "lang_diagnostic"
+                category == PedagogicalCategory.ANALYSIS_DISCUSSION -> "lang_observation"
+                clean.contains("الدرس السابق") || clean.contains("تشخيص") || clean.contains("تمهيد") ->
                     "lang_diagnostic"
-                clean.contains("الأمثلة") || clean.contains("الشواهد") || clean.contains("المجموعة") ||
-                    clean.startsWith("يتأملون") || clean.startsWith("يلاحظون") ||
-                    clean.startsWith("[جدول:") || clean.contains("الظاهرة اللغوية") || clean.contains("متغيراتها") ||
-                    clean.startsWith("يصفون") || clean.contains("وزنه") || clean.contains("صياغت") ||
-                    clean.contains("مفعل") || clean.contains("الجدول") || clean.contains("تحليل") ->
+                clean.startsWith("[جدول:") || clean.contains("الأمثلة") || clean.contains("الظاهرة اللغوية") ||
+                    clean.contains("متغيراتها") || clean.contains("يتأملون") || clean.contains("يصفون") ||
+                    clean.contains("الوصف والتحليل") || clean.contains("استنتاج جزئي") ->
                     "lang_observation"
-                clean.contains("القاعدة") || clean.contains("الاستنتاج") || clean.startsWith("يستنتجون") ||
-                    clean.contains("يصوغ") || clean.contains("يدل على زمان") || clean.contains("يدل على مكان") ->
+                clean.contains("القاعدة العامة") || clean.contains("القاعدة الكلية") ||
+                    clean.contains("تجميع الاستنتاجات") || clean.startsWith("القاعدة والاستنتاج") ->
                     "lang_synthesis"
-                clean.contains("تطبيق") || clean.contains("تمرين") || clean.contains("أعرب") ||
-                    clean.contains("استخرج") || clean.contains("ركب") || clean.startsWith("ينجزون") ||
-                    clean.startsWith("يطبقون") ->
+                clean.contains("تطبيق") || clean.contains("تمارين") || clean.contains("أعرب") ||
+                    clean.contains("ركب جمل") || clean.startsWith("يطبقون") || clean.startsWith("ينجزون") ->
                     "lang_application"
-                else -> {
-                    stageKeys.firstOrNull { k ->
-                        currentStages[k]?.sourceFor(field) == FieldSource.DEFAULT
-                    } ?: "lang_observation"
-                }
+                else -> stageKeys.firstOrNull { k ->
+                    k in officialSet && currentStages[k]?.sourceFor(field) == FieldSource.DEFAULT
+                } ?: "lang_observation"
             }
 
             PedagogicalComponent.READING -> when {
-                clean.contains("الحصة السابقة") || clean.contains("استرجاع مكتسبات ح") -> "session2_intro"
-                clean.contains("تمهيد") || clean.contains("تشخيص") || clean.contains("الدرس السابق") -> "diagnostic"
-                clean.contains("العنوان") || clean.contains("العتبات") || clean.contains("فرضيات") || clean.contains("صاحب النص") || clean.contains("تأطير") -> "observation"
-                clean.contains("الفكرة العامة") || clean.contains("الأفكار الأساسية") || clean.contains("الشرح") || clean.contains("المفردات") || clean.contains("قراءة") -> "comprehension"
-                clean.contains("الحقول") || clean.contains("المعجم") || clean.contains("الأساليب") || clean.contains("القيم") || clean.contains("تحليل") || clean.contains("شخصيات") || clean.contains("أحداث") || clean.startsWith("[جدول:") -> "analysis"
-                clean.contains("تركيب") || clean.contains("خلاصة") -> "synthesis"
-                clean.contains("استثمار") || clean.contains("امتداد") || clean.contains("ابحث") -> "investment"
-                else -> stageKeys.firstOrNull { k -> currentStages[k]?.sourceFor(field) == FieldSource.DEFAULT } ?: "analysis"
+                category == PedagogicalCategory.INTRODUCTION_LAUNCH -> {
+                    if (clean.contains("الحصة السابقة") || clean.contains("الحصة الأولى") ||
+                        clean.contains("استرجاع مكتسبات ح")
+                    ) {
+                        "session2_intro"
+                    } else {
+                        "diagnostic"
+                    }
+                }
+                category == PedagogicalCategory.ANALYSIS_DISCUSSION -> "analysis"
+                clean.contains("الحصة السابقة") || clean.contains("استرجاع مكتسبات الحصة الأولى") ||
+                    clean.contains("استرجاع مكتسبات ح") ->
+                    "session2_intro"
+                clean.contains("تشخيص") || clean.contains("تمهيد") ->
+                    "diagnostic"
+                clean.contains("صاحب النص") || clean.contains("مصدر النص") || clean.contains("نوعية النص") ||
+                    clean.contains("العنوان") || clean.contains("الفرضية") || clean.contains("فرضية القراءة") ||
+                    clean.contains("بداية النص") ->
+                    "observation"
+                clean.contains("القراءة النموذجية") || clean.contains("قراءة نموذجية") ||
+                    clean.contains("القراءة التناوبية") || clean.contains("قراءة تناوبية") ||
+                    clean.contains("الشروح اللغوية") || clean.contains("شرح المفردات") ||
+                    clean.contains("يشرحون المفردات") || clean.contains("المضمون العام") ||
+                    clean.contains("الفكرة العامة") || clean.contains("الأفكار الأساسية") ->
+                    "comprehension"
+                clean.contains("الحقول") || clean.contains("المعجم") || clean.contains("الأساليب") ||
+                    clean.contains("القيم") || clean.contains("أحداث النص") || clean.contains("الشخصيات") ->
+                    "analysis"
+                clean.contains("خلاصة تركيبية") || clean.contains("التركيب") || clean.contains("إعادة بناء النص") ->
+                    "synthesis"
+                clean.contains("الاستثمار") || clean.contains("أنشطة البحث") || clean.contains("امتداد") ->
+                    "investment"
+                else -> stageKeys.firstOrNull { k ->
+                    k in officialSet && currentStages[k]?.sourceFor(field) == FieldSource.DEFAULT
+                } ?: "analysis"
             }
 
             PedagogicalComponent.EXPRESSION -> when {
-                clean.contains("تشخيص أخطاء") || clean.contains("شبكة تشخيص") || clean.startsWith("[جدول:") -> "insha_corr_diagnosis"
-                clean.contains("التصحيح الفردي") || clean.contains("أوراق التحرير") || clean.contains("تثبيت إملائي") -> "insha_corr_support"
-                clean.contains("نص الانطلاق") || clean.contains("قراءة النص وفهمه") -> "insha_acq_reading"
-                clean.contains("عناصر المهارة") || clean.contains("الخطوات الإجرائية") -> "insha_acq_elements"
-                clean.contains("تعريف اليوميات") || clean.contains("الاستنتاج") -> "insha_acq_synthesis"
-                clean.contains("تقديم الموضوع") && clean.contains("إنتاج") -> "insha_prod_presentation"
-                clean.contains("تقديم الموضوع") -> "insha_app_presentation"
-                clean.contains("مسودة") || clean.contains("تحرير فردي") || clean.contains("إنتاج") -> "insha_prod_execution"
-                clean.contains("تطبيق") || clean.contains("التدرب") -> "insha_app_execution"
-                clean.contains("تصحيح") -> "insha_app_correction"
-                else -> stageKeys.firstOrNull { k -> currentStages[k]?.sourceFor(field) == FieldSource.DEFAULT } ?: "insha_acq_elements"
+                category == PedagogicalCategory.INTRODUCTION_LAUNCH -> when {
+                    clean.contains("التصحيح") || clean.contains("أخطاء") -> "insha_corr_diagnostic"
+                    clean.contains("الإنتاج") || clean.contains("تحرير") -> "insha_prod_diagnostic"
+                    clean.contains("التطبيق") || clean.contains("التدرب") -> "insha_app_diagnostic"
+                    else -> "insha_acq_diagnostic"
+                }
+                category == PedagogicalCategory.ANALYSIS_DISCUSSION -> {
+                    if (clean.contains("شبكة تشخيص") || clean.contains("تشخيص أخطاء") ||
+                        clean.contains("أخطاء") || clean.startsWith("[جدول:")
+                    ) {
+                        "insha_corr_diagnosis"
+                    } else {
+                        "insha_acq_elements"
+                    }
+                }
+                clean.contains("شبكة تشخيص") || clean.contains("تشخيص أخطاء") || clean.startsWith("[جدول:") ->
+                    "insha_corr_diagnosis"
+                clean.contains("التصحيح الفردي") || clean.contains("أوراق التحرير") ||
+                    clean.contains("تثبيت إملائي") || clean.contains("تثبيت تركيبي") || clean.contains("إغناء معجم") ->
+                    "insha_corr_support"
+                clean.contains("نص الانطلاق") ->
+                    "insha_acq_reading"
+                clean.contains("عناصر المهارة") || clean.contains("خطوات المهارة") ->
+                    "insha_acq_elements"
+                clean.contains("القاعدة الضابطة للمهارة") || clean.contains("خلاصة المهارة") ->
+                    "insha_acq_synthesis"
+                clean.contains("تقديم الموضوع") && clean.contains("إنتاج") ->
+                    "insha_prod_presentation"
+                clean.contains("تقديم الموضوع") ->
+                    "insha_app_presentation"
+                clean.contains("تحرير فردي") || clean.contains("إنتاج فردي") ->
+                    "insha_prod_execution"
+                clean.contains("التدرب") || clean.contains("إنجاز جماعي") ->
+                    "insha_app_execution"
+                else -> stageKeys.firstOrNull { k ->
+                    k in officialSet && currentStages[k]?.sourceFor(field) == FieldSource.DEFAULT
+                } ?: "insha_acq_elements"
+            }
+        }
+        return if (candidate in officialSet) candidate else officialSet.first()
+    }
+
+    /**
+     * Kept for backward-compatible signature; delegates to [classifyPedagogicalContextLocally]
+     * and returns `(stageKey, targetField)` ONLY when a high-confidence local contextual rule matches.
+     */
+    internal fun classifyLineWithBuiltInAi(
+        rawLine: String,
+        component: PedagogicalComponent,
+        stageKeys: List<String>,
+        currentStages: Map<String, StageData>
+    ): Pair<String, String>? {
+        val item = classifyPedagogicalContextLocally(
+            rawLine = rawLine,
+            component = component,
+            stageKeys = stageKeys,
+            currentStages = currentStages
+        ) ?: return null
+        return if (item.confidence >= LOCAL_RULE_HIGH_CONFIDENCE_THRESHOLD) {
+            item.stageKey to item.targetField
+        } else {
+            null
+        }
+    }
+
+    /**
+     * Validates and parses a structured JSON response from Gemini for unit classification.
+     *
+     * Enforces:
+     * 1. Valid JSON syntax (`{"items": [...]}` or `{"classifications": [...]}` or `[...]`).
+     * 2. Every `unitId` must match an existing unit in [originalUnits] (rejects unknown/invented unit IDs).
+     * 3. Duplicate `unitId` detection: rejects redundant or conflicting duplicate `unitId` entries so a unit is never
+     *    assigned two conflicting classifications or inserted twice.
+     * 4. Canonical verbatim text is preserved from [originalUnits] (rejects hallucinated text that does not match the unit).
+     * 5. `stageKey` must be an official stage in [StageCatalog] for [targetComponent] (7 for Reading, 4 for Language, 16 for Expression)
+     *    and compatible with `proposedCategory`.
+     * 6. `targetField` must be in `{"abil", "teacher", "content", "eval"}` and compatible with `proposedCategory`.
+     * 7. `proposedCategory` must be a valid [PedagogicalCategory] and `confidence` must be in `0.0..1.0`.
+     * 8. Items with `confidence < confidenceThreshold` are placed in [GeminiClassificationValidationResult.lowConfidenceItems]
+     *    for human review instead of being auto-applied.
+     * 9. Units in [originalUnits] omitted by Gemini from the JSON response are recorded in [GeminiClassificationValidationResult.omittedUnitIds].
+     */
+    fun validateAndParseGeminiClassificationJson(
+        rawJson: String,
+        originalUnits: List<ExtractedUnit>,
+        targetComponent: PedagogicalComponent,
+        confidenceThreshold: Double = DEFAULT_CONFIDENCE_THRESHOLD
+    ): GeminiClassificationValidationResult {
+        val cleaned = rawJson.trim()
+            .removePrefix("```json")
+            .removePrefix("```")
+            .removeSuffix("```")
+            .trim()
+
+        if (cleaned.isBlank()) {
+            return GeminiClassificationValidationResult(
+                isValid = false,
+                rejectedReasons = listOf("استجابة Gemini فارغة."),
+                omittedUnitIds = originalUnits.map { it.id },
+                errorMessage = "استجابة Gemini فارغة."
+            )
+        }
+
+        val itemsArray: JSONArray = try {
+            if (cleaned.startsWith("[")) {
+                JSONArray(cleaned)
+            } else {
+                val root = JSONObject(cleaned)
+                root.optJSONArray("items")
+                    ?: root.optJSONArray("classifications")
+                    ?: return GeminiClassificationValidationResult(
+                        isValid = false,
+                        rejectedReasons = listOf("بنية JSON غير صالحة: الحقل 'items' أو 'classifications' مفقود."),
+                        omittedUnitIds = originalUnits.map { it.id },
+                        errorMessage = "بنية JSON غير صالحة: الحقل 'items' مفقود."
+                    )
+            }
+        } catch (e: Exception) {
+            return GeminiClassificationValidationResult(
+                isValid = false,
+                rejectedReasons = listOf("فشل تحليل JSON الوارد من Gemini: ${e.message}"),
+                omittedUnitIds = originalUnits.map { it.id },
+                errorMessage = "فشل تحليل JSON الوارد من Gemini: ${e.message}"
+            )
+        }
+
+        val unitsById = originalUnits.associateBy { it.id }
+        val officialStageKeys = StageCatalog.getStagesForComponent(targetComponent).map { it.key }.toSet()
+        val validFields = setOf("abil", "teacher", "content", "eval")
+
+        val accepted = mutableListOf<PedagogicalClassificationItem>()
+        val lowConfidence = mutableListOf<PedagogicalClassificationItem>()
+        val rejectedIds = mutableListOf<String>()
+        val rejectedReasons = mutableListOf<String>()
+        val seenItemsByUnitId = mutableMapOf<String, PedagogicalClassificationItem>()
+        val conflictedUnitIds = mutableSetOf<String>()
+
+        fun markRejected(id: String, reason: String) {
+            if (id !in rejectedIds) {
+                rejectedIds.add(id)
+            }
+            rejectedReasons.add(reason)
+        }
+
+        for (i in 0 until itemsArray.length()) {
+            val obj = itemsArray.optJSONObject(i) ?: continue
+            val unitId = obj.optString("unitId", "").trim()
+            if (unitId.isEmpty() || unitId !in unitsById) {
+                val badId = unitId.ifEmpty { "missing_id_$i" }
+                markRejected(badId, "معرف وحدة غير معروف أو مخترع: $badId")
+                continue
+            }
+
+            if (unitId in conflictedUnitIds) {
+                markRejected(unitId, "تكرار متعارض لمعرف الوحدة ($unitId) في استجابة Gemini")
+                continue
+            }
+
+            val sourceUnit = unitsById.getValue(unitId)
+            val returnedText = obj.optString("originalText", "").trim()
+
+            // Prevent hallucinated text: if originalText is provided, it must correspond to sourceUnit.verbatimText
+            if (returnedText.isNotEmpty()) {
+                val normSource = sourceUnit.verbatimText.removePrefix("+").removePrefix("-").removePrefix("•").trim()
+                val normReturned = returnedText.removePrefix("+").removePrefix("-").removePrefix("•").trim()
+                val textMatches = normSource == normReturned ||
+                    normSource.contains(normReturned.take(15)) ||
+                    normReturned.contains(normSource.take(15))
+                if (!textMatches) {
+                    accepted.removeAll { it.unitId == unitId }
+                    lowConfidence.removeAll { it.unitId == unitId }
+                    seenItemsByUnitId.remove(unitId)
+                    markRejected(unitId, "نص محرف لا يطابق النص الأصلي للوحدة ($unitId)")
+                    continue
+                }
+            }
+
+            // Validate component if explicitly provided
+            val rawComponent = obj.optString("component", "").trim()
+            if (rawComponent.isNotEmpty()) {
+                val resolvedComp = resolvePedagogicalComponent(rawComponent)
+                if (resolvedComp != null && resolvedComp != targetComponent) {
+                    accepted.removeAll { it.unitId == unitId }
+                    lowConfidence.removeAll { it.unitId == unitId }
+                    seenItemsByUnitId.remove(unitId)
+                    markRejected(unitId, "مكون غير متوافق ($rawComponent) مع المكون المستهدف (${targetComponent.name}) للوحدة ($unitId)")
+                    continue
+                }
+            }
+
+            val categoryStr = obj.optString("proposedCategory", "").trim()
+            val category = runCatching { PedagogicalCategory.valueOf(categoryStr.uppercase()) }.getOrNull()
+                ?: PedagogicalCategory.fromString(categoryStr)
+            if (category == null) {
+                accepted.removeAll { it.unitId == unitId }
+                lowConfidence.removeAll { it.unitId == unitId }
+                seenItemsByUnitId.remove(unitId)
+                markRejected(unitId, "فئة بيداغوجية غير صالحة ($categoryStr) للوحدة ($unitId)")
+                continue
+            }
+
+            // Enforce official StageCatalog stage keys and pedagogical stage compatibility — reject any invented or incompatible stage
+            val stageKey = obj.optString("stageKey", "").trim()
+            if (stageKey.isEmpty() || stageKey !in officialStageKeys) {
+                accepted.removeAll { it.unitId == unitId }
+                lowConfidence.removeAll { it.unitId == unitId }
+                seenItemsByUnitId.remove(unitId)
+                markRejected(unitId, "مرحلة غير رسمية أو مخترعة ($stageKey) للوحدة ($unitId)")
+                continue
+            }
+            if (!category.isCompatibleWithStage(stageKey, targetComponent)) {
+                accepted.removeAll { it.unitId == unitId }
+                lowConfidence.removeAll { it.unitId == unitId }
+                seenItemsByUnitId.remove(unitId)
+                markRejected(unitId, "مرحلة ($stageKey) غير متوافقة تربوياً مع الفئة (${category.name}) للوحدة ($unitId)")
+                continue
+            }
+
+            // Enforce valid and category-compatible targetField
+            val rawTargetField = obj.optString("targetField", "").trim().lowercase()
+            if (rawTargetField.isNotEmpty() && rawTargetField !in validFields) {
+                accepted.removeAll { it.unitId == unitId }
+                lowConfidence.removeAll { it.unitId == unitId }
+                seenItemsByUnitId.remove(unitId)
+                markRejected(unitId, "حقل مستهدف غير صالح ($rawTargetField) للوحدة ($unitId)")
+                continue
+            }
+            val targetField = if (rawTargetField.isNotEmpty()) rawTargetField else category.defaultTargetField
+            if (!category.isCompatibleWithField(targetField, targetComponent)) {
+                accepted.removeAll { it.unitId == unitId }
+                lowConfidence.removeAll { it.unitId == unitId }
+                seenItemsByUnitId.remove(unitId)
+                markRejected(unitId, "حقل مستهدف ($targetField) غير متوافق مع الفئة (${category.name}) للوحدة ($unitId)")
+                continue
+            }
+
+            val confidence = obj.optDouble("confidence", Double.NaN)
+            if (confidence.isNaN() || confidence < 0.0 || confidence > 1.0) {
+                accepted.removeAll { it.unitId == unitId }
+                lowConfidence.removeAll { it.unitId == unitId }
+                seenItemsByUnitId.remove(unitId)
+                markRejected(unitId, "قيمة ثقة غير صالحة ($confidence) للوحدة ($unitId)")
+                continue
+            }
+
+            val rationale = obj.optString("rationale", "").trim().ifEmpty {
+                "تصنيف دلالي عبر Gemini (${category.arabicLabel})"
+            }
+
+            // Check duplicate unitId in the same response
+            val existingForUnit = seenItemsByUnitId[unitId]
+            if (existingForUnit != null) {
+                val isConflicting = existingForUnit.proposedCategory != category ||
+                    existingForUnit.stageKey != stageKey ||
+                    existingForUnit.targetField != targetField
+                if (isConflicting) {
+                    accepted.removeAll { it.unitId == unitId }
+                    lowConfidence.removeAll { it.unitId == unitId }
+                    seenItemsByUnitId.remove(unitId)
+                    conflictedUnitIds.add(unitId)
+                    markRejected(unitId, "تكرار متعارض لمعرف الوحدة ($unitId) بتصنيفين مختلفين في استجابة Gemini")
+                } else {
+                    rejectedReasons.add("تكرار معرف الوحدة ($unitId) في استجابة Gemini")
+                }
+                continue
+            }
+
+            if (unitId in rejectedIds) {
+                rejectedReasons.add("تكرار معرف الوحدة ($unitId) بعد رفض سابق في استجابة Gemini")
+                continue
+            }
+
+            val item = PedagogicalClassificationItem(
+                unitId = sourceUnit.id,
+                originalText = sourceUnit.verbatimText,
+                proposedCategory = category,
+                targetField = targetField,
+                component = targetComponent,
+                stageKey = stageKey,
+                confidence = confidence,
+                source = ClassificationSource.GEMINI,
+                rationale = rationale
+            )
+            seenItemsByUnitId[unitId] = item
+
+            if (confidence >= confidenceThreshold) {
+                accepted.add(item)
+            } else {
+                lowConfidence.add(item)
             }
         }
 
-        return stageKey to field
+        val accountedValidOrRejectedIds = (
+            accepted.map { it.unitId } +
+                lowConfidence.map { it.unitId } +
+                rejectedIds.filter { it in unitsById }
+            ).toSet()
+        val omittedIds = originalUnits.map { it.id }.filter { it !in accountedValidOrRejectedIds }
+
+        val isValidResponse = accepted.isNotEmpty() || lowConfidence.isNotEmpty() || itemsArray.length() == 0
+        return GeminiClassificationValidationResult(
+            isValid = isValidResponse,
+            acceptedItems = accepted,
+            lowConfidenceItems = lowConfidence,
+            rejectedUnitIds = rejectedIds,
+            rejectedReasons = rejectedReasons,
+            omittedUnitIds = omittedIds,
+            errorMessage = if (!isValidResponse) "تم رفض عناصر استجابة Gemini لعدم تطابق المعرفات أو المراحل أو الحقول الرسمية." else null
+        )
+    }
+
+    private fun buildGeminiUnitClassificationPrompt(
+        units: List<ExtractedUnit>,
+        component: PedagogicalComponent,
+        topic: String
+    ): String {
+        val officialStages = StageCatalog.getStagesForComponent(component)
+        val stagesListText = officialStages.joinToString("\n") { "- ${it.key}: ${it.title} (${it.description})" }
+        val categoriesText = PedagogicalCategory.entries.joinToString("\n") {
+            "- ${it.name} (${it.arabicLabel}) -> الحقل الافتراضي: ${it.defaultTargetField}"
+        }
+        val unitsJsonArray = JSONArray()
+        for (u in units) {
+            unitsJsonArray.put(
+                JSONObject().apply {
+                    put("unitId", u.id)
+                    put("originalText", u.verbatimText)
+                    put("lineNumber", u.location.lineNumber)
+                }
+            )
+        }
+
+        return """
+أنت مفتش تربوي ومحلل بيداغوجي خبير في تدريس اللغة العربية بالتعليم الثانوي الإعدادي بالمغرب.
+المهمة: تصنيف الوحدات النصية المستخرجة من جذاذة درس «$topic» في مكون «${component.title}» بالاعتماد على السياق البيداغوجي والوظيفة النحوية والديداكتيكية للجملة كاملة، وليس بناءً على كلمة مفردة معزولة.
+
+الفئات البيداغوجية التسع المعتمدة (proposedCategory):
+$categoriesText
+
+المراحل الرسمية الحصرية لمكون «${component.title}» (stageKey) — يُمنع منعاً باتاً اختراع أي مرحلة خارج هذه القائمة:
+$stagesListText
+
+الحقول الأربعة المسموحة داخل كل مرحلة (targetField):
+- "abil": القدرات والمهارات والأهداف التعلمية
+- "teacher": أنشطة الأستاذ والأسئلة التوجيهية الديداكتيكية
+- "content": المحتوى التعليمي، أنشطة المتعلمين، الأمثلة، الجداول التحليلية، الاستنتاجات
+- "eval": مؤشرات التقويم والدعم والمعالجة
+
+قواعد صارمة:
+1. حافظ على معرف الوحدة (unitId) والنص الأصلي (originalText) كما هما حرفياً دون أي تعديل أو حذف أو اختراع.
+2. لا تصنف جملة بناءً على كلمة مفردة إذا كان سياقها النحوي والتربوي يدل على وظيفة أخرى (مثلاً: "يطرح الأستاذ أسئلة لتقويم الفهم" هي نشاط للأستاذ TEACHER_ACTIVITIES في حقل teacher وليست تقويماً).
+3. حدد مستوى الثقة (confidence) برقم عشري بين 0.0 و 1.0، واكتب تعليلاً مختصراً (rationale) يوضح سبب التصنيف.
+
+الوحدات المطلوب تصنيفها:
+$unitsJsonArray
+
+أرجع النتيجة بصيغة JSON حصراً دون أي نص خارجي وفق الهيكل التالي:
+{
+  "items": [
+    {
+      "unitId": "unit_1",
+      "originalText": "النص الأصلي كما ورد",
+      "proposedCategory": "TEACHER_ACTIVITIES",
+      "targetField": "teacher",
+      "component": "${component.name}",
+      "stageKey": "${officialStages.first().key}",
+      "confidence": 0.92,
+      "source": "GEMINI",
+      "rationale": "جملة فعلية مسندة للأستاذ توجه المتعلمين"
+    }
+  ]
+}
+""".trimIndent()
+    }
+
+    /**
+     * Calls Gemini to classify the given [units] and validates the response via [validateAndParseGeminiClassificationJson].
+     */
+    suspend fun classifyUnitsWithGemini(
+        units: List<ExtractedUnit>,
+        component: PedagogicalComponent,
+        topic: String,
+        customKey: String? = null,
+        confidenceThreshold: Double = DEFAULT_CONFIDENCE_THRESHOLD
+    ): Result<GeminiClassificationValidationResult> = withContext(Dispatchers.IO) {
+        coroutineContext.ensureActive()
+        if (units.isEmpty()) {
+            return@withContext Result.success(GeminiClassificationValidationResult(isValid = true))
+        }
+
+        val apiKey = getEffectiveApiKey(customKey)
+        if (!canReachGemini(customKey)) {
+            return@withContext Result.failure(IllegalStateException(MSG_GEMINI_KEY_MISSING))
+        }
+
+        val prompt = buildGeminiUnitClassificationPrompt(units, component, topic)
+        var lastError = "تعذر تصنيف العناصر عبر Gemini."
+
+        for (model in API_MODELS) {
+            coroutineContext.ensureActive()
+            try {
+                val url = "$API_BASE/models/$model:generateContent"
+                val bodyJson = JSONObject().apply {
+                    put("contents", JSONArray().apply {
+                        put(JSONObject().apply {
+                            put("role", "user")
+                            put("parts", JSONArray().apply {
+                                put(JSONObject().apply { put("text", prompt) })
+                            })
+                        })
+                    })
+                    put("generationConfig", JSONObject().apply {
+                        put("responseMimeType", "application/json")
+                        put("temperature", 0.1)
+                    })
+                }
+
+                val (code, responseBody) = executePostRequest(url, bodyJson.toString(), apiKey)
+                if (code !in 200..299) {
+                    val errMsg = runCatching {
+                        JSONObject(responseBody).getJSONObject("error").getString("message")
+                    }.getOrDefault("HTTP $code")
+                    lastError = "خطأ من خادم Gemini ($code): $errMsg"
+                    if (code == 401 || code == 403 || code == 429) {
+                        return@withContext Result.failure(RuntimeException(lastError))
+                    }
+                    continue
+                }
+
+                val rawText = extractCandidateTextFromResponse(responseBody)
+                if (rawText.isBlank()) {
+                    lastError = "استجابة فارغة من خادم Gemini."
+                    continue
+                }
+
+                val validation = validateAndParseGeminiClassificationJson(
+                    rawJson = rawText,
+                    originalUnits = units,
+                    targetComponent = component,
+                    confidenceThreshold = confidenceThreshold
+                )
+                if (!validation.isValid) {
+                    return@withContext Result.failure(
+                        IllegalArgumentException(validation.errorMessage ?: "استجابة Gemini غير صالحة.")
+                    )
+                }
+                return@withContext Result.success(validation)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: IOException) {
+                return@withContext Result.failure(
+                    RuntimeException("انقطاع الاتصال بالشبكة أثناء التواصل مع Gemini.", e)
+                )
+            } catch (e: Exception) {
+                lastError = e.message ?: "خطأ غير متوقع أثناء التصنيف عبر Gemini."
+            }
+        }
+
+        Result.failure(RuntimeException(lastError))
+    }
+
+    private fun extractCandidateTextFromResponse(responseBody: String): String {
+        // Support direct JSON test payloads in transport as well as standard Gemini generateContent envelope
+        val trimmed = responseBody.trim()
+        if (trimmed.startsWith("[") || (trimmed.startsWith("{") && !trimmed.contains("\"candidates\""))) {
+            return trimmed
+        }
+        val respJson = JSONObject(responseBody)
+        val candidates = respJson.optJSONArray("candidates") ?: return ""
+        if (candidates.length() == 0) return ""
+        val parts = candidates.getJSONObject(0)
+            .optJSONObject("content")
+            ?.optJSONArray("parts") ?: return ""
+        val sb = StringBuilder()
+        for (i in 0 until parts.length()) {
+            sb.append(parts.getJSONObject(i).optString("text", ""))
+        }
+        return sb.toString().trim()
+    }
+
+    /**
+     * Phase 2 Hybrid Classification & Refinement:
+     * 1. Separates local contextual rule classification ([ClassificationSource.LOCAL_RULE] / [FieldSource.LOCAL_RULE])
+     *    from genuine Gemini classification ([ClassificationSource.GEMINI] / [FieldSource.AI]).
+     * 2. Never uses [FieldSource.AI] for an item that was not genuinely classified by Gemini.
+     * 3. Never overwrites DEFAULT fields with fake AI template text.
+     * 4. Preserves all unclassified or low-confidence items in [ParseReport.unclassifiedLines] for human review
+     *    (never deletes any unit that could not be classified).
+     * 5. Records [ParseReport.geminiFailed], [ParseReport.geminiErrorMessage], and [ParseReport.isLocalFallback]
+     *    honestly when Gemini is unreachable or returns an invalid response.
+     */
+    suspend fun classifyAndRefineExtraction(
+        rawText: String,
+        initialResult: ParseResult,
+        customKey: String? = null,
+        preferLocalRulesFirst: Boolean = true,
+        confidenceThreshold: Double = DEFAULT_CONFIDENCE_THRESHOLD
+    ): ParseResult = withContext(Dispatchers.Default) {
+        coroutineContext.ensureActive()
+        val plan = initialResult.plan
+        val report = initialResult.report
+        val comp = plan.componentType
+        val cleanedTopic = DocumentFileReader.cleanTopicFromFilename(plan.topic).ifBlank { plan.topic }
+        val expectedStages = StageCatalog.getStagesForComponent(comp)
+        val stageKeys = expectedStages.map { it.key }
+
+        val mutableStages = plan.stages.toMutableMap()
+        val mutableUnits = report.extractedUnits.toMutableList()
+        val allClassificationItems = report.classificationItems.toMutableList()
+
+        var localRuleCount = report.localRuleClassifiedLinesCount
+        var geminiClassifiedCount = report.aiClassifiedLinesCount
+        val remainingForGemini = mutableListOf<UnclassifiedLine>()
+        val finalUnclassifiedLines = mutableListOf<UnclassifiedLine>()
+
+        fun applyClassificationToStageAndUnit(
+            uLine: UnclassifiedLine,
+            item: PedagogicalClassificationItem,
+            fieldSource: FieldSource,
+            classSource: ClassificationSource
+        ) {
+            val targetStageKey = item.stageKey
+            val targetField = item.targetField
+            val verbatimText = uLine.verbatimText.ifBlank { uLine.text }.trim()
+
+            // Prevent assigning the same unit to two conflicting stage/field locations
+            val unitIdx = mutableUnits.indexOfFirst { u ->
+                (uLine.unitId.isNotBlank() && u.id == uLine.unitId) ||
+                    (u.location.lineNumber == uLine.lineNumber && u.verbatimText.trim() == verbatimText)
+            }
+            if (unitIdx >= 0) {
+                val prevUnit = mutableUnits[unitIdx]
+                val prevStageKey = prevUnit.assignedStageKey
+                val prevField = prevUnit.assignedField
+                if (prevStageKey != null && prevField != null &&
+                    (prevStageKey != targetStageKey || prevField != targetField)
+                ) {
+                    val prevStage = mutableStages[prevStageKey]
+                    if (prevStage != null) {
+                        mutableStages[prevStageKey] = when (prevField) {
+                            "abil" -> prevStage.copy(abil = prevStage.abil.filterNot { it == verbatimText })
+                            "teacher" -> prevStage.copy(teacher = prevStage.teacher.filterNot { it == verbatimText })
+                            "content" -> prevStage.copy(content = prevStage.content.filterNot { it == verbatimText })
+                            "eval" -> prevStage.copy(eval = prevStage.eval.filterNot { it == verbatimText })
+                            else -> prevStage
+                        }
+                    }
+                }
+            }
+
+            val currentStage = mutableStages[targetStageKey] ?: StageData()
+            val currentFieldSource = currentStage.sourceFor(targetField)
+
+            val updatedList = when (targetField) {
+                "abil" -> if (currentFieldSource == FieldSource.DEFAULT) listOf(verbatimText) else (currentStage.abil + verbatimText).distinct()
+                "teacher" -> if (currentFieldSource == FieldSource.DEFAULT) listOf(verbatimText) else (currentStage.teacher + verbatimText).distinct()
+                "content" -> if (currentFieldSource == FieldSource.DEFAULT) listOf(verbatimText) else (currentStage.content + verbatimText).distinct()
+                "eval" -> if (currentFieldSource == FieldSource.DEFAULT) listOf(verbatimText) else (currentStage.eval + verbatimText).distinct()
+                else -> emptyList()
+            }
+
+            val updatedStage = when (targetField) {
+                "abil" -> currentStage.copy(abil = updatedList)
+                "teacher" -> currentStage.copy(teacher = updatedList)
+                "content" -> currentStage.copy(content = updatedList)
+                "eval" -> currentStage.copy(eval = updatedList)
+                else -> currentStage
+            }.withFieldSource(targetField, fieldSource, classSource)
+
+            mutableStages[targetStageKey] = updatedStage
+
+            if (unitIdx >= 0) {
+                val existing = mutableUnits[unitIdx]
+                mutableUnits[unitIdx] = existing.copy(
+                    status = ContentUnitStatus.CLASSIFIED,
+                    assignedStageKey = targetStageKey,
+                    assignedField = targetField,
+                    finalClassifiedText = verbatimText,
+                    classificationSource = classSource,
+                    pedagogicalCategory = item.proposedCategory,
+                    confidence = item.confidence,
+                    rationale = item.rationale
+                )
+            }
+            allClassificationItems.removeAll { it.unitId == item.unitId && item.unitId.isNotBlank() }
+            allClassificationItems.add(item)
+        }
+
+        // Step 1: Apply context-aware local rules to clear cases (marked strictly as LOCAL_RULE, never AI!)
+        for (uLine in report.unclassifiedLines) {
+            val text = uLine.verbatimText.ifBlank { uLine.text }.trim()
+            if (text.isBlank()) continue
+
+            val localItem = if (preferLocalRulesFirst) {
+                classifyPedagogicalContextLocally(
+                    rawLine = text,
+                    component = comp,
+                    unitId = uLine.unitId,
+                    stageKeys = stageKeys,
+                    currentStages = mutableStages
+                )
+            } else {
+                null
+            }
+
+            if (localItem != null && localItem.confidence >= LOCAL_RULE_HIGH_CONFIDENCE_THRESHOLD) {
+                applyClassificationToStageAndUnit(
+                    uLine = uLine,
+                    item = localItem,
+                    fieldSource = FieldSource.LOCAL_RULE,
+                    classSource = ClassificationSource.LOCAL_RULE
+                )
+                localRuleCount++
+            } else {
+                remainingForGemini.add(uLine)
+            }
+        }
+
+        // Step 2: Escalate remaining unclassified units to Gemini if needed
+        var geminiSucceeded = false
+        var geminiFailed = false
+        var geminiErrorMsg: String? = null
+        var isLocalFallback = false
+
+        if (remainingForGemini.isNotEmpty()) {
+            if (canReachGemini(customKey)) {
+                val unitsToClassify = remainingForGemini.map { uLine ->
+                    mutableUnits.firstOrNull { it.id == uLine.unitId } ?: ExtractedUnit(
+                        id = uLine.unitId,
+                        verbatimText = uLine.verbatimText.ifBlank { uLine.text },
+                        location = uLine.location,
+                        status = ContentUnitStatus.NEEDS_REVIEW
+                    )
+                }
+
+                val geminiResult = classifyUnitsWithGemini(
+                    units = unitsToClassify,
+                    component = comp,
+                    topic = cleanedTopic,
+                    customKey = customKey,
+                    confidenceThreshold = confidenceThreshold
+                )
+
+                geminiResult.fold(
+                    onSuccess = { validation ->
+                        geminiSucceeded = true
+                        val acceptedById = validation.acceptedItems.associateBy { it.unitId }
+                        val lowConfById = validation.lowConfidenceItems.associateBy { it.unitId }
+
+                        for (uLine in remainingForGemini) {
+                            val acceptedItem = acceptedById[uLine.unitId]
+                            val lowConfItem = lowConfById[uLine.unitId]
+                            when {
+                                acceptedItem != null -> {
+                                    applyClassificationToStageAndUnit(
+                                        uLine = uLine,
+                                        item = acceptedItem,
+                                        fieldSource = FieldSource.AI,
+                                        classSource = ClassificationSource.GEMINI
+                                    )
+                                    geminiClassifiedCount++
+                                }
+                                lowConfItem != null -> {
+                                    // Low confidence -> DO NOT adopt a potentially wrong classification; keep for human review!
+                                    finalUnclassifiedLines.add(
+                                        uLine.copy(
+                                            proposedCategory = lowConfItem.proposedCategory,
+                                            confidence = lowConfItem.confidence,
+                                            rationale = lowConfItem.rationale,
+                                            classificationSource = ClassificationSource.GEMINI
+                                        )
+                                    )
+                                    val unitIdx = mutableUnits.indexOfFirst { it.id == uLine.unitId }
+                                    if (unitIdx >= 0) {
+                                        mutableUnits[unitIdx] = mutableUnits[unitIdx].copy(
+                                            status = ContentUnitStatus.NEEDS_REVIEW,
+                                            pedagogicalCategory = lowConfItem.proposedCategory,
+                                            confidence = lowConfItem.confidence,
+                                            rationale = lowConfItem.rationale,
+                                            classificationSource = ClassificationSource.GEMINI
+                                        )
+                                    }
+                                    allClassificationItems.removeAll { it.unitId == lowConfItem.unitId && lowConfItem.unitId.isNotBlank() }
+                                    allClassificationItems.add(lowConfItem)
+                                }
+                                else -> {
+                                    // Rejected or omitted by Gemini -> NEVER delete the unit; keep in unclassifiedLines!
+                                    finalUnclassifiedLines.add(uLine)
+                                    val unitIdx = mutableUnits.indexOfFirst { it.id == uLine.unitId }
+                                    if (unitIdx >= 0) {
+                                        mutableUnits[unitIdx] = mutableUnits[unitIdx].copy(
+                                            status = ContentUnitStatus.NEEDS_REVIEW
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    onFailure = { err ->
+                        geminiFailed = true
+                        isLocalFallback = true
+                        geminiErrorMsg = err.message ?: MSG_LOCAL_FALLBACK_NOTICE
+                        // Preserve all remaining unclassified lines without deleting any item
+                        finalUnclassifiedLines.addAll(remainingForGemini)
+                    }
+                )
+            } else {
+                geminiFailed = true
+                isLocalFallback = true
+                geminiErrorMsg = MSG_GEMINI_KEY_MISSING
+                finalUnclassifiedLines.addAll(remainingForGemini)
+            }
+        } else {
+            geminiSucceeded = false
+            if (!canReachGemini(customKey) || localRuleCount > 0) {
+                isLocalFallback = true
+            }
+        }
+
+        if (comp == PedagogicalComponent.LANGUAGE) {
+            mutableStages["lang_observation"]?.let { mutableStages["lang_analysis"] = it }
+        }
+
+        val updatedPlan = plan.copy(
+            topic = cleanedTopic,
+            stages = mutableStages
+        )
+
+        val updatedReport = com.example.extractor.JadhadhaParser.buildReport(
+            plan = updatedPlan,
+            isComponentDefaulted = report.isComponentDefaulted,
+            unclassifiedLines = finalUnclassifiedLines,
+            aiClassifiedLinesCount = geminiClassifiedCount,
+            aiRefinedFieldsCount = 0,
+            localRuleClassifiedLinesCount = localRuleCount,
+            isAiDelegated = geminiSucceeded && !geminiFailed,
+            geminiFailed = geminiFailed,
+            geminiErrorMessage = geminiErrorMsg,
+            isLocalFallback = isLocalFallback,
+            classificationItems = allClassificationItems,
+            originalRawText = report.originalRawText.ifEmpty { rawText },
+            extractedUnits = mutableUnits,
+            unextractableItems = report.unextractableItems,
+            recordedModifications = report.integrityReport?.modifiedUnits.orEmpty(),
+            recordedDuplicateUnits = report.integrityReport?.duplicateUnits.orEmpty(),
+            recordedDuplicateItems = report.integrityReport?.duplicateItems.orEmpty()
+        )
+
+        ParseResult(plan = updatedPlan, report = updatedReport)
+    }
+
+    /**
+     * Explicit local-only classification helper (marked strictly as [ClassificationSource.LOCAL_RULE]).
+     * Never claims that Gemini succeeded.
+     */
+    fun classifyWithLocalRulesOnly(
+        rawText: String,
+        initialResult: ParseResult
+    ): ParseResult = classifyWithLocalRulesOnlyInternal(rawText, initialResult)
+
+    fun classifyWithLocalRulesOnly(
+        initialResult: ParseResult
+    ): ParseResult = classifyWithLocalRulesOnlyInternal(initialResult.report.originalRawText, initialResult)
+
+    private fun classifyWithLocalRulesOnlyInternal(
+        rawText: String,
+        initialResult: ParseResult
+    ): ParseResult {
+        val plan = initialResult.plan
+        val report = initialResult.report
+        val comp = plan.componentType
+        val cleanedTopic = DocumentFileReader.cleanTopicFromFilename(plan.topic).ifBlank { plan.topic }
+        val expectedStages = StageCatalog.getStagesForComponent(comp)
+        val stageKeys = expectedStages.map { it.key }
+
+        val mutableStages = plan.stages.toMutableMap()
+        val mutableUnits = report.extractedUnits.toMutableList()
+        val allClassificationItems = report.classificationItems.toMutableList()
+        val remainingUnclassified = mutableListOf<UnclassifiedLine>()
+        var localRuleCount = report.localRuleClassifiedLinesCount
+
+        for (uLine in report.unclassifiedLines) {
+            val text = uLine.verbatimText.ifBlank { uLine.text }.trim()
+            if (text.isBlank()) continue
+
+            val localItem = classifyPedagogicalContextLocally(
+                rawLine = text,
+                component = comp,
+                unitId = uLine.unitId,
+                stageKeys = stageKeys,
+                currentStages = mutableStages
+            )
+
+            if (localItem != null && localItem.confidence >= LOCAL_RULE_HIGH_CONFIDENCE_THRESHOLD) {
+                val targetStageKey = localItem.stageKey
+                val targetField = localItem.targetField
+                val currentStage = mutableStages[targetStageKey] ?: StageData()
+                val currentFieldSource = currentStage.sourceFor(targetField)
+
+                val updatedList = when (targetField) {
+                    "abil" -> if (currentFieldSource == FieldSource.DEFAULT) listOf(text) else (currentStage.abil + text).distinct()
+                    "teacher" -> if (currentFieldSource == FieldSource.DEFAULT) listOf(text) else (currentStage.teacher + text).distinct()
+                    "content" -> if (currentFieldSource == FieldSource.DEFAULT) listOf(text) else (currentStage.content + text).distinct()
+                    "eval" -> if (currentFieldSource == FieldSource.DEFAULT) listOf(text) else (currentStage.eval + text).distinct()
+                    else -> emptyList()
+                }
+
+                mutableStages[targetStageKey] = when (targetField) {
+                    "abil" -> currentStage.copy(abil = updatedList)
+                    "teacher" -> currentStage.copy(teacher = updatedList)
+                    "content" -> currentStage.copy(content = updatedList)
+                    "eval" -> currentStage.copy(eval = updatedList)
+                    else -> currentStage
+                }.withFieldSource(targetField, FieldSource.LOCAL_RULE, ClassificationSource.LOCAL_RULE)
+
+                val unitIdx = mutableUnits.indexOfFirst { u ->
+                    (uLine.unitId.isNotBlank() && u.id == uLine.unitId) ||
+                        (u.location.lineNumber == uLine.lineNumber && u.verbatimText.trim() == text)
+                }
+                if (unitIdx >= 0) {
+                    val existing = mutableUnits[unitIdx]
+                    mutableUnits[unitIdx] = existing.copy(
+                        status = ContentUnitStatus.CLASSIFIED,
+                        assignedStageKey = targetStageKey,
+                        assignedField = targetField,
+                        finalClassifiedText = text,
+                        classificationSource = ClassificationSource.LOCAL_RULE,
+                        pedagogicalCategory = localItem.proposedCategory,
+                        confidence = localItem.confidence,
+                        rationale = localItem.rationale
+                    )
+                }
+                allClassificationItems.add(localItem)
+                localRuleCount++
+            } else {
+                remainingUnclassified.add(uLine)
+            }
+        }
+
+        if (comp == PedagogicalComponent.LANGUAGE) {
+            mutableStages["lang_observation"]?.let { mutableStages["lang_analysis"] = it }
+        }
+
+        val updatedPlan = plan.copy(topic = cleanedTopic, stages = mutableStages)
+        val updatedReport = com.example.extractor.JadhadhaParser.buildReport(
+            plan = updatedPlan,
+            isComponentDefaulted = report.isComponentDefaulted,
+            unclassifiedLines = remainingUnclassified,
+            aiClassifiedLinesCount = report.aiClassifiedLinesCount,
+            aiRefinedFieldsCount = 0,
+            localRuleClassifiedLinesCount = localRuleCount,
+            isAiDelegated = false,
+            geminiFailed = false,
+            geminiErrorMessage = null,
+            isLocalFallback = true,
+            classificationItems = allClassificationItems,
+            originalRawText = report.originalRawText.ifEmpty { rawText },
+            extractedUnits = mutableUnits,
+            unextractableItems = report.unextractableItems
+        )
+        return ParseResult(plan = updatedPlan, report = updatedReport)
     }
 
     /**
      * Comprehensive Smart AI Extraction (`تفريغ ذكي شامل (AI)`):
-     * Takes the full text extracted from a Word (.docx) or text file, analyzes it with Gemini,
-     * and returns a structured [JadhadhaPlan] distributing 100% of the jadhadha information
-     * accurately across the stages of the active component (المحتوى، أنشطة المدرس، أنشطة المتعلم، القدرات، التقويم)
-     * without dropping any sentence.
+     * Analyzes [rawText] with Gemini and returns a structured [JadhadhaPlan] strictly adhering to the
+     * official [StageCatalog] stages for [componentType].
+     *
+     * Phase 2 Guarantee:
+     * - When Gemini cannot be reached (missing key, network failure, HTTP error, or invalid JSON),
+     *   this function returns `Result.failure(...)` with a clear Arabic error message.
+     * - It NEVER returns a local result disguised as a successful Gemini AI result.
      */
     suspend fun parseRawJadhadhaWithAi(
         rawText: String,
@@ -549,6 +1415,13 @@ object GeminiAiService {
         customKey: String? = null
     ): Result<JadhadhaPlan> = withContext(Dispatchers.IO) {
         coroutineContext.ensureActive()
+        if (rawText.isBlank()) {
+            return@withContext Result.failure(IllegalArgumentException(DocumentFileReader.MSG_FILE_EMPTY))
+        }
+        if (!canReachGemini(customKey)) {
+            return@withContext Result.failure(IllegalStateException(MSG_GEMINI_KEY_MISSING))
+        }
+
         val resolvedComponent = resolvePedagogicalComponent(componentType)
         val structuralResult = com.example.extractor.JadhadhaParser.parseWithReport(
             raw = rawText,
@@ -560,34 +1433,33 @@ object GeminiAiService {
             .ifBlank { structuralResult.plan.topic }
 
         val apiKey = getEffectiveApiKey(customKey)
-        if (apiKey.isNotBlank() && !apiKey.startsWith("AQ.", ignoreCase = true) && rawText.isNotBlank()) {
-            val prompt = buildRawJadhadhaAiExtractionPrompt(rawText, activeComponent, initialTopic)
-            for (model in API_MODELS) {
-                coroutineContext.ensureActive()
-                try {
-                    val extractedPlan = callModelForRawExtraction(
-                        model = model,
-                        apiKey = apiKey,
-                        prompt = prompt,
-                        rawText = rawText,
-                        component = activeComponent,
-                        structuralBaseline = structuralResult.plan
-                    )
-                    return@withContext Result.success(extractedPlan)
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (_: Exception) {
-                    // Try next model or fallback to hybrid structural + built-in AI classifier
-                }
+        val prompt = buildRawJadhadhaAiExtractionPrompt(rawText, activeComponent, initialTopic)
+        var lastError = "تعذر إجراء التفريغ الذكي الشامل عبر Gemini."
+
+        for (model in API_MODELS) {
+            coroutineContext.ensureActive()
+            try {
+                val extractedPlan = callModelForRawExtraction(
+                    model = model,
+                    apiKey = apiKey,
+                    prompt = prompt,
+                    rawText = rawText,
+                    component = activeComponent,
+                    structuralBaseline = structuralResult.plan
+                )
+                return@withContext Result.success(extractedPlan)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: IOException) {
+                return@withContext Result.failure(
+                    RuntimeException("لا يوجد اتصال بالإنترنت أو تعذر الوصول إلى خادم Gemini.", e)
+                )
+            } catch (e: Exception) {
+                lastError = e.message ?: "استجابة غير صالحة من خادم Gemini."
             }
         }
 
-        val refinedResult = classifyAndRefineExtraction(
-            rawText = rawText,
-            initialResult = structuralResult,
-            customKey = customKey
-        )
-        Result.success(refinedResult.plan)
+        Result.failure(RuntimeException(lastError))
     }
 
     private fun resolvePedagogicalComponent(componentType: String): PedagogicalComponent? {
@@ -661,7 +1533,7 @@ $stagesSchema
 """.trimIndent()
     }
 
-    private fun callModelForRawExtraction(
+    private suspend fun callModelForRawExtraction(
         model: String,
         apiKey: String,
         prompt: String,
@@ -685,76 +1557,95 @@ $stagesSchema
             })
         }
 
-        val request = Request.Builder()
-            .url(url)
-            .addHeader("x-goog-api-key", apiKey)
-            .addHeader("Content-Type", "application/json")
-            .post(bodyJson.toString().toRequestBody("application/json".toMediaType()))
-            .build()
-
-        val response = client.newCall(request).execute()
-        val responseBody = response.body?.string().orEmpty()
-        if (!response.isSuccessful) {
+        val (code, responseBody) = executePostRequest(url, bodyJson.toString(), apiKey)
+        if (code !in 200..299) {
             val errMsg = runCatching {
                 JSONObject(responseBody).getJSONObject("error").getString("message")
-            }.getOrDefault(response.message)
+            }.getOrDefault("HTTP $code")
             throw RuntimeException("خطأ في الخادم ($model): $errMsg")
         }
 
-        val respJson = JSONObject(responseBody)
-        val candidates = respJson.optJSONArray("candidates")
-        if (candidates == null || candidates.length() == 0) {
-            throw RuntimeException("استجابة فارغة من النموذج ($model)")
-        }
-
-        val parts = candidates.getJSONObject(0)
-            .getJSONObject("content")
-            .getJSONArray("parts")
-        val rawJsonText = parts.getJSONObject(0).getString("text")
-            .trim()
+        val rawJsonText = extractCandidateTextFromResponse(responseBody)
             .removePrefix("```json")
             .removePrefix("```")
             .removeSuffix("```")
             .trim()
+        if (rawJsonText.isBlank()) {
+            throw RuntimeException("استجابة فارغة من النموذج ($model)")
+        }
 
         val json = JSONObject(rawJsonText)
+        val stagesObj = json.optJSONObject("stages")
+            ?: throw IllegalArgumentException("استجابة Gemini لا تحتوي على كائن المراحل 'stages'.")
+
         val parsed = parsePlanFromJson(json, structuralBaseline.topic, rawText, component)
 
         // Merge any learner array items into content and preserve FILE items from structuralBaseline
-        val stagesObj = json.optJSONObject("stages") ?: JSONObject()
         val mergedStages = parsed.stages.mapValues { (stageKey, aiStage) ->
             val stObj = stagesObj.optJSONObject(stageKey) ?: JSONObject()
             val learnerItems = jsonArrayToList(stObj.optJSONArray("learner"))
             val baselineStage = structuralBaseline.stages[stageKey]
 
+            val hasAiContent = jsonArrayToList(stObj.optJSONArray("content")).isNotEmpty() || learnerItems.isNotEmpty()
+            val hasAiTeacher = jsonArrayToList(stObj.optJSONArray("teacher")).isNotEmpty()
+            val hasAiAbil = jsonArrayToList(stObj.optJSONArray("abil")).isNotEmpty()
+            val hasAiEval = jsonArrayToList(stObj.optJSONArray("eval")).isNotEmpty()
+
             val combinedContent = buildList {
-                addAll(aiStage.content)
-                addAll(learnerItems)
+                if (hasAiContent) {
+                    addAll(aiStage.content)
+                    addAll(learnerItems)
+                }
                 if (baselineStage?.sourceFor("content") == FieldSource.FILE) {
                     addAll(baselineStage.content)
                 }
+                if (isEmpty()) addAll(aiStage.content)
             }.distinct()
 
             val combinedTeacher = buildList {
-                addAll(aiStage.teacher)
+                if (hasAiTeacher) addAll(aiStage.teacher)
                 if (baselineStage?.sourceFor("teacher") == FieldSource.FILE) {
                     addAll(baselineStage.teacher)
                 }
+                if (isEmpty()) addAll(aiStage.teacher)
             }.distinct()
 
             val combinedAbil = buildList {
-                addAll(aiStage.abil)
+                if (hasAiAbil) addAll(aiStage.abil)
                 if (baselineStage?.sourceFor("abil") == FieldSource.FILE) {
                     addAll(baselineStage.abil)
                 }
+                if (isEmpty()) addAll(aiStage.abil)
             }.distinct()
 
             val combinedEval = buildList {
-                addAll(aiStage.eval)
+                if (hasAiEval) addAll(aiStage.eval)
                 if (baselineStage?.sourceFor("eval") == FieldSource.FILE) {
                     addAll(baselineStage.eval)
                 }
+                if (isEmpty()) addAll(aiStage.eval)
             }.distinct()
+
+            val contentSrc = when {
+                baselineStage?.sourceFor("content") == FieldSource.FILE -> FieldSource.FILE
+                hasAiContent -> FieldSource.AI
+                else -> FieldSource.DEFAULT
+            }
+            val teacherSrc = when {
+                baselineStage?.sourceFor("teacher") == FieldSource.FILE -> FieldSource.FILE
+                hasAiTeacher -> FieldSource.AI
+                else -> FieldSource.DEFAULT
+            }
+            val abilSrc = when {
+                baselineStage?.sourceFor("abil") == FieldSource.FILE -> FieldSource.FILE
+                hasAiAbil -> FieldSource.AI
+                else -> FieldSource.DEFAULT
+            }
+            val evalSrc = when {
+                baselineStage?.sourceFor("eval") == FieldSource.FILE -> FieldSource.FILE
+                hasAiEval -> FieldSource.AI
+                else -> FieldSource.DEFAULT
+            }
 
             aiStage.copy(
                 content = combinedContent,
@@ -762,10 +1653,16 @@ $stagesSchema
                 abil = combinedAbil,
                 eval = combinedEval,
                 sources = mapOf(
-                    "content" to if (baselineStage?.sourceFor("content") == FieldSource.FILE) FieldSource.FILE else FieldSource.AI,
-                    "teacher" to if (baselineStage?.sourceFor("teacher") == FieldSource.FILE) FieldSource.FILE else FieldSource.AI,
-                    "abil" to if (baselineStage?.sourceFor("abil") == FieldSource.FILE) FieldSource.FILE else FieldSource.AI,
-                    "eval" to if (baselineStage?.sourceFor("eval") == FieldSource.FILE) FieldSource.FILE else FieldSource.AI
+                    "content" to contentSrc,
+                    "teacher" to teacherSrc,
+                    "abil" to abilSrc,
+                    "eval" to evalSrc
+                ),
+                classificationSources = mapOf(
+                    "content" to if (contentSrc == FieldSource.AI) ClassificationSource.GEMINI else if (contentSrc == FieldSource.FILE) ClassificationSource.IMPORTED else ClassificationSource.DEFAULT,
+                    "teacher" to if (teacherSrc == FieldSource.AI) ClassificationSource.GEMINI else if (teacherSrc == FieldSource.FILE) ClassificationSource.IMPORTED else ClassificationSource.DEFAULT,
+                    "abil" to if (abilSrc == FieldSource.AI) ClassificationSource.GEMINI else if (abilSrc == FieldSource.FILE) ClassificationSource.IMPORTED else ClassificationSource.DEFAULT,
+                    "eval" to if (evalSrc == FieldSource.AI) ClassificationSource.GEMINI else if (evalSrc == FieldSource.FILE) ClassificationSource.IMPORTED else ClassificationSource.DEFAULT
                 )
             )
         }
@@ -773,31 +1670,47 @@ $stagesSchema
         return parsed.copy(stages = mergedStages)
     }
 
+    /**
+     * Generates a complete [JadhadhaPlan] using Gemini.
+     *
+     * Phase 2 Guarantee:
+     * - Requires a valid Gemini API key (or configured test transport).
+     * - Returns `Result.failure(...)` when Gemini cannot be reached or returns an invalid response.
+     * - Never returns a local `synthesizeSmartPlan` result disguised as a Gemini AI success.
+     */
     suspend fun generateJadhadha(
         topic: String,
         lessonText: String = "",
         component: PedagogicalComponent = PedagogicalComponent.READING,
         customKey: String? = null
     ): Result<JadhadhaPlan> = withContext(Dispatchers.IO) {
+        coroutineContext.ensureActive()
         val cleanTopic = topic.trim().ifBlank { "درس تطبيقي" }
-        val apiKey = getEffectiveApiKey(customKey)
+        if (!canReachGemini(customKey)) {
+            return@withContext Result.failure(IllegalStateException(MSG_GEMINI_KEY_MISSING))
+        }
 
-        // Attempt live Gemini API call when a standard AIza key is provided
-        if (apiKey.isNotBlank() && !apiKey.startsWith("AQ.", ignoreCase = true)) {
-            val prompt = buildPrompt(cleanTopic, lessonText, component)
-            for (model in API_MODELS) {
-                try {
-                    val remotePlan = callModel(model, apiKey, prompt, cleanTopic, lessonText, component)
-                    return@withContext Result.success(remotePlan)
-                } catch (_: Exception) {
-                    // Continue to next candidate model or smart pedagogical synthesis
-                }
+        val apiKey = getEffectiveApiKey(customKey)
+        val prompt = buildPrompt(cleanTopic, lessonText, component)
+        var lastError = "تعذر توليد الجذاذة عبر Gemini."
+
+        for (model in API_MODELS) {
+            coroutineContext.ensureActive()
+            try {
+                val remotePlan = callModel(model, apiKey, prompt, cleanTopic, lessonText, component)
+                return@withContext Result.success(remotePlan)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: IOException) {
+                return@withContext Result.failure(
+                    RuntimeException("لا يوجد اتصال بالإنترنت أو تعذر الوصول إلى خادم Gemini.", e)
+                )
+            } catch (e: Exception) {
+                lastError = e.message ?: "فشل توليد الجذاذة من استجابة Gemini."
             }
         }
 
-        // Smart pedagogical synthesis powered by Gemini 3.8 Flash engine rules
-        val synthesized = synthesizeSmartPlan(cleanTopic, lessonText, component)
-        Result.success(synthesized)
+        Result.failure(RuntimeException(lastError))
     }
 
     suspend fun suggestObjectivesForTopic(
@@ -809,14 +1722,14 @@ $stagesSchema
         val cleanTopic = topic.trim().ifBlank { "درس تطبيقي" }
         val apiKey = getEffectiveApiKey(customKey)
 
-        if (apiKey.isNotBlank() && !apiKey.startsWith("AQ.", ignoreCase = true)) {
+        if (canReachGemini(customKey)) {
             val prompt = buildObjectivesPrompt(cleanTopic, component, level)
             for (model in API_MODELS) {
                 try {
                     val suggestions = callModelForObjectives(model, apiKey, prompt, cleanTopic, component, level)
                     return@withContext Result.success(suggestions)
                 } catch (_: Exception) {
-                    // Continue to next candidate or smart pedagogical synthesis
+                    // Continue to next candidate or local fallback tagged as DEFAULT/LOCAL_RULE
                 }
             }
         }
@@ -932,7 +1845,7 @@ $stagesGuide
         return sb.toString()
     }
 
-    private fun callModel(
+    private suspend fun callModel(
         model: String,
         apiKey: String,
         prompt: String,
@@ -940,7 +1853,7 @@ $stagesGuide
         lessonText: String,
         component: PedagogicalComponent
     ): JadhadhaPlan {
-        val url = "$API_BASE/models/$model:generateContent?key=$apiKey"
+        val url = "$API_BASE/models/$model:generateContent"
 
         val bodyJson = JSONObject().apply {
             put("contents", JSONArray().apply {
@@ -957,42 +1870,32 @@ $stagesGuide
             })
         }
 
-        val request = Request.Builder()
-            .url(url)
-            .post(bodyJson.toString().toRequestBody("application/json".toMediaType()))
-            .build()
+        val (code, responseBody) = executePostRequest(url, bodyJson.toString(), apiKey)
 
-        val response = client.newCall(request).execute()
-        val responseBody = response.body?.string().orEmpty()
-
-        if (!response.isSuccessful) {
+        if (code !in 200..299) {
             val errMsg = runCatching {
                 JSONObject(responseBody).getJSONObject("error").getString("message")
-            }.getOrDefault(response.message)
+            }.getOrDefault("HTTP $code")
             throw RuntimeException("خطأ في الخادم ($PRIMARY_MODEL): $errMsg")
         }
 
-        val respJson = JSONObject(responseBody)
-        val candidates = respJson.optJSONArray("candidates")
-        if (candidates == null || candidates.length() == 0) {
-            throw RuntimeException("استجابة فارغة من النموذج ($PRIMARY_MODEL)")
-        }
-
-        val content = candidates.getJSONObject(0).getJSONObject("content")
-        val parts = content.getJSONArray("parts")
-        val rawText = parts.getJSONObject(0).getString("text")
-
-        val cleanedJson = rawText.trim()
+        val cleanedJson = extractCandidateTextFromResponse(responseBody)
             .removePrefix("```json")
             .removePrefix("```")
             .removeSuffix("```")
             .trim()
+        if (cleanedJson.isBlank()) {
+            throw RuntimeException("استجابة فارغة من النموذج ($PRIMARY_MODEL)")
+        }
 
         val json = JSONObject(cleanedJson)
+        if (!json.has("stages") || json.optJSONObject("stages") == null) {
+            throw IllegalArgumentException("استجابة Gemini غير صالحة: حقل 'stages' مفقود.")
+        }
         return parsePlanFromJson(json, originalTopic, lessonText, component)
     }
 
-    private fun callModelForObjectives(
+    private suspend fun callModelForObjectives(
         model: String,
         apiKey: String,
         prompt: String,
@@ -1000,7 +1903,7 @@ $stagesGuide
         component: PedagogicalComponent,
         level: String
     ): SuggestedObjectives {
-        val url = "$API_BASE/models/$model:generateContent?key=$apiKey"
+        val url = "$API_BASE/models/$model:generateContent"
 
         val bodyJson = JSONObject().apply {
             put("contents", JSONArray().apply {
@@ -1017,36 +1920,23 @@ $stagesGuide
             })
         }
 
-        val request = Request.Builder()
-            .url(url)
-            .post(bodyJson.toString().toRequestBody("application/json".toMediaType()))
-            .build()
+        val (code, responseBody) = executePostRequest(url, bodyJson.toString(), apiKey)
 
-        val response = client.newCall(request).execute()
-        val responseBody = response.body?.string().orEmpty()
-
-        if (!response.isSuccessful) {
+        if (code !in 200..299) {
             val errMsg = runCatching {
                 JSONObject(responseBody).getJSONObject("error").getString("message")
-            }.getOrDefault(response.message)
+            }.getOrDefault("HTTP $code")
             throw RuntimeException("خطأ في الخادم ($PRIMARY_MODEL): $errMsg")
         }
 
-        val respJson = JSONObject(responseBody)
-        val candidates = respJson.optJSONArray("candidates")
-        if (candidates == null || candidates.length() == 0) {
-            throw RuntimeException("استجابة فارغة من النموذج ($PRIMARY_MODEL)")
-        }
-
-        val content = candidates.getJSONObject(0).getJSONObject("content")
-        val parts = content.getJSONArray("parts")
-        val rawText = parts.getJSONObject(0).getString("text")
-
-        val cleanedJson = rawText.trim()
+        val cleanedJson = extractCandidateTextFromResponse(responseBody)
             .removePrefix("```json")
             .removePrefix("```")
             .removeSuffix("```")
             .trim()
+        if (cleanedJson.isBlank()) {
+            throw RuntimeException("استجابة فارغة من النموذج ($PRIMARY_MODEL)")
+        }
 
         val json = JSONObject(cleanedJson)
         val fallback = synthesizeSmartObjectives(originalTopic, component, level)
@@ -1080,6 +1970,11 @@ $stagesGuide
         )
     }
 
+    /**
+     * Parses a Gemini JSON object into a [JadhadhaPlan] while strictly preserving the official
+     * [StageCatalog] structure for [fallbackComponent] (7 stages for Reading, 4 for Language,
+     * 16 sub-stages for Expression). Any non-official stage key returned by the model is ignored.
+     */
     private fun parsePlanFromJson(
         json: JSONObject,
         originalTopic: String,
@@ -1087,12 +1982,8 @@ $stagesGuide
         fallbackComponent: PedagogicalComponent
     ): JadhadhaPlan {
         val topic = json.optString("topic", originalTopic).ifBlank { originalTopic }
-        val compStr = json.optString("component", fallbackComponent.id)
-        val component = when {
-            compStr == "language" || compStr.contains("لغوي") -> PedagogicalComponent.LANGUAGE
-            compStr == "expression" || compStr.contains("تعبير") -> PedagogicalComponent.EXPRESSION
-            else -> fallbackComponent
-        }
+        // Preserve target pedagogical component structure
+        val component = fallbackComponent
 
         val fallbackPlan = synthesizeSmartPlan(topic, lessonText, component)
         val infoObj = json.optJSONObject("info") ?: JSONObject()
@@ -1114,6 +2005,7 @@ $stagesGuide
         val stagesObj = json.optJSONObject("stages") ?: JSONObject()
         val stagesMap = mutableMapOf<String, StageData>()
 
+        // Strictly iterate ONLY over the official stages for this component
         val expectedStages = StageCatalog.getStagesForComponent(component).map { it.key }
         for (k in expectedStages) {
             val stObj = stagesObj.optJSONObject(k) ?: JSONObject()
@@ -1129,13 +2021,20 @@ $stagesGuide
                 "teacher" to if (teacherList.isNotEmpty()) FieldSource.AI else FieldSource.DEFAULT,
                 "abil" to if (abilList.isNotEmpty()) FieldSource.AI else FieldSource.DEFAULT
             )
+            val stageClassSources = mapOf(
+                "eval" to if (evalList.isNotEmpty()) ClassificationSource.GEMINI else ClassificationSource.DEFAULT,
+                "content" to if (contentList.isNotEmpty()) ClassificationSource.GEMINI else ClassificationSource.DEFAULT,
+                "teacher" to if (teacherList.isNotEmpty()) ClassificationSource.GEMINI else ClassificationSource.DEFAULT,
+                "abil" to if (abilList.isNotEmpty()) ClassificationSource.GEMINI else ClassificationSource.DEFAULT
+            )
 
             stagesMap[k] = StageData(
                 eval = if (evalList.isNotEmpty()) evalList else fallbackStage.eval,
                 content = if (contentList.isNotEmpty()) contentList else fallbackStage.content,
                 teacher = if (teacherList.isNotEmpty()) teacherList else fallbackStage.teacher,
                 abil = if (abilList.isNotEmpty()) abilList else fallbackStage.abil,
-                sources = stageSources
+                sources = stageSources,
+                classificationSources = stageClassSources
             )
         }
 
@@ -1149,8 +2048,8 @@ $stagesGuide
     }
 
     /**
-     * Synthesizes a complete, topic-and-text-aware Moroccan pedagogical JadhadhaPlan
-     * using Gemini 3.8 Flash pedagogical structuring rules so every stage and cell is populated.
+     * Synthesizes a local template-based pedagogical JadhadhaPlan (tagged as [FieldSource.DEFAULT] /
+     * [ClassificationSource.LOCAL_RULE], NEVER as [FieldSource.AI]).
      */
     fun synthesizeSmartPlan(
         topic: String,

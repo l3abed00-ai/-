@@ -6,7 +6,11 @@ import android.provider.OpenableColumns
 import android.util.Xml
 import com.example.model.ContentUnitStatus
 import com.example.model.DocumentElementType
+import com.example.model.DocxTemplateArchive
 import com.example.model.ExtractedUnit
+import com.example.model.StructuredTable
+import com.example.model.StructuredTableCell
+import com.example.model.StructuredTableRow
 import com.example.model.UnitLocation
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
@@ -41,7 +45,11 @@ data class StructuredDocxExtraction(
     val rawOriginalText: String,
     val structuredText: String,
     val units: List<ExtractedUnit>,
-    val unextractableSegments: List<String> = emptyList()
+    val unextractableSegments: List<String> = emptyList(),
+    val tables: List<StructuredTable> = emptyList(),
+    val stageNestedTables: Map<String, List<StructuredTable>> = emptyMap(),
+    val customTables: List<StructuredTable> = emptyList(),
+    val templateArchive: DocxTemplateArchive? = null
 )
 
 data class UploadedFileInfo(
@@ -52,7 +60,9 @@ data class UploadedFileInfo(
     val pdfBytes: ByteArray? = null,
     val rawOriginalText: String = textContent,
     val extractedUnits: List<ExtractedUnit> = emptyList(),
-    val unextractableSegments: List<String> = emptyList()
+    val unextractableSegments: List<String> = emptyList(),
+    val tables: List<StructuredTable> = emptyList(),
+    val templateArchive: DocxTemplateArchive? = null
 )
 
 object DocumentFileReader {
@@ -94,12 +104,66 @@ object DocumentFileReader {
     data class TableCell(
         val paragraphs: List<Para>,
         val gridSpan: Int = 1,
-        val vMerge: String? = null
-    )
+        val vMerge: String? = null,
+        val ownParagraphs: List<Para> = paragraphs,
+        val nestedTables: List<Table> = emptyList(),
+        val widthDxa: Int? = null,
+        val backgroundHex: String? = null,
+        val horizontalAlignment: String? = null,
+        val verticalAlignment: String? = null
+    ) {
+        fun toStructuredTableCell(isHeaderRow: Boolean = false): StructuredTableCell {
+            val cleanParas = ownParagraphs
+                .map { stripFormattingTags(it.text).trim() }
+                .filter { it.isNotEmpty() }
+            return StructuredTableCell(
+                paragraphs = cleanParas,
+                gridSpan = gridSpan.coerceAtLeast(1),
+                vMerge = vMerge,
+                widthDxa = widthDxa,
+                backgroundHex = backgroundHex,
+                horizontalAlignment = horizontalAlignment,
+                verticalAlignment = verticalAlignment,
+                isHeader = isHeaderRow,
+                nestedTables = nestedTables.mapIndexed { idx, tbl ->
+                    tbl.toStructuredTable(id = "nested_tbl_$idx")
+                }
+            )
+        }
+    }
 
     data class Table(
-        val rows: List<List<TableCell>>
-    )
+        val rows: List<List<TableCell>>,
+        val columnWidthsDxa: List<Int> = emptyList(),
+        val isRtl: Boolean = true,
+        val hasExplicitBidiVisual: Boolean = false,
+        val hasBorders: Boolean = true,
+        val rowHeaderFlags: List<Boolean> = emptyList()
+    ) {
+        fun toStructuredTable(
+            id: String = "table",
+            title: String = "",
+            sourceStageKey: String? = null,
+            sourceField: String = "content"
+        ): StructuredTable {
+            return StructuredTable(
+                id = id,
+                title = title,
+                rows = rows.mapIndexed { rIdx, rowCells ->
+                    val isHdr = rowHeaderFlags.getOrNull(rIdx) ?: false
+                    StructuredTableRow(
+                        cells = rowCells.map { it.toStructuredTableCell(isHdr) },
+                        isHeader = isHdr
+                    )
+                },
+                columnWidthsDxa = columnWidthsDxa,
+                isRtl = isRtl,
+                hasBorders = hasBorders,
+                sourceStageKey = sourceStageKey,
+                sourceField = sourceField
+            )
+        }
+    }
 
     private sealed interface DocElement {
         data class ParaItem(val para: Para) : DocElement
@@ -115,7 +179,15 @@ object DocumentFileReader {
         val rawXml: String,
         val paragraphBlocks: List<List<String>>,
         val flatParagraphs: List<String>,
-        val contentLinesWithTables: List<String>
+        val contentLinesWithTables: List<String>,
+        val nestedTables: List<StructuredTable> = emptyList()
+    )
+
+    private data class TableParseResult(
+        val lines: List<String>,
+        val isPreLessonHeader: Boolean = false,
+        val isLessonStagesTable: Boolean = false,
+        val stageNestedTables: Map<String, List<StructuredTable>> = emptyMap()
     )
 
     fun cleanTopicFromFilename(fileName: String): String {
@@ -264,7 +336,7 @@ object DocumentFileReader {
                 requireDocumentXmlEntry = true,
                 onCheckActive = onCheckActive
             )
-            if (structured.structuredText.isBlank() && structured.rawOriginalText.isBlank()) {
+            if (structured.structuredText.isBlank() && structured.rawOriginalText.isBlank() && structured.tables.isEmpty()) {
                 throw DocumentReadException(MSG_FILE_EMPTY)
             }
             return UploadedFileInfo(
@@ -274,7 +346,9 @@ object DocumentFileReader {
                 detectedType = DetectedFileType.DOCX,
                 rawOriginalText = structured.rawOriginalText,
                 extractedUnits = structured.units,
-                unextractableSegments = structured.unextractableSegments
+                unextractableSegments = structured.unextractableSegments,
+                tables = structured.tables,
+                templateArchive = structured.templateArchive
             )
         }
 
@@ -335,6 +409,10 @@ object DocumentFileReader {
         )
     }
 
+    fun extractStructuredDocx(file: java.io.File): StructuredDocxExtraction {
+        return java.io.FileInputStream(file).use { extractStructuredDocx(it) }
+    }
+
     private fun extractStructuredDocxInternal(
         inputStream: InputStream,
         requireDocumentXmlEntry: Boolean,
@@ -345,9 +423,10 @@ object DocumentFileReader {
         var totalUncompressedBytes = 0L
         var documentXmlRaw = ""
         val headerFooterXmlList = mutableListOf<Pair<String, String>>()
+        val zipEntriesMap = LinkedHashMap<String, ByteArray>()
 
-        fun readCurrentZipEntryUtf8(zip: ZipInputStream): String {
-            val out = ByteArrayOutputStream(32 * 1024)
+        fun readCurrentZipEntryBytes(zip: ZipInputStream): ByteArray {
+            val out = ByteArrayOutputStream(16 * 1024)
             val buffer = ByteArray(8 * 1024)
             while (true) {
                 onCheckActive()
@@ -359,7 +438,7 @@ object DocumentFileReader {
                 }
                 out.write(buffer, 0, read)
             }
-            return out.toByteArray().toString(StandardCharsets.UTF_8)
+            return out.toByteArray()
         }
 
         try {
@@ -377,23 +456,15 @@ object DocumentFileReader {
                     throw DocumentReadException(MSG_FILE_CORRUPTED_OR_PROTECTED)
                 }
 
-                if (entryName.equals("word/document.xml", ignoreCase = true)) {
-                    foundDocumentXml = true
-                    documentXmlRaw = readCurrentZipEntryUtf8(zip)
-                } else if (HEADER_FOOTER_ENTRY_REGEX.matches(entryName)) {
-                    val hfXml = readCurrentZipEntryUtf8(zip)
-                    headerFooterXmlList.add(entryName to hfXml)
-                } else {
-                    // Drain entry while counting uncompressed bytes to guard against zip bombs
-                    val skipBuf = ByteArray(8 * 1024)
-                    while (true) {
-                        onCheckActive()
-                        val read = zip.read(skipBuf)
-                        if (read == -1) break
-                        totalUncompressedBytes += read
-                        if (totalUncompressedBytes > MAX_DOCX_UNCOMPRESSED_BYTES) {
-                            throw DocumentReadException(MSG_DOCX_UNCOMPRESSED_TOO_LARGE)
-                        }
+                if (!entry.isDirectory) {
+                    val entryBytes = readCurrentZipEntryBytes(zip)
+                    zipEntriesMap[entryName] = entryBytes
+                    if (entryName.equals("word/document.xml", ignoreCase = true)) {
+                        foundDocumentXml = true
+                        documentXmlRaw = entryBytes.toString(StandardCharsets.UTF_8)
+                    } else if (HEADER_FOOTER_ENTRY_REGEX.matches(entryName)) {
+                        val hfXml = entryBytes.toString(StandardCharsets.UTF_8)
+                        headerFooterXmlList.add(entryName to hfXml)
                     }
                 }
                 zip.closeEntry()
@@ -425,12 +496,15 @@ object DocumentFileReader {
             return StructuredDocxExtraction("", "", emptyList())
         }
 
+        val archiveMetadata = buildDocxTemplateArchive(zipEntriesMap, documentXmlRaw)
+
         val mainStructured = extractStructuredXml(
             xml = documentXmlRaw,
             sourcePart = "word/document.xml",
             startUnitId = 1,
             startLineNumber = 1
-        )
+        ).copy(templateArchive = archiveMetadata)
+
         if (headerFooterXmlList.isEmpty()) {
             recordExtraction(mainStructured)
             return mainStructured
@@ -503,10 +577,80 @@ object DocumentFileReader {
             rawOriginalText = fullRawOriginalText,
             structuredText = finalStructuredText,
             units = allUnits,
-            unextractableSegments = allUnextractable
+            unextractableSegments = allUnextractable,
+            tables = mainStructured.tables,
+            stageNestedTables = mainStructured.stageNestedTables,
+            customTables = mainStructured.customTables,
+            templateArchive = archiveMetadata
         )
         recordExtraction(combinedExtraction)
         return combinedExtraction
+    }
+
+    internal fun buildDocxTemplateArchive(
+        zipEntries: Map<String, ByteArray>,
+        documentXml: String
+    ): DocxTemplateArchive {
+        val docRootAttrs = Regex("<w:document\\b([^>]*)>", RegexOption.DOT_MATCHES_ALL)
+            .find(documentXml)?.groupValues?.get(1)?.trim().orEmpty()
+        val sectPrXml = Regex("<w:sectPr\\b[^>]*>.*?</w:sectPr>", RegexOption.DOT_MATCHES_ALL)
+            .findAll(documentXml).lastOrNull()?.value
+
+        val bodyContent = Regex("<w:body(?:\\s[^>]*)?>(.*)</w:body>", RegexOption.DOT_MATCHES_ALL)
+            .find(documentXml)?.groupValues?.get(1).orEmpty()
+        val bodyWithoutSectPr = if (sectPrXml != null) bodyContent.replace(sectPrXml, "") else bodyContent
+        val topBlocks = extractTopLevelBlocks(bodyWithoutSectPr)
+        val firstTableIdx = topBlocks.indexOfFirst { it.first }
+        val lastTableIdx = topBlocks.indexOfLast { it.first }
+
+        fun isPreservableDecorativeBlock(isTable: Boolean, blockXml: String): Boolean {
+            if (isTable) return false
+            return blockXml.contains("<w:drawing") ||
+                blockXml.contains("<v:shape") ||
+                blockXml.contains("<v:imagedata") ||
+                blockXml.contains("<wp:inline") ||
+                blockXml.contains("<wp:anchor") ||
+                blockXml.contains("<w:pict")
+        }
+
+        val leadingXml = if (firstTableIdx > 0) {
+            topBlocks.subList(0, firstTableIdx)
+                .filter { (isTbl, xml) -> isPreservableDecorativeBlock(isTbl, xml) }
+                .map { it.second }
+        } else {
+            topBlocks.filter { (isTbl, xml) -> isPreservableDecorativeBlock(isTbl, xml) }
+                .map { it.second }
+        }
+
+        val trailingXml = if (lastTableIdx >= 0 && lastTableIdx + 1 < topBlocks.size) {
+            topBlocks.subList(lastTableIdx + 1, topBlocks.size)
+                .filter { (isTbl, xml) -> isPreservableDecorativeBlock(isTbl, xml) }
+                .map { it.second }
+        } else {
+            emptyList()
+        }
+
+        val stylesXml = zipEntries.entries
+            .firstOrNull { it.key.equals("word/styles.xml", ignoreCase = true) }
+            ?.value?.toString(StandardCharsets.UTF_8).orEmpty()
+
+        val fontSearchSource = stylesXml.ifEmpty { documentXml }
+        val primaryFont = Regex("w:(?:cs|ascii|hAnsi)=\"([^\"]+)\"")
+            .find(fontSearchSource)?.groupValues?.get(1)?.takeIf { it.isNotBlank() }
+        val primaryFontSize = Regex("<w:szCs\\s+w:val=\"(\\d+)\"")
+            .find(fontSearchSource)?.groupValues?.get(1)?.toIntOrNull()
+            ?: Regex("<w:sz\\s+w:val=\"(\\d+)\"")
+                .find(fontSearchSource)?.groupValues?.get(1)?.toIntOrNull()
+
+        return DocxTemplateArchive(
+            zipEntries = zipEntries,
+            documentRootAttributes = docRootAttrs,
+            preservedSectPrXml = sectPrXml,
+            preservedLeadingElementsXml = leadingXml,
+            preservedTrailingElementsXml = trailingXml,
+            primaryFontName = primaryFont,
+            primaryFontSizeHalfPt = primaryFontSize
+        )
     }
 
     private class BoundedCountingInputStream(
@@ -672,6 +816,7 @@ object DocumentFileReader {
      * 2. [StructuredDocxExtraction.structuredText]: Formatted text for [JadhadhaParser].
      * 3. [StructuredDocxExtraction.units]: Independent traceable [ExtractedUnit]s with unique IDs and [UnitLocation].
      * 4. [StructuredDocxExtraction.unextractableSegments]: Any corrupted/unclosed XML segments that could not be parsed cleanly.
+     * 5. [StructuredDocxExtraction.tables]: Structured representation of all top-level tables.
      */
     fun extractStructuredXml(
         xml: String,
@@ -686,6 +831,9 @@ object DocumentFileReader {
             val outputLines = mutableListOf<String>()
             val units = mutableListOf<ExtractedUnit>()
             val rawVerbatimLines = mutableListOf<String>()
+            val allStructuredTables = mutableListOf<StructuredTable>()
+            val stageNestedTablesMap = LinkedHashMap<String, MutableList<StructuredTable>>()
+            val customStandaloneTables = mutableListOf<StructuredTable>()
             var nextUnitId = startUnitId
             var nextLineNum = startLineNumber
             var paraCounter = 0
@@ -719,6 +867,9 @@ object DocumentFileReader {
                     }
                     is DocElement.TableItem -> {
                         val currentTableIdx = tableCounter++
+                        val structuredTbl = element.table.toStructuredTable(id = "tbl_$currentTableIdx")
+                        allStructuredTables.add(structuredTbl)
+
                         for ((rIdx, row) in element.table.rows.withIndex()) {
                             for ((cIdx, cell) in row.withIndex()) {
                                 if (cell.vMerge == "continue" && cell.paragraphs.all { it.text.isBlank() }) continue
@@ -748,7 +899,15 @@ object DocumentFileReader {
                                 }
                             }
                         }
-                        outputLines.addAll(parseTableXml(element.table).map { stripFormattingTags(it) })
+
+                        val tableMeta = parseTableXmlWithMetadata(element.table)
+                        outputLines.addAll(tableMeta.lines.map { stripFormattingTags(it) })
+                        for ((stgTitle, nestedTbls) in tableMeta.stageNestedTables) {
+                            stageNestedTablesMap.getOrPut(stgTitle) { mutableListOf() }.addAll(nestedTbls)
+                        }
+                        if (!isHeaderFooter && !tableMeta.isPreLessonHeader && !tableMeta.isLessonStagesTable) {
+                            customStandaloneTables.add(structuredTbl)
+                        }
                     }
                 }
             }
@@ -757,7 +916,10 @@ object DocumentFileReader {
                 rawOriginalText = rawVerbatimLines.joinToString("\n"),
                 structuredText = outputLines.joinToString("\n"),
                 units = units,
-                unextractableSegments = emptyList()
+                unextractableSegments = emptyList(),
+                tables = allStructuredTables,
+                stageNestedTables = stageNestedTablesMap,
+                customTables = customStandaloneTables
             )
         } catch (_: Throwable) {
             val legacyText = parseDocumentXmlLegacy(xml)
@@ -906,23 +1068,39 @@ object DocumentFileReader {
 
     private class TableBuilder {
         val rows = mutableListOf<List<TableCell>>()
+        val columnWidthsDxa = mutableListOf<Int>()
+        val rowHeaderFlags = mutableListOf<Boolean>()
+        var inTblPr: Boolean = false
+        var inTblGrid: Boolean = false
+        var isRtl: Boolean = true
+        var hasExplicitBidiVisual: Boolean = false
+        var hasBorders: Boolean = true
     }
 
     private class RowBuilder {
         val cells = mutableListOf<TableCell>()
         var gridBefore: Int = 0
         var inTrPr: Boolean = false
+        var isHeader: Boolean = false
     }
 
     private class CellBuilder {
         val paragraphs = mutableListOf<Para>()
+        val ownParagraphs = mutableListOf<Para>()
+        val nestedTables = mutableListOf<Table>()
         var gridSpan: Int = 1
         var vMerge: String? = null
+        var widthDxa: Int? = null
+        var backgroundHex: String? = null
+        var horizontalAlignment: String? = null
+        var verticalAlignment: String? = null
         var inTcPr: Boolean = false
     }
 
     private class ParagraphBuilder {
         val parts = mutableListOf(StringBuilder())
+        var inPPr: Boolean = false
+        var jcAlignment: String? = null
     }
 
     private class RunBuilder {
@@ -1013,6 +1191,32 @@ object DocumentFileReader {
                             "tbl" -> {
                                 tableStack.addLast(TableBuilder())
                             }
+                            "tblPr" -> {
+                                if (tableStack.isNotEmpty()) {
+                                    tableStack.last().inTblPr = true
+                                }
+                            }
+                            "bidiVisual" -> {
+                                if (tableStack.isNotEmpty() && tableStack.last().inTblPr) {
+                                    val bVal = getLocalAttributeValue(parser, "val")
+                                    val enabled = bVal == null || (!bVal.equals("0", ignoreCase = true) && !bVal.equals("false", ignoreCase = true))
+                                    tableStack.last().isRtl = enabled
+                                    tableStack.last().hasExplicitBidiVisual = enabled
+                                }
+                            }
+                            "tblGrid" -> {
+                                if (tableStack.isNotEmpty()) {
+                                    tableStack.last().inTblGrid = true
+                                }
+                            }
+                            "gridCol" -> {
+                                if (tableStack.isNotEmpty() && tableStack.last().inTblGrid) {
+                                    val colW = getLocalAttributeValue(parser, "w")?.toIntOrNull()
+                                    if (colW != null && colW > 0) {
+                                        tableStack.last().columnWidthsDxa.add(colW)
+                                    }
+                                }
+                            }
                             "tr" -> {
                                 if (tableStack.isNotEmpty()) {
                                     rowStack.addLast(RowBuilder())
@@ -1021,6 +1225,12 @@ object DocumentFileReader {
                             "trPr" -> {
                                 if (rowStack.isNotEmpty()) {
                                     rowStack.last().inTrPr = true
+                                }
+                            }
+                            "tblHeader" -> {
+                                if (rowStack.isNotEmpty() && rowStack.last().inTrPr) {
+                                    val hVal = getLocalAttributeValue(parser, "val")
+                                    rowStack.last().isHeader = hVal == null || (!hVal.equals("0", ignoreCase = true) && !hVal.equals("false", ignoreCase = true))
                                 }
                             }
                             "gridBefore" -> {
@@ -1039,6 +1249,14 @@ object DocumentFileReader {
                                     cellStack.last().inTcPr = true
                                 }
                             }
+                            "tcW" -> {
+                                if (cellStack.isNotEmpty() && cellStack.last().inTcPr) {
+                                    val wVal = getLocalAttributeValue(parser, "w")?.toIntOrNull()
+                                    if (wVal != null && wVal > 0) {
+                                        cellStack.last().widthDxa = wVal
+                                    }
+                                }
+                            }
                             "gridSpan" -> {
                                 if (cellStack.isNotEmpty() && cellStack.last().inTcPr) {
                                     val spanVal = getLocalAttributeValue(parser, "val")?.toIntOrNull()?.coerceAtLeast(1) ?: 1
@@ -1051,8 +1269,34 @@ object DocumentFileReader {
                                     cellStack.last().vMerge = vVal.ifEmpty { "continue" }
                                 }
                             }
+                            "shd" -> {
+                                if (cellStack.isNotEmpty() && cellStack.last().inTcPr) {
+                                    val fillVal = getLocalAttributeValue(parser, "fill")
+                                    if (!fillVal.isNullOrBlank() && !fillVal.equals("auto", ignoreCase = true)) {
+                                        cellStack.last().backgroundHex = fillVal
+                                    }
+                                }
+                            }
+                            "vAlign" -> {
+                                if (cellStack.isNotEmpty() && cellStack.last().inTcPr) {
+                                    cellStack.last().verticalAlignment = getLocalAttributeValue(parser, "val")
+                                }
+                            }
                             "p" -> {
                                 pStack.addLast(ParagraphBuilder())
+                            }
+                            "pPr" -> {
+                                if (pStack.isNotEmpty()) {
+                                    pStack.last().inPPr = true
+                                }
+                            }
+                            "jc" -> {
+                                if (pStack.isNotEmpty() && pStack.last().inPPr) {
+                                    val jcVal = getLocalAttributeValue(parser, "val")
+                                    if (!jcVal.isNullOrBlank()) {
+                                        pStack.last().jcAlignment = jcVal
+                                    }
+                                }
                             }
                             "r" -> {
                                 if (pStack.isNotEmpty()) {
@@ -1139,6 +1383,11 @@ object DocumentFileReader {
                                     }
                                 }
                             }
+                            "pPr" -> {
+                                if (pStack.isNotEmpty()) {
+                                    pStack.last().inPPr = false
+                                }
+                            }
                             "p" -> {
                                 if (pStack.isNotEmpty()) {
                                     val finishedPara = pStack.removeLast()
@@ -1147,11 +1396,16 @@ object DocumentFileReader {
 
                                     if (cellStack.isNotEmpty()) {
                                         val currentCell = cellStack.last()
+                                        if (currentCell.horizontalAlignment == null && finishedPara.jcAlignment != null) {
+                                            currentCell.horizontalAlignment = finishedPara.jcAlignment
+                                        }
                                         if (nonEmptyParts.isEmpty()) {
                                             currentCell.paragraphs.add(Para(""))
+                                            currentCell.ownParagraphs.add(Para(""))
                                         } else {
                                             for (part in nonEmptyParts) {
                                                 currentCell.paragraphs.add(Para(part))
+                                                currentCell.ownParagraphs.add(Para(part))
                                             }
                                         }
                                     } else {
@@ -1174,7 +1428,13 @@ object DocumentFileReader {
                                             TableCell(
                                                 paragraphs = finishedCell.paragraphs.toList(),
                                                 gridSpan = finishedCell.gridSpan,
-                                                vMerge = finishedCell.vMerge
+                                                vMerge = finishedCell.vMerge,
+                                                ownParagraphs = finishedCell.ownParagraphs.toList(),
+                                                nestedTables = finishedCell.nestedTables.toList(),
+                                                widthDxa = finishedCell.widthDxa,
+                                                backgroundHex = finishedCell.backgroundHex,
+                                                horizontalAlignment = finishedCell.horizontalAlignment,
+                                                verticalAlignment = finishedCell.verticalAlignment
                                             )
                                         )
                                     }
@@ -1198,16 +1458,36 @@ object DocumentFileReader {
                                             finishedRow.cells.toList()
                                         }
                                         tableStack.last().rows.add(rowCells)
+                                        tableStack.last().rowHeaderFlags.add(finishedRow.isHeader)
                                     }
+                                }
+                            }
+                            "tblPr" -> {
+                                if (tableStack.isNotEmpty()) {
+                                    tableStack.last().inTblPr = false
+                                }
+                            }
+                            "tblGrid" -> {
+                                if (tableStack.isNotEmpty()) {
+                                    tableStack.last().inTblGrid = false
                                 }
                             }
                             "tbl" -> {
                                 if (tableStack.isNotEmpty()) {
-                                    val finishedTable = Table(tableStack.removeLast().rows.toList())
+                                    val finishedBuilder = tableStack.removeLast()
+                                    val finishedTable = Table(
+                                        rows = finishedBuilder.rows.toList(),
+                                        columnWidthsDxa = finishedBuilder.columnWidthsDxa.toList(),
+                                        isRtl = finishedBuilder.isRtl,
+                                        hasExplicitBidiVisual = finishedBuilder.hasExplicitBidiVisual,
+                                        hasBorders = finishedBuilder.hasBorders,
+                                        rowHeaderFlags = finishedBuilder.rowHeaderFlags.toList()
+                                    )
                                     if (cellStack.isNotEmpty()) {
-                                        // Nested table inside a cell: preserve multi-column analytical/diagnosis tables
-                                        // as [جدول: col1 | col2 | ...], and merge smaller 1-2 col layout tables as paragraphs.
+                                        // Nested table inside a cell: store full nested Table in parentCell.nestedTables
+                                        // AND keep legacy parentCell.paragraphs behavior for backward compatibility.
                                         val parentCell = cellStack.last()
+                                        parentCell.nestedTables.add(finishedTable)
                                         val isAnalyticalSubTable = finishedTable.rows.size >= 2 &&
                                             finishedTable.rows.first().size >= 3
                                         if (isAnalyticalSubTable) {
@@ -1324,8 +1604,12 @@ object DocumentFileReader {
      * so column indices never shift in rows containing merged cells.
      */
     internal fun parseTableXml(table: Table): List<String> {
+        return parseTableXmlWithMetadata(table).lines
+    }
+
+    private fun parseTableXmlWithMetadata(table: Table): TableParseResult {
         val result = mutableListOf<String>()
-        if (table.rows.isEmpty()) return result
+        if (table.rows.isEmpty()) return TableParseResult(result)
 
         // Build 2D grid supporting gridSpan and vMerge without column index drift
         val grid = mutableListOf<List<CellNode?>>()
@@ -1339,12 +1623,16 @@ object DocumentFileReader {
             for (tc in tableRow) {
                 val pBlocks = extractCellParagraphBlocks(tc)
                 val flatParas = extractCellParagraphs(tc)
+                val structuredNested = tc.nestedTables.mapIndexed { idx, nested ->
+                    nested.toStructuredTable(id = "cell_nested_${nextCellId}_$idx")
+                }
                 val node = CellNode(
                     id = nextCellId++,
                     rawXml = "",
                     paragraphBlocks = pBlocks,
                     flatParagraphs = flatParas,
-                    contentLinesWithTables = flatParas
+                    contentLinesWithTables = flatParas,
+                    nestedTables = structuredNested
                 )
 
                 var span = tc.gridSpan.coerceAtLeast(1)
@@ -1382,7 +1670,7 @@ object DocumentFileReader {
             }
         }
 
-        return formatTableGridToLines(grid, result)
+        return formatTableGridToLinesWithMetadata(grid, result)
     }
 
     /**
@@ -1659,11 +1947,22 @@ object DocumentFileReader {
         grid: List<List<CellNode?>>,
         result: MutableList<String>
     ): List<String> {
-        if (grid.isEmpty()) return result
+        return formatTableGridToLinesWithMetadata(grid, result).lines
+    }
+
+    private fun formatTableGridToLinesWithMetadata(
+        grid: List<List<CellNode?>>,
+        result: MutableList<String>
+    ): TableParseResult {
+        if (grid.isEmpty()) return TableParseResult(result)
 
         // Isolate header/metadata tables that precede the lesson table
         if (isPreLessonHeaderGrid(grid)) {
-            return formatHeaderGridToLines(grid, result, isPreLessonHeader = true)
+            return TableParseResult(
+                lines = formatHeaderGridToLines(grid, result, isPreLessonHeader = true),
+                isPreLessonHeader = true,
+                isLessonStagesTable = false
+            )
         }
 
         // Detect header rows (1..3, inspecting row 1 and row 2 together for split headers or session banner row 0)
@@ -1709,6 +2008,8 @@ object DocumentFileReader {
                 }
             }
         }
+
+        val stageNestedMap = LinkedHashMap<String, MutableList<StructuredTable>>()
 
         if (bestHeaderRows != -1) {
             val seenIds = mutableSetOf<Int>()
@@ -1798,11 +2099,13 @@ object DocumentFileReader {
                 // Also collect any unmapped non-empty cells (excluding generic segments and durations)
                 val mappedIndices = bestMultiColMap.values.flatten().toSet()
                 val extraContentLines = mutableListOf<String>()
+                val extraTakenCells = mutableListOf<CellNode>()
                 for (cIdx in row.indices) {
                     if (cIdx !in mappedIndices) {
                         val extraCell = row[cIdx]
                         if (extraCell != null && extraCell.id !in seenIds) {
                             seenIds.add(extraCell.id)
+                            extraTakenCells.add(extraCell)
                             extraContentLines.addAll(
                                 extraCell.contentLinesWithTables.filter { !isGenericSegmentLabel(it) }
                             )
@@ -1836,13 +2139,18 @@ object DocumentFileReader {
                 val evalBlocks = evalCells.flatMap { it.paragraphBlocks }
                 val contentLines = (contentCells.flatMap { it.contentLinesWithTables } + extraContentLines).filter { it.isNotBlank() }
 
+                val rowNestedTables = (
+                    contentCells + teacherCells + learnerCells + genericActCells + abilCells + evalCells + extraTakenCells
+                    ).flatMap { it.nestedTables }
+
                 val hasAnyData = combinedStageLines.isNotEmpty() ||
                     abilBlocks.isNotEmpty() ||
                     teacherBlocks.isNotEmpty() ||
                     learnerBlocks.isNotEmpty() ||
                     genericBlocks.isNotEmpty() ||
                     evalBlocks.isNotEmpty() ||
-                    contentLines.isNotEmpty()
+                    contentLines.isNotEmpty() ||
+                    rowNestedTables.isNotEmpty()
                 if (!hasAnyData) continue
 
                 // Check if this row combines two stages (e.g., "التقويم التشخيصي" + "ملاحظة الأمثلة ووصفها" in المختار)
@@ -1856,6 +2164,10 @@ object DocumentFileReader {
                     val (aGen, bGen) = splitBlocksTwoWays(genericBlocks)
                     val (aEval, bEval) = splitBlocksTwoWays(evalBlocks)
                     val (aCont, bCont) = splitContentLinesTwoWays(contentLines, secondStageName)
+
+                    if (rowNestedTables.isNotEmpty()) {
+                        stageNestedMap.getOrPut(secondStageName) { mutableListOf() }.addAll(rowNestedTables)
+                    }
 
                     emitStageRow(
                         result = result,
@@ -1879,6 +2191,9 @@ object DocumentFileReader {
                     )
                 } else {
                     val stageTitle = combinedStageLines.joinToString(" - ").trim()
+                    if (rowNestedTables.isNotEmpty() && stageTitle.isNotEmpty()) {
+                        stageNestedMap.getOrPut(stageTitle) { mutableListOf() }.addAll(rowNestedTables)
+                    }
                     emitStageRow(
                         result = result,
                         stageTitle = stageTitle,
@@ -1892,13 +2207,27 @@ object DocumentFileReader {
                 }
             }
             result.add("[نهاية الجدول]")
+            return TableParseResult(
+                lines = result,
+                isPreLessonHeader = false,
+                isLessonStagesTable = true,
+                stageNestedTables = stageNestedMap
+            )
         } else if (isTwoColumnLessonTable(grid)) {
-            return formatTwoColumnLessonGridToLines(grid, result)
+            val lines = formatTwoColumnLessonGridToLines(grid, result, stageNestedMap)
+            return TableParseResult(
+                lines = lines,
+                isPreLessonHeader = false,
+                isLessonStagesTable = true,
+                stageNestedTables = stageNestedMap
+            )
         } else {
-            return formatHeaderGridToLines(grid, result, isPreLessonHeader = false)
+            return TableParseResult(
+                lines = formatHeaderGridToLines(grid, result, isPreLessonHeader = false),
+                isPreLessonHeader = false,
+                isLessonStagesTable = false
+            )
         }
-
-        return result
     }
 
     private fun isTwoColumnLessonTable(grid: List<List<CellNode?>>): Boolean {
@@ -1908,14 +2237,16 @@ object DocumentFileReader {
         )
         val stageKeywords = listOf(
             "تقويمتشخيصي", "تشخيصالمكتسبات", "تشخيصاخطاء", "التصحيحالفردي", "الدعموالتعزيز",
-            "ملاحظهالنص", "فهمالنص", "القراءهالتحليليه", "التركيب", "الاستثمار", "الاستنتاج", "تطبيق"
+            "ملاحظهالنص", "فهمالنص", "القراءهالتحليليه", "التركيب", "الاستثمار", "الاستنتاج", "تطبيق",
+            "ملاحظهالظاهره", "الوصفوالتحليل"
         )
         return stageKeywords.count { allText.contains(it) } >= 2
     }
 
     private fun formatTwoColumnLessonGridToLines(
         grid: List<List<CellNode?>>,
-        result: MutableList<String>
+        result: MutableList<String>,
+        stageNestedMap: MutableMap<String, MutableList<StructuredTable>> = mutableMapOf()
     ): List<String> {
         val seenCells = mutableSetOf<Int>()
         for (row in grid) {
@@ -1926,10 +2257,15 @@ object DocumentFileReader {
                 if (text.isNotEmpty()) result.add(text)
             } else {
                 val firstColText = distinctCells[0].flatParagraphs.joinToString(" - ").trim()
-                val restLines = distinctCells.drop(1).flatMap { it.contentLinesWithTables }.filter { it.isNotBlank() }
+                val restCells = distinctCells.drop(1)
+                val restLines = restCells.flatMap { it.contentLinesWithTables }.filter { it.isNotBlank() }
+                val nested = restCells.flatMap { it.nestedTables }
                 if (firstColText.isNotEmpty() && firstColText.length <= 65) {
                     result.add("[مرحلة: $firstColText]")
                     restLines.forEach { result.add(it) }
+                    if (nested.isNotEmpty()) {
+                        stageNestedMap.getOrPut(firstColText) { mutableListOf() }.addAll(nested)
+                    }
                 } else {
                     distinctCells.flatMap { it.contentLinesWithTables }.filter { it.isNotBlank() }.forEach { result.add(it) }
                 }

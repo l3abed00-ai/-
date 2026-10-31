@@ -634,6 +634,18 @@ class JadhadhaViewModel(
         }
     }
 
+    private fun restoreDoneOrIdleExtractionState(rawText: String = _uiState.value.extractorRawText): ExtractionState {
+        return if (rawText.isNotBlank()) {
+            ExtractionState.Done(
+                fileName = _uiState.value.extractorFileName,
+                extractedText = rawText,
+                isAiTranscribed = _uiState.value.extractorIsAiTranscribed
+            )
+        } else {
+            ExtractionState.Idle
+        }
+    }
+
     private fun scheduleExtractorReparse(
         rawText: String,
         topic: String,
@@ -673,11 +685,16 @@ class JadhadhaViewModel(
                     isParsing = false
                 )
             } catch (e: CancellationException) {
-                throw e
-            } catch (_: Exception) {
                 _uiState.value = _uiState.value.copy(
-                    extraction = ExtractionState.Idle,
+                    extraction = restoreDoneOrIdleExtractionState(rawText),
                     isParsing = false
+                )
+                throw e
+            } catch (e: Exception) {
+                _uiState.value = _uiState.value.copy(
+                    extraction = restoreDoneOrIdleExtractionState(rawText),
+                    isParsing = false,
+                    errorMessage = e.message ?: "حدث خطأ أثناء تحليل النص المستخرج."
                 )
             }
         }
@@ -690,7 +707,8 @@ class JadhadhaViewModel(
         reparseJob = viewModelScope.launch {
             _uiState.value = _uiState.value.copy(
                 extraction = ExtractionState.Parsing,
-                isParsing = true
+                isParsing = true,
+                errorMessage = null
             )
             try {
                 val refined = withContext(Dispatchers.Default) {
@@ -702,6 +720,20 @@ class JadhadhaViewModel(
                     )
                 }
                 ensureActive()
+                val geminiFailed = refined.report.geminiFailed
+                val warningOrError = if (geminiFailed) {
+                    "${refined.report.geminiErrorMessage ?: GeminiAiService.MSG_LOCAL_FALLBACK_NOTICE} (تم الاحتفاظ بالبيانات وتطبيق القواعد المحلية كبديل صريح للمراجعة)"
+                } else {
+                    null
+                }
+                val successMsg = when {
+                    geminiFailed -> null
+                    refined.report.isAiDelegated ->
+                        "تم التصنيف عبر Gemini بنجاح (${refined.report.aiClassifiedLinesCount} عنصر عبر Gemini، ${refined.report.localRuleClassifiedLinesCount} بقواعد محلية)."
+                    refined.report.localRuleClassifiedLinesCount > 0 ->
+                        "تم تصنيف العناصر محلياً وفق السياق التربوي (${refined.report.localRuleClassifiedLinesCount} عنصر بقواعد محلية)."
+                    else -> null
+                }
                 _uiState.value = _uiState.value.copy(
                     extractorParseResult = refined,
                     extraction = ExtractionState.Done(
@@ -709,17 +741,52 @@ class JadhadhaViewModel(
                         extractedText = rawText,
                         isAiTranscribed = _uiState.value.extractorIsAiTranscribed
                     ),
-                    isParsing = false
+                    isParsing = false,
+                    errorMessage = warningOrError,
+                    successMessage = successMsg ?: _uiState.value.successMessage
                 )
             } catch (e: CancellationException) {
+                _uiState.value = _uiState.value.copy(
+                    extraction = restoreDoneOrIdleExtractionState(rawText),
+                    isParsing = false
+                )
                 throw e
+            } catch (e: Exception) {
+                _uiState.value = _uiState.value.copy(
+                    extraction = restoreDoneOrIdleExtractionState(rawText),
+                    isParsing = false,
+                    errorMessage = e.message ?: GeminiAiService.MSG_LOCAL_FALLBACK_NOTICE
+                )
             }
+        }
+    }
+
+    /**
+     * Retries Gemini classification/extraction on the already-extracted content without requiring the user
+     * to re-import the file.
+     */
+    fun retryAiClassification(comprehensive: Boolean = false, applyImmediately: Boolean = false) {
+        if (_uiState.value.extractorRawText.isBlank()) return
+        if (comprehensive) {
+            runComprehensiveAiExtraction(applyImmediately = applyImmediately)
+        } else {
+            if (_uiState.value.extractorParseResult == null) {
+                val parsed = JadhadhaParser.parseWithReport(
+                    raw = _uiState.value.extractorRawText,
+                    fallbackTopic = _uiState.value.extractorTopicName.ifBlank { "درس جديد" },
+                    forcedComponent = _uiState.value.extractorComponentFilter
+                )
+                _uiState.value = _uiState.value.copy(extractorParseResult = parsed)
+            }
+            delegateExtractorToBuiltInAi()
         }
     }
 
     /**
      * Runs comprehensive AI extraction ("تفريغ ذكي شامل (AI)") via [GeminiAiService.parseRawJadhadhaWithAi]
      * to reorganize and distribute 100% of any complex or non-standard jadhadha across all stages and fields.
+     * When Gemini fails, never fakes AI success; preserves extracted data, applies explicit local fallback
+     * ([com.example.model.ClassificationSource.LOCAL_RULE]), exits [ExtractionState.Parsing], and notifies the user.
      */
     fun runComprehensiveAiExtraction(applyImmediately: Boolean = false) {
         val rawText = _uiState.value.extractorRawText
@@ -727,7 +794,12 @@ class JadhadhaViewModel(
         val activeComp = _uiState.value.extractorComponentFilter
             ?: _uiState.value.extractorParseResult?.plan?.componentType
             ?: _uiState.value.activeComponent
-        val unclassifiedBefore = _uiState.value.extractorParseResult?.report?.unclassifiedLines?.size ?: 0
+        val baseParseResult = _uiState.value.extractorParseResult ?: JadhadhaParser.parseWithReport(
+            raw = rawText,
+            fallbackTopic = _uiState.value.extractorTopicName.ifBlank { "درس جديد" },
+            forcedComponent = activeComp
+        )
+        val unclassifiedBefore = baseParseResult.report.unclassifiedLines.size
 
         reparseJob?.cancel()
         reparseJob = viewModelScope.launch {
@@ -745,7 +817,10 @@ class JadhadhaViewModel(
                 ensureActive()
                 result.onSuccess { aiPlan ->
                     val aiFieldsCount = aiPlan.stages.values.sumOf { st ->
-                        listOf("abil", "teacher", "content", "eval").count { f -> st.sourceFor(f) == com.example.model.FieldSource.AI }
+                        listOf("abil", "teacher", "content", "eval").count { f ->
+                            st.sourceFor(f) == com.example.model.FieldSource.AI ||
+                                st.sourceFor(f) == com.example.model.FieldSource.GEMINI
+                        }
                     }
                     val updatedReport = JadhadhaParser.buildReport(
                         plan = aiPlan,
@@ -753,7 +828,12 @@ class JadhadhaViewModel(
                         unclassifiedLines = emptyList(),
                         aiClassifiedLinesCount = unclassifiedBefore,
                         aiRefinedFieldsCount = aiFieldsCount,
-                        isAiDelegated = true
+                        isAiDelegated = true,
+                        geminiFailed = false,
+                        isLocalFallback = false,
+                        originalRawText = baseParseResult.report.originalRawText.ifEmpty { rawText },
+                        extractedUnits = baseParseResult.report.extractedUnits,
+                        unextractableItems = baseParseResult.report.unextractableItems
                     )
                     val updatedParseResult = ParseResult(plan = aiPlan, report = updatedReport)
                     if (applyImmediately) {
@@ -785,13 +865,42 @@ class JadhadhaViewModel(
                         )
                     }
                 }.onFailure { err ->
+                    // Explicit local fallback: never claim AI succeeded, preserve extracted content, and exit Parsing state
+                    val localFallbackResult = withContext(Dispatchers.Default) {
+                        val localOnly = GeminiAiService.classifyWithLocalRulesOnly(rawText, baseParseResult)
+                        localOnly.copy(
+                            report = localOnly.report.copy(
+                                isAiDelegated = false,
+                                geminiFailed = true,
+                                geminiErrorMessage = err.message ?: GeminiAiService.MSG_LOCAL_FALLBACK_NOTICE,
+                                isLocalFallback = true
+                            )
+                        )
+                    }
                     _uiState.value = _uiState.value.copy(
+                        extractorParseResult = localFallbackResult,
+                        extraction = ExtractionState.Done(
+                            fileName = _uiState.value.extractorFileName,
+                            extractedText = rawText,
+                            isAiTranscribed = _uiState.value.extractorIsAiTranscribed
+                        ),
                         isParsing = false,
-                        errorMessage = err.message ?: "تعذر إتمام التفريغ الذكي الشامل."
+                        successMessage = null,
+                        errorMessage = "${err.message ?: "تعذر إتمام التفريغ الذكي عبر Gemini."} — تم استخدام المعالجة المحلية كبديل صريح وتحتاج النتيجة إلى مراجعة."
                     )
                 }
             } catch (e: CancellationException) {
+                _uiState.value = _uiState.value.copy(
+                    extraction = restoreDoneOrIdleExtractionState(rawText),
+                    isParsing = false
+                )
                 throw e
+            } catch (e: Exception) {
+                _uiState.value = _uiState.value.copy(
+                    extraction = restoreDoneOrIdleExtractionState(rawText),
+                    isParsing = false,
+                    errorMessage = e.message ?: "تعذر إتمام التفريغ الذكي الشامل."
+                )
             }
         }
     }
@@ -803,6 +912,23 @@ class JadhadhaViewModel(
             line = line,
             targetStageKey = stageKey,
             targetField = field
+        )
+        _uiState.value = _uiState.value.copy(extractorParseResult = updated)
+    }
+
+    fun modifyExtractorUnitClassification(
+        unitId: String,
+        stageKey: String,
+        field: String,
+        newCategory: com.example.model.PedagogicalCategory? = null
+    ) {
+        val currentResult = _uiState.value.extractorParseResult ?: return
+        val updated = JadhadhaParser.modifyUnitClassification(
+            currentResult = currentResult,
+            unitId = unitId,
+            targetStageKey = stageKey,
+            targetField = field,
+            newCategory = newCategory
         )
         _uiState.value = _uiState.value.copy(extractorParseResult = updated)
     }
@@ -827,36 +953,49 @@ class JadhadhaViewModel(
         )
 
         viewModelScope.launch {
-            val initialResult = preParsedResult ?: withContext(Dispatchers.Default) {
-                val fallback = topic.ifBlank { "درس جديد" }
-                // Ensure both parseRawText and parseWithReport run on Dispatchers.Default off the main thread
-                val rawPlan = JadhadhaParser.parseRawText(
-                    raw = rawText,
-                    fallbackTopic = fallback,
-                    forcedComponent = forcedComponent
+            try {
+                val initialResult = preParsedResult ?: withContext(Dispatchers.Default) {
+                    val fallback = topic.ifBlank { "درس جديد" }
+                    val rawPlan = JadhadhaParser.parseRawText(
+                        raw = rawText,
+                        fallbackTopic = fallback,
+                        forcedComponent = forcedComponent
+                    )
+                    JadhadhaParser.parseWithReport(
+                        raw = rawText,
+                        fallbackTopic = rawPlan.topic.ifBlank { fallback },
+                        forcedComponent = forcedComponent
+                    )
+                }
+                val parseResult = initialResult
+                val parsed = parseResult.plan
+                repository.savePlan(parsed, isCustom = true)
+                _uiState.value = _uiState.value.copy(
+                    currentPlan = parsed,
+                    activeComponent = parsed.componentType,
+                    isParsing = false,
+                    extraction = ExtractionState.Done(
+                        fileName = _uiState.value.extractorFileName,
+                        extractedText = rawText,
+                        isAiTranscribed = _uiState.value.extractorIsAiTranscribed
+                    ),
+                    lastParseReport = parseResult.report,
+                    selectedTab = AppTab.MODEL_EDITOR,
+                    successMessage = "تم تفريغ المحتوى (${parseResult.report.totalFileFields} خانة من الملف، ${parseResult.report.totalLocalRuleFields} قواعد محلية، ${parseResult.report.totalAiFields} ذكاء اصطناعي، ${parseResult.report.totalDefaultFields} افتراضية) وحفظه بنجاح!"
                 )
-                JadhadhaParser.parseWithReport(
-                    raw = rawText,
-                    fallbackTopic = rawPlan.topic.ifBlank { fallback },
-                    forcedComponent = forcedComponent
+            } catch (e: CancellationException) {
+                _uiState.value = _uiState.value.copy(
+                    isParsing = false,
+                    extraction = restoreDoneOrIdleExtractionState(rawText)
+                )
+                throw e
+            } catch (e: Exception) {
+                _uiState.value = _uiState.value.copy(
+                    isParsing = false,
+                    extraction = restoreDoneOrIdleExtractionState(rawText),
+                    errorMessage = e.message ?: "حدث خطأ أثناء تطبيق النص المستخرج."
                 )
             }
-            val parseResult = initialResult
-            val parsed = parseResult.plan
-            repository.savePlan(parsed, isCustom = true)
-            _uiState.value = _uiState.value.copy(
-                currentPlan = parsed,
-                activeComponent = parsed.componentType,
-                isParsing = false,
-                extraction = ExtractionState.Done(
-                    fileName = _uiState.value.extractorFileName,
-                    extractedText = rawText,
-                    isAiTranscribed = _uiState.value.extractorIsAiTranscribed
-                ),
-                lastParseReport = parseResult.report,
-                selectedTab = AppTab.MODEL_EDITOR,
-                successMessage = "تم تفريغ المحتوى (${parseResult.report.totalFileFields} خانة من الملف، ${parseResult.report.totalAiFields} ذكاء اصطناعي، ${parseResult.report.totalDefaultFields} افتراضية) وحفظه بنجاح!"
-            )
         }
     }
 

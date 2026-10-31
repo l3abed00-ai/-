@@ -62,11 +62,176 @@ data class JadhadhaInfo(
     val culturalComp: String = "يغني المتعلم رصيده الثقافي بمعطيات تاريخية ووطنية تتصل بمرحلة الاستعمار والكفاح من أجل الاستقلال."
 )
 
+enum class ClassificationSource(val arabicLabel: String) {
+    GEMINI("تصنيف Gemini"),
+    LOCAL_RULE("قاعدة محلية"),
+    USER_EDIT("تعديل يدوي"),
+    IMPORTED("مستورد من مصدر خارجي"),
+    DEFAULT("افتراضي");
+
+    companion object {
+        fun fromString(value: String?): ClassificationSource? {
+            if (value.isNullOrBlank()) return null
+            val norm = value.trim()
+            return entries.firstOrNull { it.name.equals(norm, ignoreCase = true) } ?: when {
+                norm.equals("AI", ignoreCase = true) -> GEMINI
+                norm.equals("FILE", ignoreCase = true) -> IMPORTED
+                norm.equals("USER", ignoreCase = true) -> USER_EDIT
+                else -> null
+            }
+        }
+    }
+}
+
+enum class PedagogicalCategory(
+    val id: String,
+    val arabicTitle: String,
+    val defaultTargetField: String
+) {
+    OBJECTIVES_COMPETENCIES("objectives_competencies", "الأهداف والكفايات والمهارات", "abil"),
+    MATERIALS_METHODS("materials_methods", "الوسائل والطرائق", "content"),
+    INTRODUCTION_LAUNCH("introduction_launch", "التمهيد أو الانطلاق", "content"),
+    TEACHER_ACTIVITIES("teacher_activities", "أنشطة الأستاذ", "teacher"),
+    LEARNER_ACTIVITIES("learner_activities", "أنشطة المتعلمين", "content"),
+    EDUCATIONAL_CONTENT("educational_content", "المحتوى التعليمي", "content"),
+    ANALYSIS_DISCUSSION("analysis_discussion", "التحليل والمناقشة", "content"),
+    EVALUATION("evaluation", "التقويم", "eval"),
+    SUPPORT_REMEDIATION("support_remediation", "الدعم والمعالجة", "eval");
+
+    val arabicLabel: String
+        get() = arabicTitle
+
+    fun isCompatibleWithField(field: String, component: PedagogicalComponent? = null): Boolean {
+        return when (this) {
+            OBJECTIVES_COMPETENCIES -> field == "abil"
+            TEACHER_ACTIVITIES -> field == "teacher"
+            EVALUATION, SUPPORT_REMEDIATION -> field == "eval"
+            LEARNER_ACTIVITIES -> field == "content" || (component == PedagogicalComponent.LANGUAGE && field == "teacher")
+            MATERIALS_METHODS, INTRODUCTION_LAUNCH -> field == "content" || field == "teacher"
+            EDUCATIONAL_CONTENT, ANALYSIS_DISCUSSION -> field == "content"
+        }
+    }
+
+    fun isCompatibleWithStage(stageKey: String, component: PedagogicalComponent): Boolean {
+        val officialKeys = StageCatalog.getStagesForComponent(component).map { it.key }.toSet()
+        if (stageKey !in officialKeys) return false
+        return when (this) {
+            INTRODUCTION_LAUNCH -> stageKey in setOf(
+                "diagnostic",
+                "session2_intro",
+                "observation",
+                "lang_diagnostic",
+                "insha_acq_diagnostic",
+                "insha_app_diagnostic",
+                "insha_prod_diagnostic",
+                "insha_corr_diagnostic"
+            )
+            ANALYSIS_DISCUSSION -> stageKey !in setOf(
+                "diagnostic",
+                "session2_intro",
+                "lang_diagnostic",
+                "insha_acq_diagnostic",
+                "insha_app_diagnostic",
+                "insha_prod_diagnostic",
+                "insha_corr_diagnostic"
+            )
+            else -> true
+        }
+    }
+
+    companion object {
+        fun fromString(value: String?): PedagogicalCategory? {
+            if (value.isNullOrBlank()) return null
+            val norm = value.trim().lowercase()
+            return entries.firstOrNull {
+                it.name.equals(norm, ignoreCase = true) ||
+                    it.id.equals(norm, ignoreCase = true) ||
+                    it.arabicTitle == value.trim()
+            } ?: when {
+                norm.contains("أهداف") || norm.contains("كفاي") || norm.contains("مهار") || norm.contains("قدرات") || norm == "abil" ->
+                    OBJECTIVES_COMPETENCIES
+                norm.contains("وسائل") || norm.contains("طرائق") || norm.contains("ديداكتيكية") ->
+                    MATERIALS_METHODS
+                norm.contains("تمهيد") || norm.contains("انطلاق") ->
+                    INTRODUCTION_LAUNCH
+                norm.contains("أستاذ") || norm.contains("مدرس") || norm == "teacher" ->
+                    TEACHER_ACTIVITIES
+                norm.contains("متعلم") || norm.contains("تلميذ") || norm == "learner" ->
+                    LEARNER_ACTIVITIES
+                norm.contains("تحليل") || norm.contains("مناقشة") ->
+                    ANALYSIS_DISCUSSION
+                norm.contains("دعم") || norm.contains("معالجة") || norm.contains("تصويب") ->
+                    SUPPORT_REMEDIATION
+                norm.contains("تقويم") || norm == "eval" ->
+                    EVALUATION
+                norm.contains("محتوى") || norm.contains("مضمون") || norm == "content" ->
+                    EDUCATIONAL_CONTENT
+                else -> null
+            }
+        }
+    }
+}
+
+data class PedagogicalClassificationItem(
+    val unitId: String,
+    val originalText: String,
+    val proposedCategory: PedagogicalCategory,
+    val targetField: String,
+    val component: PedagogicalComponent,
+    val stageKey: String,
+    val confidence: Double,
+    val source: ClassificationSource,
+    val rationale: String = ""
+)
+
+data class GeminiClassificationValidationResult(
+    val isValid: Boolean,
+    val acceptedItems: List<PedagogicalClassificationItem> = emptyList(),
+    val lowConfidenceItems: List<PedagogicalClassificationItem> = emptyList(),
+    val rejectedUnitIds: List<String> = emptyList(),
+    val rejectedReasons: List<String> = emptyList(),
+    val omittedUnitIds: List<String> = emptyList(),
+    val errorMessage: String? = null
+) {
+    val isJsonValid: Boolean
+        get() = isValid
+
+    val validItems: List<PedagogicalClassificationItem>
+        get() = acceptedItems + lowConfidenceItems
+
+    val unclassifiedUnitIds: List<String>
+        get() = omittedUnitIds
+}
+
 enum class FieldSource(val arabicLabel: String) {
     FILE("من الملف"),
     DEFAULT("افتراضي"),
-    AI("ذكاء اصطناعي"),
-    USER("معدّل يدوياً");
+    AI("ذكاء اصطناعي (Gemini)"),
+    USER("معدّل يدوياً"),
+    GEMINI("ذكاء اصطناعي (Gemini)"),
+    LOCAL_RULE("قاعدة محلية"),
+    USER_EDIT("معدّل يدوياً"),
+    IMPORTED("مستورد من الملف");
+
+    val isGeminiSource: Boolean
+        get() = this == AI || this == GEMINI
+
+    val isLocalRuleSource: Boolean
+        get() = this == LOCAL_RULE
+
+    val isUserSource: Boolean
+        get() = this == USER || this == USER_EDIT
+
+    val isFileOrImportedSource: Boolean
+        get() = this == FILE || this == IMPORTED
+
+    fun toClassificationSource(): ClassificationSource = when (this) {
+        AI, GEMINI -> ClassificationSource.GEMINI
+        LOCAL_RULE -> ClassificationSource.LOCAL_RULE
+        USER, USER_EDIT -> ClassificationSource.USER_EDIT
+        FILE, IMPORTED -> ClassificationSource.IMPORTED
+        DEFAULT -> ClassificationSource.DEFAULT
+    }
 
     companion object {
         fun fromString(value: String?): FieldSource? {
@@ -76,19 +241,197 @@ enum class FieldSource(val arabicLabel: String) {
     }
 }
 
+data class StructuredTableCell(
+    val paragraphs: List<String> = emptyList(),
+    val gridSpan: Int = 1,
+    val vMerge: String? = null, // null, "restart", or "continue"
+    val widthDxa: Int? = null,
+    val backgroundHex: String? = null,
+    val horizontalAlignment: String? = null, // "center", "right", "left", "both"
+    val verticalAlignment: String? = null,   // "center", "top", "bottom"
+    val isHeader: Boolean = false,
+    val bold: Boolean = true,
+    val nestedTables: List<StructuredTable> = emptyList()
+) {
+    constructor(
+        text: String,
+        paragraphs: List<String> = if (text.isEmpty()) emptyList() else text.split("\n"),
+        gridSpan: Int = 1,
+        vMerge: String? = null,
+        widthDxa: Int? = null,
+        backgroundHex: String? = null,
+        horizontalAlignment: String? = null,
+        verticalAlignment: String? = null,
+        isHeader: Boolean = false,
+        bold: Boolean = true,
+        nestedTables: List<StructuredTable> = emptyList()
+    ) : this(
+        paragraphs = paragraphs,
+        gridSpan = gridSpan,
+        vMerge = vMerge,
+        widthDxa = widthDxa,
+        backgroundHex = backgroundHex,
+        horizontalAlignment = horizontalAlignment,
+        verticalAlignment = verticalAlignment,
+        isHeader = isHeader,
+        bold = bold,
+        nestedTables = nestedTables
+    )
+
+    val text: String
+        get() = paragraphs.joinToString("\n")
+
+    val alignment: String?
+        get() = horizontalAlignment
+
+    val isEmpty: Boolean
+        get() = paragraphs.all { it.isEmpty() } && nestedTables.isEmpty()
+}
+
+data class StructuredTableRow(
+    val cells: List<StructuredTableCell> = emptyList(),
+    val isHeader: Boolean = false,
+    val cantSplit: Boolean = false,
+    val heightDxa: Int? = null
+)
+
+data class StructuredTable(
+    val id: String = UUID.randomUUID().toString(),
+    val title: String = "",
+    val rows: List<StructuredTableRow> = emptyList(),
+    val columnWidthsDxa: List<Int> = emptyList(),
+    val isRtl: Boolean = true,
+    val hasBorders: Boolean = true,
+    val borderColorHex: String = "000000",
+    val borderSizeEighthsPt: Int = 4,
+    val sourceStageKey: String? = null,
+    val sourceField: String = "content"
+) {
+    val rowCount: Int
+        get() = rows.size
+
+    val maxColCount: Int
+        get() = rows.maxOfOrNull { r -> r.cells.sumOf { it.gridSpan.coerceAtLeast(1) } } ?: 0
+
+    fun toPipeLines(): List<String> {
+        return rows.map { row ->
+            val rowCells = row.cells.map { cell ->
+                cell.paragraphs.map { it.trim() }.filter { it.isNotEmpty() }.joinToString(" ")
+            }
+            "[جدول: ${rowCells.joinToString(" | ")}]"
+        }
+    }
+
+    companion object {
+        fun fromPipeLines(
+            lines: List<String>,
+            title: String = "",
+            sourceStageKey: String? = null,
+            sourceField: String = "content"
+        ): StructuredTable {
+            val parsedRows = lines.mapIndexedNotNull { rIdx, rawLine ->
+                val trimmed = rawLine.trim()
+                val inner = if (trimmed.startsWith("[جدول:") && trimmed.endsWith("]")) {
+                    trimmed.removePrefix("[جدول:").removeSuffix("]")
+                } else {
+                    trimmed
+                }
+                val rawCells = inner.split("|").map { it.trim() }
+                if (rawCells.isEmpty()) null
+                else StructuredTableRow(
+                    cells = rawCells.map { cellText ->
+                        StructuredTableCell(
+                            paragraphs = if (cellText.isEmpty()) emptyList() else listOf(cellText),
+                            isHeader = rIdx == 0
+                        )
+                    },
+                    isHeader = rIdx == 0
+                )
+            }
+            return StructuredTable(
+                title = title,
+                rows = parsedRows,
+                isRtl = true,
+                hasBorders = true,
+                sourceStageKey = sourceStageKey,
+                sourceField = sourceField
+            )
+        }
+    }
+}
+
+data class DocxTemplateArchive(
+    val zipEntries: Map<String, ByteArray> = emptyMap(),
+    val documentRootAttributes: String = "",
+    val preservedSectPrXml: String? = null,
+    val preservedLeadingElementsXml: List<String> = emptyList(),
+    val preservedTrailingElementsXml: List<String> = emptyList(),
+    val primaryFontName: String? = null,
+    val primaryFontSizeHalfPt: Int? = null
+)
+
 data class StageData(
     val eval: List<String> = emptyList(),
     val content: List<String> = emptyList(),
     val teacher: List<String> = emptyList(),
     val abil: List<String> = emptyList(),
-    val sources: Map<String, FieldSource> = emptyMap()
+    val learner: List<String> = emptyList(),
+    val sources: Map<String, FieldSource> = emptyMap(),
+    val classificationSources: Map<String, ClassificationSource> = emptyMap(),
+    val tables: List<StructuredTable> = emptyList()
 ) {
     fun sourceFor(field: String): FieldSource? = sources[field]
 
-    fun withFieldSource(field: String, source: FieldSource): StageData {
+    fun classificationSourceFor(field: String): ClassificationSource? =
+        classificationSources[field] ?: sources[field]?.toClassificationSource()
+
+    fun withFieldSource(
+        field: String,
+        source: FieldSource,
+        classificationSource: ClassificationSource = source.toClassificationSource()
+    ): StageData {
         val updated = sources.toMutableMap()
         updated[field] = source
-        return copy(sources = updated)
+        val updatedClassSources = classificationSources.toMutableMap()
+        updatedClassSources[field] = classificationSource
+        return copy(sources = updated, classificationSources = updatedClassSources)
+    }
+
+    fun effectiveTables(stageKey: String? = null): List<StructuredTable> {
+        if (tables.isNotEmpty()) return tables
+        val result = mutableListOf<StructuredTable>()
+        val pendingLines = mutableListOf<String>()
+        var currentTitle = ""
+        for (line in content) {
+            val trimmed = line.trim()
+            if (trimmed.startsWith("[جدول:") && trimmed.endsWith("]")) {
+                pendingLines.add(trimmed)
+            } else {
+                if (pendingLines.isNotEmpty()) {
+                    result.add(
+                        StructuredTable.fromPipeLines(
+                            lines = pendingLines.toList(),
+                            title = currentTitle,
+                            sourceStageKey = stageKey
+                        )
+                    )
+                    pendingLines.clear()
+                }
+                if (trimmed.endsWith(":")) {
+                    currentTitle = trimmed
+                }
+            }
+        }
+        if (pendingLines.isNotEmpty()) {
+            result.add(
+                StructuredTable.fromPipeLines(
+                    lines = pendingLines.toList(),
+                    title = currentTitle,
+                    sourceStageKey = stageKey
+                )
+            )
+        }
+        return result
     }
 }
 
@@ -372,7 +715,11 @@ data class JadhadhaPlan(
     val category: String = JadhadhaCategories.forComponent(componentType),
     val info: JadhadhaInfo = JadhadhaInfo(),
     val stages: Map<String, StageData> = emptyMap(),
-    val createdAt: Long = System.currentTimeMillis()
+    val createdAt: Long = System.currentTimeMillis(),
+    val customTables: List<StructuredTable> = emptyList(),
+    val extraParagraphs: List<String> = emptyList(),
+    val unclassifiedItems: List<String> = emptyList(),
+    val templateArchive: DocxTemplateArchive? = null
 )
 
 data class SuggestedObjectives(
@@ -420,7 +767,11 @@ data class ExtractedUnit(
     val status: ContentUnitStatus = ContentUnitStatus.EXTRACTED,
     val assignedStageKey: String? = null,
     val assignedField: String? = null,
-    val finalClassifiedText: String? = null
+    val finalClassifiedText: String? = null,
+    val classificationSource: ClassificationSource = ClassificationSource.IMPORTED,
+    val pedagogicalCategory: PedagogicalCategory? = null,
+    val confidence: Double? = null,
+    val rationale: String? = null
 )
 
 data class TextModificationRecord(
@@ -459,7 +810,11 @@ data class UnclassifiedLine(
     val text: String,
     val unitId: String = "unit_$lineNumber",
     val verbatimText: String = text,
-    val location: UnitLocation = UnitLocation(lineNumber = lineNumber)
+    val location: UnitLocation = UnitLocation(lineNumber = lineNumber),
+    val proposedCategory: PedagogicalCategory? = null,
+    val confidence: Double? = null,
+    val rationale: String? = null,
+    val classificationSource: ClassificationSource? = null
 )
 
 data class StageSourceCount(
@@ -468,7 +823,8 @@ data class StageSourceCount(
     val fileCount: Int,
     val defaultCount: Int,
     val aiCount: Int = 0,
-    val userCount: Int = 0
+    val userCount: Int = 0,
+    val localRuleCount: Int = 0
 )
 
 data class ParseReport(
@@ -479,12 +835,20 @@ data class ParseReport(
     val unclassifiedLines: List<UnclassifiedLine> = emptyList(),
     val aiClassifiedLinesCount: Int = 0,
     val aiRefinedFieldsCount: Int = 0,
+    val localRuleClassifiedLinesCount: Int = 0,
     val isAiDelegated: Boolean = false,
+    val geminiFailed: Boolean = false,
+    val geminiErrorMessage: String? = null,
+    val isLocalFallback: Boolean = false,
+    val classificationItems: List<PedagogicalClassificationItem> = emptyList(),
     val originalRawText: String = "",
     val extractedUnits: List<ExtractedUnit> = emptyList(),
     val unextractableItems: List<String> = emptyList(),
     val integrityReport: ContentIntegrityReport? = null
 ) {
+    val geminiFailureReason: String?
+        get() = geminiErrorMessage
+
     val totalFileFields: Int
         get() = stageSourceCounts.values.sumOf { it.fileCount }
 
@@ -497,12 +861,15 @@ data class ParseReport(
     val totalUserFields: Int
         get() = stageSourceCounts.values.sumOf { it.userCount }
 
+    val totalLocalRuleFields: Int
+        get() = stageSourceCounts.values.sumOf { it.localRuleCount }
+
     val verificationCompletionPercentage: Int
         get() = integrityReport?.actualCompletionPercentage ?: run {
-            val total = totalFileFields + totalDefaultFields + totalAiFields + totalUserFields
+            val total = totalFileFields + totalDefaultFields + totalAiFields + totalUserFields + totalLocalRuleFields
             if (total == 0) 0
             else {
-                val verifiedFields = totalFileFields + totalUserFields
+                val verifiedFields = totalFileFields + totalUserFields + totalLocalRuleFields
                 val fieldRatio = verifiedFields.toFloat() / total.toFloat()
                 val penalty = if (unclassifiedLines.isNotEmpty() || unextractableItems.isNotEmpty()) 0.85f else 1.0f
                 (fieldRatio * penalty * 100f).toInt().coerceIn(0, if (unclassifiedLines.isNotEmpty() || totalDefaultFields > 0) 99 else 100)
@@ -514,4 +881,5 @@ data class ParseResult(
     val plan: JadhadhaPlan,
     val report: ParseReport
 )
+
 

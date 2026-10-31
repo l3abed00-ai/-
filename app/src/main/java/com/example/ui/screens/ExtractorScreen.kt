@@ -1086,8 +1086,8 @@ fun ExtractorScreen(
                         viewModel.delegateExtractorToBuiltInAi()
                         Toast.makeText(
                             context,
-                            "تم إسناد المهمة إلى الذكاء الاصطناعي المدمج: صُنّفت جميع الأسطر ونُقّحت المراحل بنجاح ✨",
-                            Toast.LENGTH_LONG
+                            "جارٍ تصنيف الأسطر ومراجعتها...",
+                            Toast.LENGTH_SHORT
                         ).show()
                     } else {
                         coroutineScope.launch {
@@ -1105,9 +1105,14 @@ fun ExtractorScreen(
                                 extractedText = rawInputText,
                                 isAiTranscribed = isAiTranscribed
                             )
+                            val toastMsg = if (refined.report.isAiDelegated) {
+                                "تم التصنيف عبر Gemini بنجاح ✨"
+                            } else {
+                                refined.report.geminiFailureReason ?: "تم التصنيف بالقواعد المحلية (LOCAL_RULE) — يرجى مراجعة النتيجة."
+                            }
                             Toast.makeText(
                                 context,
-                                "تم إسناد المهمة إلى الذكاء الاصطناعي المدمج: صُنّفت جميع الأسطر ونُقّحت المراحل بنجاح ✨",
+                                toastMsg,
                                 Toast.LENGTH_LONG
                             ).show()
                         }
@@ -1133,7 +1138,7 @@ fun ExtractorScreen(
                     }
                     Toast.makeText(
                         context,
-                        "تم إسناد السطر (${line.lineNumber}) إلى الخانة المختارة بنجاح (المصدر: من الملف ✓)",
+                        "تم إسناد السطر (${line.lineNumber}) إلى الخانة المختارة بنجاح (المصدر: تعديل يدوي ✓)",
                         Toast.LENGTH_SHORT
                     ).show()
                 },
@@ -1182,7 +1187,7 @@ fun ExtractorScreen(
                                 )
                                 Toast.makeText(
                                     context,
-                                    "تم التفريغ الذكي الشامل (AI) وتوزيع 100% من عناصر الجذاذة بنجاح ✨",
+                                    "تم التفريغ الذكي الشامل (AI) وتوزيع عناصر الجذاذة بنجاح ✨",
                                     Toast.LENGTH_LONG
                                 ).show()
                             }.onFailure { err ->
@@ -1336,7 +1341,10 @@ fun ExtractionReviewCard(
                     .testTag("review_summary_banner")
             ) {
                 Column(modifier = Modifier.padding(12.dp)) {
-                    val aiSummarySuffix = if (report.totalAiFields > 0) " (${report.totalAiFields} خانة ذكاء اصطناعي ✨)" else ""
+                    val aiSummarySuffix = buildString {
+                        if (report.totalAiFields > 0) append(" (${report.totalAiFields} خانة Gemini ✨)")
+                        if (report.totalLocalRuleFields > 0) append(" (${report.totalLocalRuleFields} خانة قواعد محلية)")
+                    }
                     Text(
                         text = "«${report.totalFileFields} خانة من ملفك، ${report.totalDefaultFields} خانة افتراضية، ${report.unclassifiedLines.size} سطرًا غير مصنّف»$aiSummarySuffix",
                         style = MaterialTheme.typography.bodyMedium,
@@ -1375,15 +1383,62 @@ fun ExtractionReviewCard(
                         Spacer(modifier = Modifier.width(8.dp))
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = "تم إسناد المهمة إلى نموذج الذكاء الاصطناعي المدمج بنجاح ✨",
+                                text = "تم التصنيف عبر نموذج الذكاء الاصطناعي (Gemini) بنجاح ✨",
                                 style = MaterialTheme.typography.bodyMedium,
                                 fontWeight = FontWeight.Bold,
                                 color = Color(0xFF5B21B6)
                             )
                             Text(
-                                text = "صُنّف ${report.aiClassifiedLinesCount} سطرًا من الملف، وتم تنقيح واستكمال ${report.aiRefinedFieldsCount} خانة وفق تنسيق الجذاذة النموذجية.",
+                                text = "صُنّف ${report.aiClassifiedLinesCount} سطرًا عبر Gemini، وصُنّف ${report.localRuleClassifiedLinesCount} سطرًا بالقواعد المحلية.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = Color(0xFF4C1D95)
+                            )
+                        }
+                    }
+                }
+            } else if (report.geminiFailed || report.isLocalFallback) {
+                Surface(
+                    color = Color(0xFFFEF3C7),
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .border(1.dp, Color(0xFFD97706), RoundedCornerShape(10.dp))
+                        .testTag("local_fallback_warning_banner")
+                ) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = Icons.Default.WarningAmber,
+                                contentDescription = null,
+                                tint = Color(0xFFB45309),
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "تنبيه: النتيجة الحالية مصنّفة بالقواعد المحلية وتحتاج للمراجعة",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFF92400E)
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = report.geminiFailureReason ?: "تعذر الاتصال بـ Gemini؛ تم استخدام القواعد المحلية كبديل صريح.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color(0xFF78350F)
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        AppOutlinedButton(
+                            onClick = onDelegateToBuiltInAi,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("retry_gemini_classification_button")
+                        ) {
+                            ButtonLabel(
+                                text = "إعادة محاولة التصنيف بـ Gemini دون إعادة استيراد الملف",
+                                icon = Icons.Default.AutoAwesome,
+                                style = MaterialTheme.typography.labelMedium,
+                                color = Color(0xFF92400E)
                             )
                         }
                     }
@@ -1402,7 +1457,7 @@ fun ExtractionReviewCard(
                     shape = RoundedCornerShape(10.dp)
                 ) {
                     ButtonLabel(
-                        text = "إسناد المهمة إلى الذكاء الاصطناعي المدمج (تصنيف الأسطر وتنقيح المراحل) ✨",
+                        text = "إسناد المهمة إلى الذكاء الاصطناعي (Gemini) لتصنيف الأسطر ✨",
                         icon = Icons.Default.AutoAwesome,
                         style = MaterialTheme.typography.labelLarge
                     )
@@ -1463,7 +1518,7 @@ fun ExtractionReviewCard(
                 }
             }
 
-            // 3. Per-Stage Source Breakdown (FILE vs AI vs DEFAULT per stage)
+            // 3. Per-Stage Source Breakdown (FILE vs LOCAL_RULE vs AI vs DEFAULT per stage)
             Surface(
                 color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
                 shape = RoundedCornerShape(10.dp),
@@ -1481,9 +1536,10 @@ fun ExtractionReviewCard(
                     stages.forEach { stageMeta ->
                         val count = report.stageSourceCounts[stageMeta.key]
                         val fileCount = count?.fileCount ?: 0
+                        val localRuleCount = count?.localRuleCount ?: 0
                         val aiCount = count?.aiCount ?: 0
                         val defCount = count?.defaultCount ?: 0
-                        val isAllDefault = fileCount == 0 && aiCount == 0 && defCount > 0
+                        val isAllDefault = fileCount == 0 && localRuleCount == 0 && aiCount == 0 && defCount > 0
 
                         Row(
                             modifier = Modifier.fillMaxWidth(),
@@ -1506,6 +1562,20 @@ fun ExtractionReviewCard(
                                             text = "$fileCount من الملف",
                                             style = MaterialTheme.typography.labelSmall,
                                             color = Color(0xFF065F46),
+                                            fontWeight = FontWeight.Bold,
+                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                        )
+                                    }
+                                }
+                                if (localRuleCount > 0) {
+                                    Surface(
+                                        color = Color(0xFFE0F2FE),
+                                        shape = RoundedCornerShape(6.dp)
+                                    ) {
+                                        Text(
+                                            text = "$localRuleCount قواعد محلية",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = Color(0xFF0369A1),
                                             fontWeight = FontWeight.Bold,
                                             modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
                                         )

@@ -7,11 +7,15 @@ import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
 import android.provider.OpenableColumns
+import com.example.model.DocxTemplateArchive
 import com.example.model.JadhadhaInfo
 import com.example.model.JadhadhaPlan
 import com.example.model.PedagogicalComponent
 import com.example.model.SamplePlans
 import com.example.model.StageCatalog
+import com.example.model.StageData
+import com.example.model.StructuredTable
+import com.example.model.StructuredTableCell
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
@@ -34,6 +38,12 @@ object DocxGenerator {
     // 5-column widths in dxa (Total = 11106 dxa):
     // 12% المراحل (1333) | 18% القدرات والمهارات (1999) | 25% الأنشطة التعليمية التعلمية (2776) | 30% المحتوى (3332) | 15% التقويم والدعم (1666)
     val MAIN_TABLE_COL_WIDTHS = listOf(1333, 1999, 2776, 3332, 1666)
+
+    private val HEADER_FOOTER_XML_REGEX = Regex("^word/(header|footer)\\d*\\.xml$", RegexOption.IGNORE_CASE)
+    private val SECT_PR_REGEX = Regex("""<w:sectPr\b[\s\S]*?</w:sectPr>""")
+    private val ROOT_DOC_ATTR_REGEX = Regex("""<w:document\b([^>]*)>""")
+    private val DRAWING_PARAGRAPH_REGEX = Regex("""<w:p\b[^>]*>(?:(?!</w:p>)[\s\S])*?(?:<w:drawing\b|<w:pict\b|<v:imagedata\b)[\s\S]*?</w:p>""")
+    private val R_FONTS_ASCII_REGEX = Regex("""<w:rFonts\b[^>]*?\bw:(?:cs|ascii)="([^"]+)"""")
 
     /**
      * Saves a custom Model Jadhadha .docx template selected by the user (e.g. from the
@@ -84,6 +94,33 @@ object DocxGenerator {
         }.getOrNull()
     }
 
+    /**
+     * Generates a .docx file directly to [outFile], preserving any provided [templateFile] or
+     * [plan.templateArchive] (including styles, fonts, headers/footers, media/logos, numbering,
+     * relationships, and section properties).
+     */
+    fun generateDocxToFile(outFile: File, plan: JadhadhaPlan, templateFile: File? = null): File {
+        outFile.parentFile?.mkdirs()
+        val injectedFromFile = if (templateFile != null && templateFile.exists() && templateFile.length() > 0L) {
+            runCatching { generateFromTemplateDocx(templateFile, outFile, plan) }.getOrDefault(false)
+        } else {
+            false
+        }
+
+        if (!injectedFromFile) {
+            val archive = plan.templateArchive
+            val injectedFromArchive = if (archive != null && archive.zipEntries.isNotEmpty()) {
+                runCatching { generateFromTemplateArchive(archive, outFile, plan) }.getOrDefault(false)
+            } else {
+                false
+            }
+            if (!injectedFromArchive) {
+                writeStandaloneModelDocx(outFile, plan)
+            }
+        }
+        return outFile
+    }
+
     fun generateDocx(context: Context, plan: JadhadhaPlan, saveToDownloads: Boolean = true): File {
         val safeTitle = plan.topic.replace(Regex("[^\\w\\p{L}]+"), "_").take(50).ifEmpty { "jadhadha" }
         val fileName = "جذاذة_${safeTitle}.docx"
@@ -91,16 +128,7 @@ object DocxGenerator {
         val outFile = File(outDir, fileName)
 
         val customTemplate = getModelTemplateFile(context, plan.componentType)
-        if (customTemplate != null) {
-            val injected = runCatching {
-                generateFromTemplateDocx(customTemplate, outFile, plan)
-            }.getOrDefault(false)
-            if (!injected) {
-                writeStandaloneModelDocx(outFile, plan)
-            }
-        } else {
-            writeStandaloneModelDocx(outFile, plan)
-        }
+        generateDocxToFile(outFile, plan, customTemplate)
 
         // Also copy to app's external documents folder if available
         runCatching {
@@ -126,17 +154,28 @@ object DocxGenerator {
             addZipEntry(zip, "docProps/core.xml", buildCorePropsXml(plan.topic))
             addZipEntry(zip, "docProps/app.xml", buildAppPropsXml())
             addZipEntry(zip, "word/styles.xml", buildStylesXml())
-            addZipEntry(zip, "word/document.xml", buildDocumentXml(plan, preservedSectPr = null))
+            addZipEntry(
+                zip,
+                "word/document.xml",
+                buildDocumentXml(
+                    plan = plan,
+                    preservedSectPr = null,
+                    rootAttributes = null,
+                    leadingBodyXml = "",
+                    trailingBodyXml = "",
+                    fontName = FONT_NAME
+                )
+            )
         }
     }
 
     /**
-     * Clones the user's custom Model Jadhadha .docx from "الملف التربوي" (preserving its styles.xml,
-     * theme1.xml, fontTable.xml, settings.xml, and sectPr) while injecting the new lesson content
-     * formatted with Sakkal Majalla 10pt bold.
+     * Clones a template .docx file (preserving its styles.xml, theme1.xml, fontTable.xml,
+     * numbering.xml, settings.xml, header.xml, footer.xml, word/media/ images, relationships,
+     * leading/trailing logos/drawings, and sectPr) while injecting the complete lesson content.
      */
-    private fun generateFromTemplateDocx(templateFile: File, outFile: File, plan: JadhadhaPlan): Boolean {
-        val entries = mutableMapOf<String, ByteArray>()
+    fun generateFromTemplateDocx(templateFile: File, outFile: File, plan: JadhadhaPlan): Boolean {
+        val entries = LinkedHashMap<String, ByteArray>()
         ZipInputStream(FileInputStream(templateFile)).use { zis ->
             var entry = zis.nextEntry
             while (entry != null) {
@@ -150,10 +189,101 @@ object DocxGenerator {
         if (!entries.containsKey("word/document.xml")) return false
 
         val originalDocXml = String(entries["word/document.xml"]!!, StandardCharsets.UTF_8)
-        val sectPrMatch = Regex("""<w:sectPr\b[\s\S]*?</w:sectPr>""").find(originalDocXml)?.value
+        val sectPrMatch = SECT_PR_REGEX.find(originalDocXml)?.value
+        val rootAttrs = ROOT_DOC_ATTR_REGEX.find(originalDocXml)?.groupValues?.getOrNull(1)?.trim().orEmpty()
 
-        entries["word/document.xml"] = buildDocumentXml(plan, preservedSectPr = sectPrMatch)
-            .toByteArray(StandardCharsets.UTF_8)
+        val firstTblIdx = originalDocXml.indexOf("<w:tbl")
+        val leadingDrawings = if (firstTblIdx > 0) {
+            DRAWING_PARAGRAPH_REGEX.findAll(originalDocXml.substring(0, firstTblIdx))
+                .map { it.value }.toList()
+        } else {
+            DRAWING_PARAGRAPH_REGEX.findAll(originalDocXml)
+                .map { it.value }.toList()
+        }
+
+        val lastTblEnd = originalDocXml.lastIndexOf("</w:tbl>")
+        val trailingDrawings = if (lastTblEnd >= 0) {
+            DRAWING_PARAGRAPH_REGEX.findAll(originalDocXml.substring(lastTblEnd + 8))
+                .map { it.value }.toList()
+        } else {
+            emptyList()
+        }
+
+        val stylesXml = entries["word/styles.xml"]?.toString(StandardCharsets.UTF_8).orEmpty()
+        val detectedFont = R_FONTS_ASCII_REGEX.find(stylesXml)?.groupValues?.getOrNull(1)
+            ?.takeIf { it.isNotBlank() }
+
+        val archiveMeta = DocxTemplateArchive(
+            zipEntries = entries,
+            documentRootAttributes = rootAttrs,
+            preservedSectPrXml = sectPrMatch,
+            preservedLeadingElementsXml = leadingDrawings,
+            preservedTrailingElementsXml = trailingDrawings,
+            primaryFontName = detectedFont
+        )
+        return writeFromTemplateEntries(entries, outFile, plan, archiveMeta)
+    }
+
+    /**
+     * Generates a .docx from an in-memory [DocxTemplateArchive] captured when a template/source
+     * .docx was imported via [com.example.extractor.DocumentFileReader].
+     */
+    fun generateFromTemplateArchive(archive: DocxTemplateArchive, outFile: File, plan: JadhadhaPlan): Boolean {
+        if (!archive.zipEntries.containsKey("word/document.xml")) return false
+        val mutableEntries = LinkedHashMap<String, ByteArray>()
+        archive.zipEntries.forEach { (k, v) -> mutableEntries[k] = v.copyOf() }
+        return writeFromTemplateEntries(mutableEntries, outFile, plan, archive)
+    }
+
+    private fun writeFromTemplateEntries(
+        entries: MutableMap<String, ByteArray>,
+        outFile: File,
+        plan: JadhadhaPlan,
+        archiveMeta: DocxTemplateArchive?
+    ): Boolean {
+        val originalDocXml = entries["word/document.xml"]?.toString(StandardCharsets.UTF_8) ?: return false
+        val sectPr = archiveMeta?.preservedSectPrXml
+            ?: SECT_PR_REGEX.find(originalDocXml)?.value
+        val rootAttrs = archiveMeta?.documentRootAttributes?.takeIf { it.isNotBlank() }
+            ?: ROOT_DOC_ATTR_REGEX.find(originalDocXml)?.groupValues?.getOrNull(1)?.trim()
+        val leadingXml = replaceTemplatePlaceholders(
+            archiveMeta?.preservedLeadingElementsXml?.joinToString("\n").orEmpty(),
+            plan
+        )
+        val trailingXml = replaceTemplatePlaceholders(
+            archiveMeta?.preservedTrailingElementsXml?.joinToString("\n").orEmpty(),
+            plan
+        )
+        val fontName = archiveMeta?.primaryFontName?.takeIf { it.isNotBlank() } ?: FONT_NAME
+
+        // Replace placeholders inside any header*.xml or footer*.xml while preserving their XML structure & logos
+        for (entryName in entries.keys.toList()) {
+            if (HEADER_FOOTER_XML_REGEX.matches(entryName)) {
+                val xmlText = String(entries[entryName]!!, StandardCharsets.UTF_8)
+                val updated = replaceTemplatePlaceholders(xmlText, plan)
+                entries[entryName] = updated.toByteArray(StandardCharsets.UTF_8)
+            }
+        }
+
+        // Update <dc:title> in docProps/core.xml if present
+        if (entries.containsKey("docProps/core.xml") && plan.topic.isNotBlank()) {
+            val coreXml = String(entries["docProps/core.xml"]!!, StandardCharsets.UTF_8)
+            val updatedCore = if (coreXml.contains("<dc:title>")) {
+                coreXml.replace(Regex("<dc:title>[\\s\\S]*?</dc:title>"), "<dc:title>${escapeXml(plan.topic)}</dc:title>")
+            } else {
+                coreXml
+            }
+            entries["docProps/core.xml"] = updatedCore.toByteArray(StandardCharsets.UTF_8)
+        }
+
+        entries["word/document.xml"] = buildDocumentXml(
+            plan = plan,
+            preservedSectPr = sectPr,
+            rootAttributes = rootAttrs,
+            leadingBodyXml = leadingXml,
+            trailingBodyXml = trailingXml,
+            fontName = fontName
+        ).toByteArray(StandardCharsets.UTF_8)
 
         ZipOutputStream(FileOutputStream(outFile)).use { zos ->
             for ((name, bytes) in entries) {
@@ -163,6 +293,38 @@ object DocxGenerator {
             }
         }
         return true
+    }
+
+    private fun replaceTemplatePlaceholders(xml: String, plan: JadhadhaPlan): String {
+        if (xml.isEmpty()) return xml
+        val compTitle = plan.info.component.ifBlank { plan.componentType.title }
+        val replacements = mapOf(
+            "{{الموضوع}}" to escapeXml(plan.topic),
+            "{{عنوان_الدرس}}" to escapeXml(plan.topic),
+            "{{المؤسسة}}" to escapeXml(plan.info.schoolName),
+            "{{الأستاذ}}" to escapeXml(plan.info.teacherName),
+            "{{المستوى}}" to escapeXml(plan.info.level),
+            "{{الفئة_المستهدفة}}" to escapeXml(plan.info.level),
+            "{{الوحدة}}" to escapeXml(plan.info.unit),
+            "{{المجال}}" to escapeXml(plan.info.domain),
+            "{{المكون}}" to escapeXml(compTitle),
+            "{{المادة}}" to escapeXml(compTitle),
+            "{{المدة}}" to escapeXml(plan.info.duration),
+            "{{مدة_الإنجاز}}" to escapeXml(plan.info.duration),
+            "{{الوسائل}}" to escapeXml(plan.info.materials),
+            "{{الوسائل_التعليمية}}" to escapeXml(plan.info.materials),
+            "{{المرجع}}" to escapeXml(plan.info.reference),
+            "{{الكفاية_التواصلية}}" to escapeXml(plan.info.communicativeComp),
+            "{{الكفاية_المنهجية}}" to escapeXml(plan.info.methodologicalComp),
+            "{{الكفاية_المعرفية}}" to escapeXml(plan.info.culturalComp)
+        )
+        var result = xml
+        for ((token, value) in replacements) {
+            if (result.contains(token)) {
+                result = result.replace(token, value)
+            }
+        }
+        return result
     }
 
     /**
@@ -291,12 +453,12 @@ object DocxGenerator {
   <Application>الجذاذة النموذجية للمنهاج المغربي</Application>
 </Properties>"""
 
-    private fun buildStylesXml(): String = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+    private fun buildStylesXml(fontName: String = FONT_NAME): String = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
   <w:docDefaults>
     <w:rPrDefault>
       <w:rPr>
-        <w:rFonts w:ascii="$FONT_NAME" w:hAnsi="$FONT_NAME" w:cs="$FONT_NAME"/>
+        <w:rFonts w:ascii="${escapeXml(fontName)}" w:hAnsi="${escapeXml(fontName)}" w:cs="${escapeXml(fontName)}"/>
         <w:b/>
         <w:bCs/>
         <w:sz w:val="$FONT_SIZE_HALF_PT"/>
@@ -315,24 +477,94 @@ object DocxGenerator {
   </w:docDefaults>
 </w:styles>"""
 
-    private fun buildDocumentXml(plan: JadhadhaPlan, preservedSectPr: String?): String {
+    private fun buildDocumentRootOpenTag(rootAttributes: String?): String {
+        val requiredNamespaces = linkedMapOf(
+            "xmlns:w" to "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
+            "xmlns:r" to "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+            "xmlns:wp" to "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing",
+            "xmlns:a" to "http://schemas.openxmlformats.org/drawingml/2006/main",
+            "xmlns:pic" to "http://schemas.openxmlformats.org/drawingml/2006/picture",
+            "xmlns:v" to "urn:schemas-microsoft-com:vml",
+            "xmlns:mc" to "http://schemas.openxmlformats.org/markup-compatibility/2006",
+            "xmlns:wps" to "http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
+        )
+        val mergedAttrs = StringBuilder()
+        val existingAttrText = rootAttributes?.trim().orEmpty()
+        if (existingAttrText.isNotEmpty()) {
+            mergedAttrs.append(" ").append(existingAttrText)
+        }
+        for ((nsKey, nsUri) in requiredNamespaces) {
+            if (!existingAttrText.contains("$nsKey=")) {
+                mergedAttrs.append(" ").append(nsKey).append("=\"").append(nsUri).append("\"")
+            }
+        }
+        return "<w:document$mergedAttrs>"
+    }
+
+    private fun buildDocumentXml(
+        plan: JadhadhaPlan,
+        preservedSectPr: String?,
+        rootAttributes: String? = null,
+        leadingBodyXml: String = "",
+        trailingBodyXml: String = "",
+        fontName: String = FONT_NAME
+    ): String {
         val sb = StringBuilder()
-        sb.append("""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
-  <w:body>
-""")
+        sb.append("""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>""")
+        sb.append("\n")
+        sb.append(buildDocumentRootOpenTag(rootAttributes))
+        sb.append("\n  <w:body>\n")
+
+        if (leadingBodyXml.isNotBlank()) {
+            sb.append("    ").append(leadingBodyXml.trim()).append("\n")
+        }
 
         if (plan.componentType == PedagogicalComponent.EXPRESSION) {
-            appendExpressionFourSessionTables(sb, plan)
+            appendExpressionFourSessionTables(sb, plan, fontName)
         } else {
             // 1. Official 7-Row x 4-Column RTL Header Table
-            appendHeaderTable(sb, plan)
+            appendHeaderTable(sb, plan, fontName = fontName)
 
             // Compact spacer paragraph
-            sb.append("""<w:p><w:pPr><w:bidi/><w:spacing w:before="0" w:after="60"/></w:pPr></w:p>""")
+            sb.append("""    <w:p><w:pPr><w:bidi/><w:spacing w:before="0" w:after="60"/></w:pPr></w:p>""")
+            sb.append("\n")
 
             // 2. Official 5-Column RTL Main Stages Table
-            appendStagesTable(sb, plan)
+            appendStagesTable(sb, plan, fontName)
+        }
+
+        // 3. Any custom / additional structured tables preserved in the plan
+        for (customTbl in plan.customTables) {
+            sb.append("""    <w:p><w:pPr><w:bidi/><w:spacing w:before="0" w:after="60"/></w:pPr></w:p>""")
+            sb.append("\n")
+            appendStructuredWordTable(
+                sb = sb,
+                table = customTbl,
+                isNested = false,
+                availableWidthDxa = 11106,
+                fontName = fontName
+            )
+        }
+
+        // 4. Any extra body paragraphs or unclassified lines so zero extracted units are ever lost
+        val alreadyRenderedTexts = collectRenderedTextsForDedup(plan)
+        val remainingParagraphs = LinkedHashSet<String>()
+        plan.extraParagraphs.map { it.trim() }.filter { it.isNotEmpty() }.forEach { p ->
+            if (!alreadyRenderedTexts.contains(p)) {
+                remainingParagraphs.add(p)
+            }
+        }
+        plan.unclassifiedItems.map { it.trim() }.filter { it.isNotEmpty() }.forEach { u ->
+            if (!alreadyRenderedTexts.contains(u)) {
+                remainingParagraphs.add(u)
+            }
+        }
+        for (extraPara in remainingParagraphs) {
+            appendParagraph(sb, extraPara, isCenter = false, bold = true, fontName = fontName)
+        }
+
+        if (trailingBodyXml.isNotBlank()) {
+            sb.append("    ").append(trailingBodyXml.trim()).append("\n")
         }
 
         // Section properties with compact 400 dxa (~0.28 in) margins
@@ -352,6 +584,52 @@ object DocxGenerator {
         return sb.toString()
     }
 
+    private fun collectRenderedTextsForDedup(plan: JadhadhaPlan): Set<String> {
+        val set = HashSet<String>()
+        fun addText(s: String) {
+            val t = s.trim()
+            if (t.isNotEmpty()) {
+                set.add(t)
+                set.add(t.removePrefix("-").removePrefix("+").removePrefix("*").trim())
+            }
+        }
+        addText(plan.topic)
+        addText(plan.info.level)
+        addText(plan.info.unit)
+        addText(plan.info.domain)
+        addText(plan.info.component)
+        addText(plan.info.duration)
+        addText(plan.info.materials)
+        addText(plan.info.reference)
+        addText(plan.info.teacherName)
+        addText(plan.info.schoolName)
+        addText(plan.info.communicativeComp)
+        addText(plan.info.methodologicalComp)
+        addText(plan.info.culturalComp)
+
+        fun collectTableTexts(tbl: StructuredTable) {
+            tbl.toPipeLines().forEach { addText(it) }
+            for (r in tbl.rows) {
+                for (c in r.cells) {
+                    addText(c.text)
+                    c.paragraphs.forEach { addText(it) }
+                    c.nestedTables.forEach { collectTableTexts(it) }
+                }
+            }
+        }
+
+        plan.stages.values.forEach { stage ->
+            stage.abil.forEach { addText(it) }
+            stage.teacher.forEach { addText(it) }
+            stage.learner.forEach { addText(it) }
+            stage.content.forEach { addText(it) }
+            stage.eval.forEach { addText(it) }
+            stage.tables.forEach { collectTableTexts(it) }
+        }
+        plan.customTables.forEach { collectTableTexts(it) }
+        return set
+    }
+
     /**
      * Generates 4 independent Header + 5-Column Stages tables for التعبير والإنشاء:
      * 1. حصة الاكتساب
@@ -359,7 +637,11 @@ object DocxGenerator {
      * 3. حصة الإنتاج
      * 4. حصة التصحيح
      */
-    private fun appendExpressionFourSessionTables(sb: StringBuilder, plan: JadhadhaPlan) {
+    private fun appendExpressionFourSessionTables(
+        sb: StringBuilder,
+        plan: JadhadhaPlan,
+        fontName: String = FONT_NAME
+    ) {
         data class ExpressionSessionSpec(
             val sessionNumber: Int,
             val componentLabel: String,
@@ -439,13 +721,21 @@ object DocxGenerator {
             )
         )
 
+        val renderedStageKeys = mutableSetOf<String>()
         var renderedAnySession = false
-        for (spec in sessionSpecs) {
+        for ((index, spec) in sessionSpecs.withIndex()) {
             val activeKeys = spec.stageKeys.filter { plan.stages.containsKey(it) }
-            val keysToRender = when {
+            val baseKeys = when {
                 activeKeys.isNotEmpty() -> activeKeys
                 plan.stages.containsKey(spec.legacyKey) -> listOf(spec.legacyKey)
                 else -> spec.stageKeys
+            }
+            renderedStageKeys.addAll(baseKeys)
+            val keysToRender = if (index == sessionSpecs.lastIndex) {
+                val extraStageKeys = plan.stages.keys.filter { it !in renderedStageKeys }
+                baseKeys + extraStageKeys
+            } else {
+                baseKeys
             }
 
             if (renderedAnySession) {
@@ -454,9 +744,9 @@ object DocxGenerator {
             }
 
             val sessionPlan = plan.copy(info = spec.overrideInfo(plan.info))
-            appendHeaderTable(sb, sessionPlan, overrideComponentTitle = spec.componentLabel)
+            appendHeaderTable(sb, sessionPlan, overrideComponentTitle = spec.componentLabel, fontName = fontName)
             sb.append("""<w:p><w:pPr><w:bidi/><w:spacing w:before="0" w:after="60"/></w:pPr></w:p>""")
-            appendStagesTableForKeys(sb, sessionPlan, keysToRender, stageHeaderLabel = "المراحل")
+            appendStagesTableForKeys(sb, sessionPlan, keysToRender, stageHeaderLabel = "المراحل", fontName = fontName)
             renderedAnySession = true
         }
     }
@@ -474,7 +764,8 @@ object DocxGenerator {
     private fun appendHeaderTable(
         sb: StringBuilder,
         plan: JadhadhaPlan,
-        overrideComponentTitle: String? = null
+        overrideComponentTitle: String? = null,
+        fontName: String = FONT_NAME
     ) {
         val borders = """<w:tblBorders>
       <w:top w:val="single" w:sz="6" w:space="0" w:color="000000"/>
@@ -519,7 +810,8 @@ object DocxGenerator {
             leftLabel = "الفئة المستهدفة :",
             leftVal = plan.info.level,
             bg = null,
-            colWidths = colWidths
+            colWidths = colWidths,
+            fontName = fontName
         )
 
         // Row 2 (#F2F2F2): المجال & الوسائل التعليمية
@@ -530,7 +822,8 @@ object DocxGenerator {
             leftLabel = "الوسائل التعليمية :",
             leftVal = plan.info.materials,
             bg = HEADER_BG_HEX,
-            colWidths = colWidths
+            colWidths = colWidths,
+            fontName = fontName
         )
 
         // Row 3 (White): المكون & الكفايات المستهدفة / الأهداف التعلمية (underlined, spanned 2 cols on left)
@@ -541,7 +834,8 @@ object DocxGenerator {
             leftSpannedText = competenciesHeader,
             bg = null,
             colWidths = colWidths,
-            underlineLeft = true
+            underlineLeft = true,
+            fontName = fontName
         )
 
         // Row 4 (#F2F2F2): الموضوع & - كفاية تواصلية
@@ -552,7 +846,8 @@ object DocxGenerator {
             leftSpannedText = "- كفاية تواصلية: ${plan.info.communicativeComp}",
             bg = HEADER_BG_HEX,
             colWidths = colWidths,
-            rightValSz = FONT_TITLE_SIZE
+            rightValSz = FONT_TITLE_SIZE,
+            fontName = fontName
         )
 
         // Row 5 (White): مدة الإنجاز & - كفاية منهجية
@@ -562,7 +857,8 @@ object DocxGenerator {
             rightVal = plan.info.duration,
             leftSpannedText = "- كفاية منهجية: ${plan.info.methodologicalComp}",
             bg = null,
-            colWidths = colWidths
+            colWidths = colWidths,
+            fontName = fontName
         )
 
         // Row 6 (#F2F2F2): المرجع & - كفاية معرفية
@@ -572,7 +868,8 @@ object DocxGenerator {
             rightVal = plan.info.reference,
             leftSpannedText = "- كفاية معرفية: ${plan.info.culturalComp}",
             bg = HEADER_BG_HEX,
-            colWidths = colWidths
+            colWidths = colWidths,
+            fontName = fontName
         )
 
         // Row 7 (White): الأستاذ & المؤسسة
@@ -583,7 +880,8 @@ object DocxGenerator {
             leftLabel = "المؤسسة :",
             leftVal = plan.info.schoolName,
             bg = null,
-            colWidths = colWidths
+            colWidths = colWidths,
+            fontName = fontName
         )
 
         sb.append("    </w:tbl>\n")
@@ -596,13 +894,14 @@ object DocxGenerator {
         leftLabel: String,
         leftVal: String,
         bg: String?,
-        colWidths: List<Int>
+        colWidths: List<Int>,
+        fontName: String = FONT_NAME
     ) {
         sb.append("      <w:tr>\n")
-        appendCell(sb, rightLabel, widthDxa = colWidths[0], bgHex = bg, bold = true, isCenter = true)
-        appendCell(sb, rightVal, widthDxa = colWidths[1], bgHex = bg, bold = true, isCenter = true)
-        appendCell(sb, leftLabel, widthDxa = colWidths[2], bgHex = bg, bold = true, isCenter = true)
-        appendCell(sb, leftVal, widthDxa = colWidths[3], bgHex = bg, bold = true, isCenter = true)
+        appendCell(sb, rightLabel, widthDxa = colWidths[0], bgHex = bg, bold = true, isCenter = true, fontName = fontName)
+        appendCell(sb, rightVal, widthDxa = colWidths[1], bgHex = bg, bold = true, isCenter = true, fontName = fontName)
+        appendCell(sb, leftLabel, widthDxa = colWidths[2], bgHex = bg, bold = true, isCenter = true, fontName = fontName)
+        appendCell(sb, leftVal, widthDxa = colWidths[3], bgHex = bg, bold = true, isCenter = true, fontName = fontName)
         sb.append("      </w:tr>\n")
     }
 
@@ -614,12 +913,13 @@ object DocxGenerator {
         bg: String?,
         colWidths: List<Int>,
         underlineLeft: Boolean = false,
-        rightValSz: Int = FONT_SIZE_HALF_PT
+        rightValSz: Int = FONT_SIZE_HALF_PT,
+        fontName: String = FONT_NAME
     ) {
         val leftWidth = colWidths[2] + colWidths[3]
         sb.append("      <w:tr>\n")
-        appendCell(sb, rightLabel, widthDxa = colWidths[0], bgHex = bg, bold = true, isCenter = true)
-        appendCell(sb, rightVal, widthDxa = colWidths[1], bgHex = bg, bold = true, isCenter = true, sz = rightValSz)
+        appendCell(sb, rightLabel, widthDxa = colWidths[0], bgHex = bg, bold = true, isCenter = true, fontName = fontName)
+        appendCell(sb, rightVal, widthDxa = colWidths[1], bgHex = bg, bold = true, isCenter = true, sz = rightValSz, fontName = fontName)
         sb.append("        <w:tc>\n")
         sb.append("          <w:tcPr>\n")
         sb.append("            <w:tcW w:w=\"$leftWidth\" w:type=\"dxa\"/>\n")
@@ -631,15 +931,19 @@ object DocxGenerator {
         sb.append("            <w:tcMar><w:top w:w=\"20\" w:type=\"dxa\"/><w:bottom w:w=\"20\" w:type=\"dxa\"/><w:left w:w=\"60\" w:type=\"dxa\"/><w:right w:w=\"60\" w:type=\"dxa\"/></w:tcMar>\n")
         sb.append("          </w:tcPr>\n")
         if (underlineLeft) {
-            appendUnderlinedParagraph(sb, leftSpannedText, "", isCenter = true)
+            appendUnderlinedParagraph(sb, leftSpannedText, "", isCenter = true, fontName = fontName)
         } else {
-            appendParagraph(sb, leftSpannedText, isCenter = true, bold = true)
+            appendParagraph(sb, leftSpannedText, isCenter = true, bold = true, fontName = fontName)
         }
         sb.append("        </w:tc>\n")
         sb.append("      </w:tr>\n")
     }
 
-    private fun appendStagesTable(sb: StringBuilder, plan: JadhadhaPlan) {
+    private fun appendStagesTable(
+        sb: StringBuilder,
+        plan: JadhadhaPlan,
+        fontName: String = FONT_NAME
+    ) {
         when (plan.componentType) {
             PedagogicalComponent.READING -> {
                 val colWidths = MAIN_TABLE_COL_WIDTHS
@@ -659,24 +963,30 @@ object DocxGenerator {
                 sb.append("      </w:tblGrid>\n")
 
                 // Session 1 Banner Row + 5-column Header Row
-                appendSessionBanner(sb, "الحصة الأولى: تأطير النص والقراءة التوجيهية", pageBreak = false)
-                appendMainTableHeaderRow(sb, colWidths, stageColLabel = "المقاطع")
+                appendSessionBanner(sb, "الحصة الأولى: تأطير النص والقراءة التوجيهية", pageBreak = false, fontName = fontName)
+                appendMainTableHeaderRow(sb, colWidths, stageColLabel = "المقاطع", fontName = fontName)
 
                 val session1Keys = listOf("diagnostic", "observation", "comprehension")
                 session1Keys.forEach { key ->
-                    appendStageRow(sb, key, plan, colWidths)
+                    appendStageRow(sb, key, plan, colWidths, fontName = fontName)
                 }
 
                 // Session 2 Banner Row
-                appendSessionBanner(sb, "الحصة الثانية: القراءة التحليلية والتركيبية", pageBreak = true)
-                appendMainTableHeaderRow(sb, colWidths, stageColLabel = "مقاطع الدرس", evalColLabel = "تقويم ودعم")
+                appendSessionBanner(sb, "الحصة الثانية: القراءة التحليلية والتركيبية", pageBreak = true, fontName = fontName)
+                appendMainTableHeaderRow(sb, colWidths, stageColLabel = "مقاطع الدرس", evalColLabel = "تقويم ودعم", fontName = fontName)
 
                 if (plan.stages.containsKey("session2_intro")) {
-                    appendStageRow(sb, "session2_intro", plan, colWidths)
+                    appendStageRow(sb, "session2_intro", plan, colWidths, fontName = fontName)
                 }
                 val session2Keys = listOf("analysis", "synthesis", "investment")
                 session2Keys.forEach { key ->
-                    appendStageRow(sb, key, plan, colWidths)
+                    appendStageRow(sb, key, plan, colWidths, fontName = fontName)
+                }
+
+                // Render any custom/additional stage keys so no stage is ever dropped
+                val renderedKeys = (session1Keys + session2Keys + "session2_intro").toSet()
+                plan.stages.keys.filter { it !in renderedKeys }.forEach { extraKey ->
+                    appendStageRow(sb, extraKey, plan, colWidths, fontName = fontName)
                 }
 
                 sb.append("    </w:tbl>\n")
@@ -693,12 +1003,14 @@ object DocxGenerator {
                     }
                     add("lang_synthesis")
                     add("lang_application")
+                    val standardSet = setOf("lang_diagnostic", "lang_observation", "lang_analysis", "lang_synthesis", "lang_application")
+                    plan.stages.keys.filter { it !in standardSet }.forEach { add(it) }
                 }
-                appendStagesTableForKeys(sb, plan, langKeys, stageHeaderLabel = "المراحل")
+                appendStagesTableForKeys(sb, plan, langKeys, stageHeaderLabel = "المراحل", fontName = fontName)
             }
 
             PedagogicalComponent.EXPRESSION -> {
-                appendExpressionFourSessionTables(sb, plan)
+                appendExpressionFourSessionTables(sb, plan, fontName)
             }
         }
     }
@@ -707,7 +1019,8 @@ object DocxGenerator {
         sb: StringBuilder,
         plan: JadhadhaPlan,
         stageKeys: List<String>,
-        stageHeaderLabel: String = "المراحل"
+        stageHeaderLabel: String = "المراحل",
+        fontName: String = FONT_NAME
     ) {
         val colWidths = MAIN_TABLE_COL_WIDTHS
         val borders = buildMainTableBorders()
@@ -725,10 +1038,10 @@ object DocxGenerator {
         colWidths.forEach { w -> sb.append("        <w:gridCol w:w=\"$w\"/>\n") }
         sb.append("      </w:tblGrid>\n")
 
-        appendMainTableHeaderRow(sb, colWidths, stageColLabel = stageHeaderLabel)
+        appendMainTableHeaderRow(sb, colWidths, stageColLabel = stageHeaderLabel, fontName = fontName)
 
         stageKeys.forEach { key ->
-            appendStageRow(sb, key, plan, colWidths)
+            appendStageRow(sb, key, plan, colWidths, fontName = fontName)
         }
 
         sb.append("    </w:tbl>\n")
@@ -747,9 +1060,11 @@ object DocxGenerator {
         sb: StringBuilder,
         colWidths: List<Int>,
         stageColLabel: String = "المراحل",
-        evalColLabel: String = "التقويم والدعم"
+        evalColLabel: String = "التقويم والدعم",
+        fontName: String = FONT_NAME
     ) {
         sb.append("      <w:tr>\n")
+        sb.append("        <w:trPr><w:tblHeader/></w:trPr>\n")
         val headers = listOf(
             stageColLabel,
             "القدرات والمهارات",
@@ -765,13 +1080,19 @@ object DocxGenerator {
                 bgHex = TABLE_HEADER_BG_HEX,
                 textColorHex = "000000",
                 bold = true,
-                isCenter = true
+                isCenter = true,
+                fontName = fontName
             )
         }
         sb.append("      </w:tr>\n")
     }
 
-    private fun appendSessionBanner(sb: StringBuilder, title: String, pageBreak: Boolean) {
+    private fun appendSessionBanner(
+        sb: StringBuilder,
+        title: String,
+        pageBreak: Boolean,
+        fontName: String = FONT_NAME
+    ) {
         sb.append("      <w:tr>\n")
         sb.append("        <w:tc>\n")
         sb.append("          <w:tcPr>\n")
@@ -790,7 +1111,7 @@ object DocxGenerator {
         sb.append("            </w:pPr>\n")
         sb.append("            <w:r>\n")
         sb.append("              <w:rPr>\n")
-        sb.append("                <w:rFonts w:ascii=\"$FONT_NAME\" w:hAnsi=\"$FONT_NAME\" w:cs=\"$FONT_NAME\"/>\n")
+        sb.append("                <w:rFonts w:ascii=\"${escapeXml(fontName)}\" w:hAnsi=\"${escapeXml(fontName)}\" w:cs=\"${escapeXml(fontName)}\"/>\n")
         sb.append("                <w:b/><w:bCs/>\n")
         sb.append("                <w:color w:val=\"000000\"/>\n")
         sb.append("                <w:sz w:val=\"20\"/><w:szCs w:val=\"20\"/>\n")
@@ -804,7 +1125,13 @@ object DocxGenerator {
         sb.append("      </w:tr>\n")
     }
 
-    private fun appendStageRow(sb: StringBuilder, key: String, plan: JadhadhaPlan, widths: List<Int>) {
+    private fun appendStageRow(
+        sb: StringBuilder,
+        key: String,
+        plan: JadhadhaPlan,
+        widths: List<Int>,
+        fontName: String = FONT_NAME
+    ) {
         val stageMeta = StageCatalog.getByKey(key)
         val stageTitle = when (key) {
             "lang_analysis" -> "الوصف والتحليل"
@@ -814,27 +1141,35 @@ object DocxGenerator {
             "insha_correction" -> "حصة التصحيح"
             else -> stageMeta?.title ?: key
         }
-        val data = plan.stages[key] ?: com.example.model.StageData()
+        val data = plan.stages[key] ?: StageData()
 
         sb.append("      <w:tr>\n")
 
         // 1. المراحل / المقاطع (12% = 1333 dxa, far right)
-        appendCell(sb, stageTitle, widths[0], bgHex = null, textColorHex = "000000", bold = true, isCenter = true)
+        appendCell(sb, stageTitle, widths[0], bgHex = null, textColorHex = "000000", bold = true, isCenter = true, fontName = fontName)
 
         // 2. القدرات والمهارات (18% = 1999 dxa)
         val abilItems = data.abil.map { formatItem(it, "- ") }
-        appendCellWithLines(sb, abilItems, widths[1], isCenter = true)
+        appendCellWithLines(sb, abilItems, widths[1], isCenter = true, fontName = fontName)
 
-        // 3. الأنشطة التعليمية التعلمية (25% = 2776 dxa)
-        val teacherItems = data.teacher.map { formatItem(it, "- ") }
-        appendCellWithLines(sb, teacherItems, widths[2], isCenter = true)
+        // 3. الأنشطة التعليمية التعلمية (25% = 2776 dxa) — includes both teacher and any distinct learner activities
+        val teacherSet = data.teacher.map { it.trim() }.toSet()
+        val combinedActivities = buildList {
+            data.teacher.forEach { add(formatItem(it, "- ")) }
+            data.learner.forEach { learnerLine ->
+                if (learnerLine.trim().isNotEmpty() && learnerLine.trim() !in teacherSet) {
+                    add(formatItem(learnerLine, "+ "))
+                }
+            }
+        }
+        appendCellWithLines(sb, combinedActivities, widths[2], isCenter = true, fontName = fontName)
 
-        // 4. المحتوى (30% = 3332 dxa, supports underlined labels AND nested [جدول: ...] analytical tables)
-        appendContentCell(sb, data.content, widths[3])
+        // 4. المحتوى (30% = 3332 dxa, supports underlined labels AND structured nested <w:tbl> tables)
+        appendContentCell(sb, data, widths[3], fontName = fontName)
 
         // 5. التقويم والدعم (15% = 1666 dxa, far left)
         val evalItems = data.eval.map { formatItem(it, "+ ") }
-        appendCellWithLines(sb, evalItems, widths[4], isCenter = true)
+        appendCellWithLines(sb, evalItems, widths[4], isCenter = true, fontName = fontName)
 
         sb.append("      </w:tr>\n")
     }
@@ -859,7 +1194,8 @@ object DocxGenerator {
         textColorHex: String = "000000",
         bold: Boolean = true,
         isCenter: Boolean = true,
-        sz: Int = FONT_SIZE_HALF_PT
+        sz: Int = FONT_SIZE_HALF_PT,
+        fontName: String = FONT_NAME
     ) {
         sb.append("        <w:tc>\n")
         sb.append("          <w:tcPr>\n")
@@ -870,7 +1206,7 @@ object DocxGenerator {
         }
         sb.append("            <w:tcMar><w:top w:w=\"40\" w:type=\"dxa\"/><w:bottom w:w=\"40\" w:type=\"dxa\"/><w:left w:w=\"60\" w:type=\"dxa\"/><w:right w:w=\"60\" w:type=\"dxa\"/></w:tcMar>\n")
         sb.append("          </w:tcPr>\n")
-        appendParagraph(sb, text, isCenter = isCenter, bold = bold, textColorHex = textColorHex, sz = sz)
+        appendParagraph(sb, text, isCenter = isCenter, bold = bold, textColorHex = textColorHex, sz = sz, fontName = fontName)
         sb.append("        </w:tc>\n")
     }
 
@@ -878,7 +1214,8 @@ object DocxGenerator {
         sb: StringBuilder,
         lines: List<String>,
         widthDxa: Int,
-        isCenter: Boolean = true
+        isCenter: Boolean = true,
+        fontName: String = FONT_NAME
     ) {
         sb.append("        <w:tc>\n")
         sb.append("          <w:tcPr>\n")
@@ -888,7 +1225,7 @@ object DocxGenerator {
         sb.append("          </w:tcPr>\n")
 
         if (lines.isEmpty()) {
-            appendParagraph(sb, "", isCenter = isCenter, bold = true)
+            appendParagraph(sb, "", isCenter = isCenter, bold = true, fontName = fontName)
         } else {
             lines.forEach { line ->
                 val clean = line.trim()
@@ -896,16 +1233,21 @@ object DocxGenerator {
                     val colonIdx = clean.indexOf(':')
                     val label = clean.substring(0, colonIdx + 1).removePrefix("+").removePrefix("-").trim()
                     val rest = clean.substring(colonIdx + 1).trim()
-                    appendUnderlinedParagraph(sb, label, rest, isCenter = isCenter)
+                    appendUnderlinedParagraph(sb, label, rest, isCenter = isCenter, fontName = fontName)
                 } else {
-                    appendParagraph(sb, clean, isCenter = isCenter, bold = true)
+                    appendParagraph(sb, clean, isCenter = isCenter, bold = true, fontName = fontName)
                 }
             }
         }
         sb.append("        </w:tc>\n")
     }
 
-    private fun appendContentCell(sb: StringBuilder, lines: List<String>, widthDxa: Int) {
+    private fun appendContentCell(
+        sb: StringBuilder,
+        data: StageData,
+        widthDxa: Int,
+        fontName: String = FONT_NAME
+    ) {
         sb.append("        <w:tc>\n")
         sb.append("          <w:tcPr>\n")
         sb.append("            <w:tcW w:w=\"$widthDxa\" w:type=\"dxa\"/>\n")
@@ -913,96 +1255,243 @@ object DocxGenerator {
         sb.append("            <w:tcMar><w:top w:w=\"40\" w:type=\"dxa\"/><w:bottom w:w=\"40\" w:type=\"dxa\"/><w:left w:w=\"60\" w:type=\"dxa\"/><w:right w:w=\"60\" w:type=\"dxa\"/></w:tcMar>\n")
         sb.append("          </w:tcPr>\n")
 
-        if (lines.isEmpty()) {
-            appendParagraph(sb, "", isCenter = true, bold = true)
-        } else {
-            val pendingTableRows = mutableListOf<List<String>>()
+        val lines = data.content
+        val explicitTables = data.tables.toMutableList()
+        val matchedTableIndices = mutableSetOf<Int>()
 
-            fun flushNestedTable() {
-                if (pendingTableRows.isNotEmpty()) {
-                    appendNestedWordTable(sb, pendingTableRows, widthDxa - 120)
-                    pendingTableRows.clear()
+        // Pre-scan [جدول: ...] blocks in lines to match with explicitTables
+        val pipeBlocks = mutableListOf<List<String>>()
+        val tempBlock = mutableListOf<String>()
+        for (line in lines) {
+            val trimmed = line.trim()
+            if (trimmed.startsWith("[جدول:") && trimmed.endsWith("]")) {
+                tempBlock.add(trimmed)
+            } else if (tempBlock.isNotEmpty()) {
+                pipeBlocks.add(tempBlock.toList())
+                tempBlock.clear()
+            }
+        }
+        if (tempBlock.isNotEmpty()) {
+            pipeBlocks.add(tempBlock.toList())
+        }
+
+        val blockToMatchedTable = mutableMapOf<Int, StructuredTable>()
+        pipeBlocks.forEachIndexed { blockIdx, blockLines ->
+            val matchIdx = explicitTables.indexOfFirst { tbl ->
+                tbl.toPipeLines() == blockLines
+            }.takeIf { it >= 0 && it !in matchedTableIndices }
+            if (matchIdx != null) {
+                matchedTableIndices.add(matchIdx)
+                blockToMatchedTable[blockIdx] = explicitTables[matchIdx]
+            } else {
+                blockToMatchedTable[blockIdx] = StructuredTable.fromPipeLines(blockLines)
+            }
+        }
+
+        // Remaining explicit tables that were not represented as [جدول: ...] blocks (e.g., 2-col nested tables or direct StageData.tables)
+        val standaloneTables = explicitTables.filterIndexed { idx, _ -> idx !in matchedTableIndices }
+        val flattenedStandaloneCellTexts = standaloneTables.flatMap { tbl ->
+            tbl.rows.flatMap { r -> r.cells.flatMap { c -> c.paragraphs.ifEmpty { listOf(c.text) } } }
+        }.map { it.trim() }.filter { it.isNotEmpty() }.toSet()
+
+        if (lines.isEmpty() && standaloneTables.isEmpty()) {
+            appendParagraph(sb, "", isCenter = true, bold = true, fontName = fontName)
+        } else {
+            val pendingPipeLines = mutableListOf<String>()
+            var currentBlockIdx = 0
+            var lastEmittedWasTable = false
+            var emittedAnything = false
+
+            fun flushPipeBlock() {
+                if (pendingPipeLines.isNotEmpty()) {
+                    val structuredTbl = blockToMatchedTable[currentBlockIdx]
+                        ?: StructuredTable.fromPipeLines(pendingPipeLines)
+                    currentBlockIdx++
+                    pendingPipeLines.clear()
+                    if (structuredTbl.rows.isNotEmpty()) {
+                        appendStructuredWordTable(
+                            sb = sb,
+                            table = structuredTbl,
+                            isNested = true,
+                            availableWidthDxa = (widthDxa - 120).coerceAtLeast(800),
+                            fontName = fontName
+                        )
+                        lastEmittedWasTable = true
+                        emittedAnything = true
+                    }
                 }
             }
 
             lines.forEach { line ->
                 val trimmed = line.trim()
                 if (trimmed.startsWith("[جدول:") && trimmed.endsWith("]")) {
-                    val rowCells = trimmed.removePrefix("[جدول:").removeSuffix("]")
-                        .split("|")
-                        .map { it.trim() }
-                        .filter { it.isNotEmpty() }
-                    if (rowCells.isNotEmpty()) {
-                        pendingTableRows.add(rowCells)
-                    }
+                    pendingPipeLines.add(trimmed)
                 } else {
-                    flushNestedTable()
+                    flushPipeBlock()
                     val cleanLine = trimmed.replace("<u>", "").replace("</u>", "").trim()
-                    val colonIdx = cleanLine.indexOf(':')
-                    if (colonIdx in 1..45 && !cleanLine.startsWith("http")) {
-                        val label = cleanLine.substring(0, colonIdx + 1).trim()
-                        val rest = cleanLine.substring(colonIdx + 1).trim()
-                        appendUnderlinedParagraph(sb, label, rest, isCenter = true)
-                    } else {
-                        appendParagraph(sb, cleanLine, isCenter = true, bold = true)
+                    if (cleanLine.isNotEmpty() && cleanLine !in flattenedStandaloneCellTexts) {
+                        val colonIdx = cleanLine.indexOf(':')
+                        if (colonIdx in 1..45 && !cleanLine.startsWith("http")) {
+                            val label = cleanLine.substring(0, colonIdx + 1).trim()
+                            val rest = cleanLine.substring(colonIdx + 1).trim()
+                            appendUnderlinedParagraph(sb, label, rest, isCenter = true, fontName = fontName)
+                        } else {
+                            appendParagraph(sb, cleanLine, isCenter = true, bold = true, fontName = fontName)
+                        }
+                        lastEmittedWasTable = false
+                        emittedAnything = true
                     }
                 }
             }
-            flushNestedTable()
-            // Word requires a trailing <w:p> inside a <w:tc> if the last child is a nested <w:tbl>
-            if (lines.lastOrNull()?.trim()?.startsWith("[جدول:") == true) {
-                appendParagraph(sb, "", isCenter = true, bold = true)
+            flushPipeBlock()
+
+            for (standaloneTbl in standaloneTables) {
+                if (standaloneTbl.rows.isNotEmpty()) {
+                    appendStructuredWordTable(
+                        sb = sb,
+                        table = standaloneTbl,
+                        isNested = true,
+                        availableWidthDxa = (widthDxa - 120).coerceAtLeast(800),
+                        fontName = fontName
+                    )
+                    lastEmittedWasTable = true
+                    emittedAnything = true
+                }
+            }
+
+            // Word OpenXML requires a trailing <w:p> inside a <w:tc> if the last child is a nested <w:tbl> or if empty
+            if (!emittedAnything || lastEmittedWasTable) {
+                appendParagraph(sb, "", isCenter = true, bold = true, fontName = fontName)
             }
         }
         sb.append("        </w:tc>\n")
     }
 
     /**
-     * Renders a real nested <w:tbl> inside the المحتوى cell (e.g. جدول اسم الفاعل وصيغ المبالغة or شبكة تشخيص الأخطاء).
+     * Renders a full [StructuredTable] as a real OpenXML `<w:tbl>` element, preserving:
+     * - Multi-row and multi-column structure
+     * - Empty cells (`""`) without dropping or shifting columns
+     * - Horizontal cell merges (`<w:gridSpan w:val="..."/>`)
+     * - Vertical cell merges (`<w:vMerge w:val="restart"/>` and `<w:vMerge/>`)
+     * - Recursive nested tables (`<w:tbl>` inside `<w:tc>`)
+     * - RTL direction (`<w:bidiVisual/>`), borders, column widths, headers, and cell shading
      */
-    private fun appendNestedWordTable(
+    fun appendStructuredWordTable(
         sb: StringBuilder,
-        rows: List<List<String>>,
-        availableWidthDxa: Int
+        table: StructuredTable,
+        isNested: Boolean = false,
+        availableWidthDxa: Int = 11106,
+        fontName: String = FONT_NAME
     ) {
-        val colCount = rows.maxOfOrNull { it.size }?.coerceAtLeast(1) ?: 1
-        val colW = (availableWidthDxa / colCount).coerceAtLeast(400)
+        val colCount = maxOf(
+            table.columnWidthsDxa.size,
+            table.rows.maxOfOrNull { row -> row.cells.sumOf { it.gridSpan.coerceAtLeast(1) } } ?: 1
+        ).coerceAtLeast(1)
+
+        val colWidths = if (table.columnWidthsDxa.size == colCount && table.columnWidthsDxa.all { it > 0 }) {
+            table.columnWidthsDxa
+        } else {
+            val defaultW = (availableWidthDxa / colCount).coerceAtLeast(400)
+            List(colCount) { defaultW }
+        }
+
+        val borderSz = if (isNested) "4" else "6"
+        val tblWXml = if (isNested) {
+            """<w:tblW w:w="5000" w:type="pct"/>"""
+        } else {
+            """<w:tblW w:w="${colWidths.sum()}" w:type="dxa"/>"""
+        }
+        val bidiXml = if (table.isRtl) "<w:bidiVisual/>" else ""
+        val bordersXml = if (table.hasBorders) {
+            """<w:tblBorders>
+                <w:top w:val="single" w:sz="$borderSz" w:space="0" w:color="000000"/>
+                <w:left w:val="single" w:sz="$borderSz" w:space="0" w:color="000000"/>
+                <w:bottom w:val="single" w:sz="$borderSz" w:space="0" w:color="000000"/>
+                <w:right w:val="single" w:sz="$borderSz" w:space="0" w:color="000000"/>
+                <w:insideH w:val="single" w:sz="4" w:space="0" w:color="000000"/>
+                <w:insideV w:val="single" w:sz="4" w:space="0" w:color="000000"/>
+              </w:tblBorders>"""
+        } else {
+            ""
+        }
 
         sb.append("""          <w:tbl>
             <w:tblPr>
-              <w:tblW w:w="5000" w:type="pct"/>
+              $tblWXml
               <w:jc w:val="center"/>
-              <w:bidiVisual/>
-              <w:tblBorders>
-                <w:top w:val="single" w:sz="4" w:space="0" w:color="000000"/>
-                <w:left w:val="single" w:sz="4" w:space="0" w:color="000000"/>
-                <w:bottom w:val="single" w:sz="4" w:space="0" w:color="000000"/>
-                <w:right w:val="single" w:sz="4" w:space="0" w:color="000000"/>
-                <w:insideH w:val="single" w:sz="4" w:space="0" w:color="000000"/>
-                <w:insideV w:val="single" w:sz="4" w:space="0" w:color="000000"/>
-              </w:tblBorders>
+              $bidiXml
+              $bordersXml
             </w:tblPr>
             <w:tblGrid>
 """)
-        repeat(colCount) {
-            sb.append("              <w:gridCol w:w=\"$colW\"/>\n")
+        colWidths.forEach { w ->
+            sb.append("              <w:gridCol w:w=\"$w\"/>\n")
         }
         sb.append("            </w:tblGrid>\n")
 
-        rows.forEachIndexed { rIdx, row ->
-            val isHeader = rIdx == 0
+        table.rows.forEachIndexed { rIdx, row ->
+            val isHeaderRow = row.isHeader || (rIdx == 0 && isNested && table.rows.size > 1)
             sb.append("            <w:tr>\n")
-            for (cIdx in 0 until colCount) {
-                val cellText = row.getOrNull(cIdx).orEmpty()
+            if (row.isHeader) {
+                sb.append("              <w:trPr><w:tblHeader/></w:trPr>\n")
+            }
+            var colCursor = 0
+            for (cell in row.cells) {
+                val span = cell.gridSpan.coerceAtLeast(1)
+                val cellWidth = cell.widthDxa ?: (0 until span).sumOf { idx ->
+                    colWidths.getOrElse(colCursor + idx) { colWidths.lastOrNull() ?: 1000 }
+                }
+                colCursor += span
+
                 sb.append("              <w:tc>\n")
                 sb.append("                <w:tcPr>\n")
-                sb.append("                  <w:tcW w:w=\"$colW\" w:type=\"dxa\"/>\n")
+                sb.append("                  <w:tcW w:w=\"$cellWidth\" w:type=\"dxa\"/>\n")
+                if (span > 1) {
+                    sb.append("                  <w:gridSpan w:val=\"$span\"/>\n")
+                }
+                if (cell.vMerge != null) {
+                    if (cell.vMerge.equals("restart", ignoreCase = true)) {
+                        sb.append("                  <w:vMerge w:val=\"restart\"/>\n")
+                    } else {
+                        sb.append("                  <w:vMerge/>\n")
+                    }
+                }
                 sb.append("                  <w:vAlign w:val=\"center\"/>\n")
-                if (isHeader) {
-                    sb.append("                  <w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"$HEADER_BG_HEX\"/>\n")
+                val fillHex = cell.backgroundHex ?: if (isHeaderRow || cell.isHeader) HEADER_BG_HEX else null
+                if (fillHex != null) {
+                    sb.append("                  <w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"$fillHex\"/>\n")
                 }
                 sb.append("                </w:tcPr>\n")
-                appendParagraph(sb, cellText, isCenter = true, bold = true, sz = 18)
+
+                val cellParagraphs = when {
+                    cell.paragraphs.isNotEmpty() -> cell.paragraphs
+                    cell.text.isNotEmpty() -> cell.text.split("\n")
+                    else -> emptyList()
+                }
+                val isCenter = cell.alignment != "right" && cell.alignment != "left"
+                val isBold = cell.bold ?: true
+                val sz = if (isNested) 18 else FONT_SIZE_HALF_PT
+
+                if (cellParagraphs.isEmpty() && cell.nestedTables.isEmpty()) {
+                    appendParagraph(sb, "", isCenter = isCenter, bold = isBold, sz = sz, fontName = fontName)
+                } else {
+                    for (pText in cellParagraphs) {
+                        appendParagraph(sb, pText, isCenter = isCenter, bold = isBold, sz = sz, fontName = fontName)
+                    }
+                    for (nestedTbl in cell.nestedTables) {
+                        appendStructuredWordTable(
+                            sb = sb,
+                            table = nestedTbl,
+                            isNested = true,
+                            availableWidthDxa = (cellWidth - 120).coerceAtLeast(600),
+                            fontName = fontName
+                        )
+                    }
+                    if (cell.nestedTables.isNotEmpty()) {
+                        // OpenXML requires a <w:p> after the last <w:tbl> inside a <w:tc>
+                        appendParagraph(sb, "", isCenter = isCenter, bold = isBold, sz = sz, fontName = fontName)
+                    }
+                }
                 sb.append("              </w:tc>\n")
             }
             sb.append("            </w:tr>\n")
@@ -1017,7 +1506,8 @@ object DocxGenerator {
         isCenter: Boolean = true,
         bold: Boolean = true,
         textColorHex: String = "000000",
-        sz: Int = FONT_SIZE_HALF_PT
+        sz: Int = FONT_SIZE_HALF_PT,
+        fontName: String = FONT_NAME
     ) {
         val jc = if (isCenter) "center" else "both"
         sb.append("          <w:p>\n")
@@ -1029,7 +1519,7 @@ object DocxGenerator {
         if (text.isNotEmpty()) {
             sb.append("            <w:r>\n")
             sb.append("              <w:rPr>\n")
-            sb.append("                <w:rFonts w:ascii=\"$FONT_NAME\" w:hAnsi=\"$FONT_NAME\" w:cs=\"$FONT_NAME\"/>\n")
+            sb.append("                <w:rFonts w:ascii=\"${escapeXml(fontName)}\" w:hAnsi=\"${escapeXml(fontName)}\" w:cs=\"${escapeXml(fontName)}\"/>\n")
             if (bold) sb.append("                <w:b/><w:bCs/>\n")
             sb.append("                <w:color w:val=\"$textColorHex\"/>\n")
             sb.append("                <w:sz w:val=\"$sz\"/><w:szCs w:val=\"$sz\"/>\n")
@@ -1046,7 +1536,8 @@ object DocxGenerator {
         sb: StringBuilder,
         label: String,
         rest: String,
-        isCenter: Boolean = true
+        isCenter: Boolean = true,
+        fontName: String = FONT_NAME
     ) {
         val jc = if (isCenter) "center" else "both"
         sb.append("          <w:p>\n")
@@ -1057,7 +1548,7 @@ object DocxGenerator {
         sb.append("            </w:pPr>\n")
         sb.append("            <w:r>\n")
         sb.append("              <w:rPr>\n")
-        sb.append("                <w:rFonts w:ascii=\"$FONT_NAME\" w:hAnsi=\"$FONT_NAME\" w:cs=\"$FONT_NAME\"/>\n")
+        sb.append("                <w:rFonts w:ascii=\"${escapeXml(fontName)}\" w:hAnsi=\"${escapeXml(fontName)}\" w:cs=\"${escapeXml(fontName)}\"/>\n")
         sb.append("                <w:b/><w:bCs/>\n")
         sb.append("                <w:u w:val=\"single\"/>\n")
         sb.append("                <w:color w:val=\"000000\"/>\n")
@@ -1070,7 +1561,7 @@ object DocxGenerator {
         if (rest.isNotEmpty()) {
             sb.append("            <w:r>\n")
             sb.append("              <w:rPr>\n")
-            sb.append("                <w:rFonts w:ascii=\"$FONT_NAME\" w:hAnsi=\"$FONT_NAME\" w:cs=\"$FONT_NAME\"/>\n")
+            sb.append("                <w:rFonts w:ascii=\"${escapeXml(fontName)}\" w:hAnsi=\"${escapeXml(fontName)}\" w:cs=\"${escapeXml(fontName)}\"/>\n")
             sb.append("                <w:b/><w:bCs/>\n")
             sb.append("                <w:color w:val=\"000000\"/>\n")
             sb.append("                <w:sz w:val=\"$FONT_SIZE_HALF_PT\"/><w:szCs w:val=\"$FONT_SIZE_HALF_PT\"/>\n")

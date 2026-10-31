@@ -695,7 +695,10 @@ object SamplePlans {
         )
     )
 
-    // Alias for backward compatibility
+    // Aliases for convenience and backward compatibility
+    val READING_SAMPLE = MANFA_PLAN
+    val LANGUAGE_SAMPLE = ISM_FAIL_PLAN
+    val EXPRESSION_SAMPLE = INSHA_YAWMIYAT_PLAN
     val INSHA_HIKAYA_PLAN = INSHA_YAWMIYAT_PLAN
 
     val ALL_SAMPLES = listOf(MANFA_PLAN, ISM_FAIL_PLAN, INSHA_YAWMIYAT_PLAN)

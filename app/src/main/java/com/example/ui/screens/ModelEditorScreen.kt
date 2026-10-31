@@ -913,9 +913,10 @@ fun FieldSourceBadge(
 ) {
     val (bgColor, textColor, borderColor) = when (source) {
         FieldSource.DEFAULT -> Triple(Color(0xFFFEF3C7), Color(0xFF92400E), Color(0xFFD97706))
-        FieldSource.FILE -> Triple(Color(0xFFD1FAE5), Color(0xFF065F46), Color(0xFF059669))
-        FieldSource.AI -> Triple(Color(0xFFEDE9FE), Color(0xFF5B21B6), Color(0xFF7C3AED))
-        FieldSource.USER -> Triple(Color(0xFFDBEAFE), Color(0xFF1E40AF), Color(0xFF2563EB))
+        FieldSource.FILE, FieldSource.IMPORTED -> Triple(Color(0xFFD1FAE5), Color(0xFF065F46), Color(0xFF059669))
+        FieldSource.AI, FieldSource.GEMINI -> Triple(Color(0xFFEDE9FE), Color(0xFF5B21B6), Color(0xFF7C3AED))
+        FieldSource.USER, FieldSource.USER_EDIT -> Triple(Color(0xFFDBEAFE), Color(0xFF1E40AF), Color(0xFF2563EB))
+        FieldSource.LOCAL_RULE -> Triple(Color(0xFFE0F2FE), Color(0xFF075985), Color(0xFF0284C7))
     }
 
     Surface(

@@ -220,17 +220,24 @@ class ExampleRobolectricTest {
     }
 
     @Test
-    fun `test GeminiAiService uses gemini-3_8-flash and succeeds with AQ token or custom topic`() = kotlinx.coroutines.runBlocking {
+    fun `test GeminiAiService uses gemini-3_8-flash and succeeds with valid transport or synthesizeSmartPlan`() = kotlinx.coroutines.runBlocking {
         assertEquals("gemini-3.8-flash", com.example.ai.GeminiAiService.PRIMARY_MODEL)
 
-        val result = com.example.ai.GeminiAiService.generateJadhadha(
+        // With invalid AQ token, generateJadhadha must fail honestly rather than returning fake AI success
+        val invalidResult = com.example.ai.GeminiAiService.generateJadhadha(
             topic = "التضامن الاجتماعي",
             lessonText = "إن التضامن الاجتماعي ركيزة أساسية في بناء المجتمعات المتماسكة.",
             component = com.example.model.PedagogicalComponent.READING,
             customKey = "AQ.Ab8RN6J1NZ6BMsz62m4AOkJ_Dr"
         )
-        assertTrue(result.isSuccess)
-        val plan = result.getOrThrow()
+        assertTrue(invalidResult.isFailure)
+
+        // Local template synthesis remains available explicitly as synthesizeSmartPlan
+        val plan = com.example.ai.GeminiAiService.synthesizeSmartPlan(
+            topic = "التضامن الاجتماعي",
+            lessonText = "إن التضامن الاجتماعي ركيزة أساسية في بناء المجتمعات المتماسكة.",
+            component = com.example.model.PedagogicalComponent.READING
+        )
         assertEquals("التضامن الاجتماعي", plan.topic)
         assertEquals(7, plan.stages.size)
         for ((_, stage) in plan.stages) {
@@ -485,16 +492,18 @@ class ExampleRobolectricTest {
             rawText = partialRaw,
             initialResult = initialPartial
         )
-        assertTrue(delegatedResult.report.isAiDelegated)
+        // Without a Gemini key, local rule classification is used explicitly and never claimed as AI
+        assertTrue(!delegatedResult.report.isAiDelegated)
+        assertTrue(delegatedResult.report.isLocalFallback)
         assertEquals(0, delegatedResult.report.unclassifiedLines.size)
         assertEquals("اسما الزمان والمكان", delegatedResult.plan.topic)
         assertEquals(
-            com.example.model.FieldSource.FILE,
-            delegatedResult.plan.stages["lang_analysis"]?.sourceFor("teacher")
+            com.example.model.FieldSource.LOCAL_RULE,
+            delegatedResult.plan.stages["lang_observation"]?.sourceFor("teacher")
         )
         assertEquals(
-            com.example.model.FieldSource.AI,
-            delegatedResult.plan.stages["lang_analysis"]?.sourceFor("content")
+            com.example.model.FieldSource.DEFAULT,
+            delegatedResult.plan.stages["lang_observation"]?.sourceFor("content")
         )
     }
 
@@ -1044,17 +1053,45 @@ class ExampleRobolectricTest {
         assertTrue(obsStage.content.any { it.contains("يؤطرون النص") })
         assertTrue(obsStage.content.any { it.contains("يصوغ المتعلمون فرضيات القراءة") })
 
-        // 3. Verify GeminiAiService.parseRawJadhadhaWithAi distributes 100% of information
-        val aiResult = com.example.ai.GeminiAiService.parseRawJadhadhaWithAi(
-            rawText = extracted,
-            componentType = "READING"
-        )
-        assertTrue(aiResult.isSuccess)
-        val aiPlan = aiResult.getOrThrow()
-        assertEquals("التضامن الإنساني", aiPlan.topic)
-        assertTrue(aiPlan.stages.size >= 7)
-        assertTrue(aiPlan.stages["synthesis"]!!.content.any { it.contains("خلاصة تركيبية") })
-        assertTrue(aiPlan.stages["investment"]!!.content.any { it.contains("ابحث عن نماذج") })
+        // 3. Verify GeminiAiService.parseRawJadhadhaWithAi distributes 100% of information when Gemini responds
+        try {
+            com.example.ai.GeminiAiService.setTransportForTesting(
+                com.example.ai.GeminiAiService.GeminiTransport { _, _, _ ->
+                    val parsedLocal = com.example.extractor.JadhadhaParser.parseWithReport(extracted, "التضامن الإنساني")
+                    val stagesJson = org.json.JSONObject()
+                    for ((stageKey, st) in parsedLocal.plan.stages) {
+                        stagesJson.put(
+                            stageKey,
+                            org.json.JSONObject().apply {
+                                put("abil", org.json.JSONArray(st.abil))
+                                put("teacher", org.json.JSONArray(st.teacher))
+                                put("content", org.json.JSONArray(st.content))
+                                put("eval", org.json.JSONArray(st.eval))
+                            }
+                        )
+                    }
+                    val rootJson = org.json.JSONObject().apply {
+                        put("topic", "التضامن الإنساني")
+                        put("component", "reading")
+                        put("stages", stagesJson)
+                    }
+                    200 to rootJson.toString()
+                }
+            )
+            val aiResult = com.example.ai.GeminiAiService.parseRawJadhadhaWithAi(
+                rawText = extracted,
+                componentType = "READING",
+                customKey = "AIzaSyValidTestKeyForGeminiClassification12345"
+            )
+            assertTrue(aiResult.isSuccess)
+            val aiPlan = aiResult.getOrThrow()
+            assertEquals("التضامن الإنساني", aiPlan.topic)
+            assertEquals(7, aiPlan.stages.size)
+            assertTrue(aiPlan.stages["synthesis"]!!.content.any { it.contains("خلاصة تركيبية") })
+            assertTrue(aiPlan.stages["investment"]!!.content.any { it.contains("ابحث عن نماذج") })
+        } finally {
+            com.example.ai.GeminiAiService.resetTransportForTesting()
+        }
     }
 
     @Test
@@ -1507,6 +1544,1751 @@ class ExampleRobolectricTest {
             )
         }
     }
+
+    // =========================================================================
+    // PHASE 2 TESTS: Gemini vs Local Classification, Context-Awareness, JSON
+    // Validation, Failure Handling, Manual Edit, and Retry
+    // =========================================================================
+
+    @Test
+    fun `phase2_1 - local contextual classification is recorded as LOCAL_RULE and distinguishes context over isolated keywords`() {
+        // 1. Test context-aware pedagogical classification:
+        // Item A contains the word "تقويم" (evaluation keyword), but its grammatical/pedagogical frame starts with "قدرة المتعلم على..." -> OBJECTIVES_COMPETENCIES
+        val itemA = com.example.ai.GeminiAiService.classifyPedagogicalContextLocally(
+            rawLine = "قدرة المتعلم على تقويم النصوص السردية وتحليل بنيتها.",
+            component = com.example.model.PedagogicalComponent.READING,
+            unitId = "unit_a"
+        )!!
+        assertEquals(com.example.model.PedagogicalCategory.OBJECTIVES_COMPETENCIES, itemA.proposedCategory)
+        assertEquals("abil", itemA.targetField)
+        assertEquals(com.example.model.ClassificationSource.LOCAL_RULE, itemA.source)
+
+        // Item B contains the word "الأهداف" and "الفرضيات", but starts with teacher verb "يوجه الأستاذ المتعلمين..." -> TEACHER_ACTIVITIES
+        val itemB = com.example.ai.GeminiAiService.classifyPedagogicalContextLocally(
+            rawLine = "يوجه الأستاذ المتعلمين إلى استخراج المؤشرات الدالة على الفرضية.",
+            component = com.example.model.PedagogicalComponent.READING,
+            unitId = "unit_b"
+        )!!
+        assertEquals(com.example.model.PedagogicalCategory.TEACHER_ACTIVITIES, itemB.proposedCategory)
+        assertEquals("teacher", itemB.targetField)
+        assertEquals("observation", itemB.stageKey)
+        assertEquals(com.example.model.ClassificationSource.LOCAL_RULE, itemB.source)
+
+        // Item C starts with learner plural verb "يجيب المتعلمون..." -> LEARNER_ACTIVITIES
+        val itemC = com.example.ai.GeminiAiService.classifyPedagogicalContextLocally(
+            rawLine = "يجيب المتعلمون عن أسئلة الفهم ويحددون الفكرة العامة للنص.",
+            component = com.example.model.PedagogicalComponent.READING,
+            unitId = "unit_c"
+        )!!
+        assertEquals(com.example.model.PedagogicalCategory.LEARNER_ACTIVITIES, itemC.proposedCategory)
+        assertEquals("comprehension", itemC.stageKey)
+        assertEquals(com.example.model.ClassificationSource.LOCAL_RULE, itemC.source)
+
+        // Item D is remediation/support -> SUPPORT_REMEDIATION
+        val itemD = com.example.ai.GeminiAiService.classifyPedagogicalContextLocally(
+            rawLine = "دعم فردي ومعالجة التعثرات المسجلة في صياغة اسم الفاعل.",
+            component = com.example.model.PedagogicalComponent.LANGUAGE,
+            unitId = "unit_d"
+        )!!
+        assertEquals(com.example.model.PedagogicalCategory.SUPPORT_REMEDIATION, itemD.proposedCategory)
+        assertEquals("eval", itemD.targetField)
+        assertEquals(com.example.model.ClassificationSource.LOCAL_RULE, itemD.source)
+
+        // 2. Verify classifyWithLocalRulesOnly records FieldSource.LOCAL_RULE and ClassificationSource.LOCAL_RULE, NEVER FieldSource.AI or GEMINI
+        val raw = """
+            المكون: الدرس اللغوي
+            الموضوع: اسم الفاعل وعمله
+            يطرح الأستاذ أسئلة تمهيدية لاستحضار مكتسبات الدرس السابق.
+            يصوغ المتعلمون استنتاجاً تركيبياً لقاعدة اسم الفاعل وشروط عمله.
+        """.trimIndent()
+        val initial = com.example.extractor.JadhadhaParser.parseWithReport(raw, "اسم الفاعل وعمله")
+        assertTrue(initial.report.unclassifiedLines.isNotEmpty())
+
+        val localResult = com.example.ai.GeminiAiService.classifyWithLocalRulesOnly(initial)
+        assertTrue(!localResult.report.isAiDelegated)
+        assertEquals(0, localResult.report.totalAiFields)
+        assertTrue(localResult.report.totalLocalRuleFields > 0)
+        assertTrue(localResult.report.localRuleClassifiedLinesCount > 0)
+        assertEquals(0, localResult.report.aiClassifiedLinesCount)
+
+        // Ensure no stage field has FieldSource.AI or FieldSource.GEMINI
+        for ((_, stage) in localResult.plan.stages) {
+            for (field in listOf("abil", "teacher", "content", "eval")) {
+                val src = stage.sourceFor(field)
+                assertTrue(
+                    "Local classification must never set AI/GEMINI source",
+                    src != com.example.model.FieldSource.AI && src != com.example.model.FieldSource.GEMINI
+                )
+            }
+        }
+        assertTrue(
+            localResult.report.classificationItems.all { it.source == com.example.model.ClassificationSource.LOCAL_RULE }
+        )
+    }
+
+    @Test
+    fun `phase2_2 - genuine Gemini classification is recorded with ClassificationSource GEMINI and FieldSource AI`() = kotlinx.coroutines.runBlocking {
+        val raw = """
+            المكون: النصوص القرائية
+            الموضوع: المنفى
+            تأمل دلالة العنوان وعلاقته بسياق الحماية الفرنسية بالمغرب.
+            الحقول الدلالية المهيمنة في النص: حقل المعاناة وحقل الصمود الوطني.
+        """.trimIndent()
+        val initial = com.example.extractor.JadhadhaParser.parseWithReport(raw, "المنفى")
+        assertEquals(2, initial.report.unclassifiedLines.size)
+        val u1 = initial.report.unclassifiedLines[0]
+        val u2 = initial.report.unclassifiedLines[1]
+
+        try {
+            com.example.ai.GeminiAiService.setTransportForTesting(
+                com.example.ai.GeminiAiService.GeminiTransport { _, _, _ ->
+                    val responseJson = """
+                        {
+                          "classifications": [
+                            {
+                              "unitId": "${u1.unitId}",
+                              "originalText": "${u1.verbatimText}",
+                              "proposedCategory": "INTRODUCTION_LAUNCH",
+                              "component": "READING",
+                              "stageKey": "observation",
+                              "targetField": "content",
+                              "confidence": 0.94,
+                              "source": "GEMINI",
+                              "rationale": "ملاحظة العنوان وتأطيره ضمن سياقه التاريخي"
+                            },
+                            {
+                              "unitId": "${u2.unitId}",
+                              "originalText": "${u2.verbatimText}",
+                              "proposedCategory": "ANALYSIS_DISCUSSION",
+                              "component": "READING",
+                              "stageKey": "analysis",
+                              "targetField": "content",
+                              "confidence": 0.91,
+                              "source": "GEMINI",
+                              "rationale": "تحليل الحقول الدلالية المهيمنة في النص"
+                            }
+                          ]
+                        }
+                    """.trimIndent()
+                    200 to responseJson
+                }
+            )
+
+            val refined = com.example.ai.GeminiAiService.classifyAndRefineExtraction(
+                rawText = raw,
+                initialResult = initial,
+                customKey = "AIzaSyValidTestKeyForGeminiClassification12345",
+                preferLocalRulesFirst = false
+            )
+
+            assertTrue(refined.report.isAiDelegated)
+            assertTrue(!refined.report.geminiFailed)
+            assertTrue(!refined.report.isLocalFallback)
+            assertEquals(2, refined.report.aiClassifiedLinesCount)
+            assertEquals(0, refined.report.unclassifiedLines.size)
+
+            // Verify FieldSource.AI is set ONLY on the fields actually classified by Gemini
+            assertEquals(com.example.model.FieldSource.AI, refined.plan.stages["observation"]!!.sourceFor("content"))
+            assertEquals(com.example.model.FieldSource.AI, refined.plan.stages["analysis"]!!.sourceFor("content"))
+            // Other untouched default fields remain DEFAULT (never overwritten with fake AI text)
+            assertEquals(com.example.model.FieldSource.DEFAULT, refined.plan.stages["investment"]!!.sourceFor("content"))
+
+            // Verify ClassificationSource.GEMINI on the classification items and units
+            assertEquals(2, refined.report.classificationItems.size)
+            assertTrue(refined.report.classificationItems.all { it.source == com.example.model.ClassificationSource.GEMINI })
+            val updatedUnits = refined.report.extractedUnits.filter { it.id == u1.unitId || it.id == u2.unitId }
+            assertTrue(updatedUnits.all { it.classificationSource == com.example.model.ClassificationSource.GEMINI })
+        } finally {
+            com.example.ai.GeminiAiService.resetTransportForTesting()
+        }
+    }
+
+    @Test
+    fun `phase2_3 - Gemini failure does not produce fake AI success and triggers explicit local fallback`() = kotlinx.coroutines.runBlocking {
+        val raw = """
+            المكون: الدرس اللغوي
+            الموضوع: اسم الآلة
+            يستدرج الأستاذ المتعلمين لتذكر المشتقات السابقة.
+            عبارة دلالية تحتاج إلى تصنيف Gemini عند تعذر القاعدة المحلية.
+        """.trimIndent()
+        val initial = com.example.extractor.JadhadhaParser.parseWithReport(raw, "اسم الآلة")
+
+        try {
+            // Simulate network/HTTP failure from Gemini
+            com.example.ai.GeminiAiService.setTransportForTesting(
+                com.example.ai.GeminiAiService.GeminiTransport { _, _, _ ->
+                    throw java.io.IOException("فشل الاتصال بخادم Gemini: انقطاع الشبكة")
+                }
+            )
+
+            // 1. classifyAndRefineExtraction must NOT claim AI success; it falls back to LOCAL_RULE with geminiFailed = true
+            val fallbackResult = com.example.ai.GeminiAiService.classifyAndRefineExtraction(
+                rawText = raw,
+                initialResult = initial,
+                customKey = "AIzaSyValidTestKeyForGeminiClassification12345"
+            )
+            assertTrue("Must not claim AI delegation succeeded when Gemini failed", !fallbackResult.report.isAiDelegated)
+            assertTrue("Must mark geminiFailed = true", fallbackResult.report.geminiFailed)
+            assertTrue("Must mark isLocalFallback = true", fallbackResult.report.isLocalFallback)
+            assertNotNull(fallbackResult.report.geminiFailureReason)
+            assertEquals(0, fallbackResult.report.totalAiFields)
+            assertEquals(0, fallbackResult.report.aiClassifiedLinesCount)
+            assertTrue(fallbackResult.report.totalLocalRuleFields > 0)
+
+            // 2. parseRawJadhadhaWithAi must return Result.failure (no silent local result masquerading as AI)
+            val directAiResult = com.example.ai.GeminiAiService.parseRawJadhadhaWithAi(
+                rawText = raw,
+                componentType = "LANGUAGE",
+                customKey = "AIzaSyValidTestKeyForGeminiClassification12345"
+            )
+            assertTrue("Direct AI extraction must fail honestly when Gemini is unreachable", directAiResult.isFailure)
+        } finally {
+            com.example.ai.GeminiAiService.resetTransportForTesting()
+        }
+    }
+
+    @Test
+    fun `phase2_4 - invalid Gemini response with malformed JSON or unknown unitId or invented stage is rejected`() {
+        val raw = """
+            المكون: النصوص القرائية
+            الموضوع: المنفى
+            تأطير النص وملاحظة العنوان والصورة المرفقة.
+            استخلاص القيم الوطنية والإنسانية المتضمنة في النص.
+            تركيب خلاصة شاملة لمضامين النص وأساليبه.
+        """.trimIndent()
+        val initial = com.example.extractor.JadhadhaParser.parseWithReport(raw, "المنفى")
+        val u1 = initial.report.unclassifiedLines[0]
+        val u2 = initial.report.unclassifiedLines[1]
+        val u3 = initial.report.unclassifiedLines[2]
+
+        // Case A: Completely malformed JSON -> isJsonValid = false
+        val malformedValidation = com.example.ai.GeminiAiService.validateAndParseGeminiClassificationJson(
+            rawJson = "هذا نص عشوائي وليس كائن JSON صالحاً على الإطلاق",
+            originalUnits = initial.report.extractedUnits,
+            targetComponent = com.example.model.PedagogicalComponent.READING
+        )
+        assertTrue(!malformedValidation.isJsonValid)
+        assertTrue(malformedValidation.validItems.isEmpty())
+        assertTrue(malformedValidation.rejectedReasons.isNotEmpty())
+
+        // Case B: JSON containing (1) an unknown unitId ("unit_9999"), (2) an invented stageKey ("invented_stage_xyz"),
+        // (3) hallucinated originalText on u2, and (4) valid classification on u3
+        val invalidItemsJson = """
+            {
+              "classifications": [
+                {
+                  "unitId": "unit_9999",
+                  "originalText": "عنصر مخترع من النموذج غير موجود في الوثيقة",
+                  "proposedCategory": "EDUCATIONAL_CONTENT",
+                  "component": "READING",
+                  "stageKey": "observation",
+                  "targetField": "content",
+                  "confidence": 0.95,
+                  "source": "GEMINI"
+                },
+                {
+                  "unitId": "${u1.unitId}",
+                  "originalText": "${u1.verbatimText}",
+                  "proposedCategory": "INTRODUCTION_LAUNCH",
+                  "component": "READING",
+                  "stageKey": "invented_stage_xyz",
+                  "targetField": "content",
+                  "confidence": 0.90,
+                  "source": "GEMINI"
+                },
+                {
+                  "unitId": "${u2.unitId}",
+                  "originalText": "نص محرف لا يطابق النص الأصلي للوحدة",
+                  "proposedCategory": "ANALYSIS_DISCUSSION",
+                  "component": "READING",
+                  "stageKey": "synthesis",
+                  "targetField": "content",
+                  "confidence": 0.88,
+                  "source": "GEMINI"
+                },
+                {
+                  "unitId": "${u3.unitId}",
+                  "originalText": "${u3.verbatimText}",
+                  "proposedCategory": "ANALYSIS_DISCUSSION",
+                  "component": "READING",
+                  "stageKey": "synthesis",
+                  "targetField": "content",
+                  "confidence": 0.93,
+                  "source": "GEMINI"
+                }
+              ]
+            }
+        """.trimIndent()
+
+        val validationB = com.example.ai.GeminiAiService.validateAndParseGeminiClassificationJson(
+            rawJson = invalidItemsJson,
+            originalUnits = initial.report.extractedUnits,
+            targetComponent = com.example.model.PedagogicalComponent.READING
+        )
+        assertTrue(validationB.isJsonValid)
+        // Unknown unitId ("unit_9999"), invented stage ("invented_stage_xyz"), and hallucinated text on u2 must all be rejected!
+        assertEquals(3, validationB.rejectedReasons.size)
+        assertTrue(validationB.rejectedReasons.any { it.contains("unit_9999") })
+        assertTrue(validationB.rejectedReasons.any { it.contains("invented_stage_xyz") })
+        assertTrue(validationB.rejectedReasons.any { it.contains(u2.unitId) })
+
+        // Only u3 (valid unitId, valid verbatimText, and official stageKey "synthesis") is accepted
+        assertEquals(1, validationB.validItems.size)
+        assertEquals(u3.unitId, validationB.validItems.first().unitId)
+        assertEquals(u3.verbatimText, validationB.validItems.first().originalText)
+    }
+
+    @Test
+    fun `phase2_5 - no item is deleted when unclassified or low confidence and official stage structure is preserved`() = kotlinx.coroutines.runBlocking {
+        val raw = """
+            المكون: النصوص القرائية
+            الموضوع: المنفى
+            عبارة غامضة أولى تحتاج إلى مراجعة بشرية لتحديد موقعها.
+            عبارة ثانية واضحة: صياغة خلاصة تركيبية لأحداث النص ودلالاته.
+        """.trimIndent()
+        val initial = com.example.extractor.JadhadhaParser.parseWithReport(raw, "المنفى")
+        assertEquals(2, initial.report.unclassifiedLines.size)
+        val uLow = initial.report.unclassifiedLines[0]
+        val uHigh = initial.report.unclassifiedLines[1]
+
+        try {
+            com.example.ai.GeminiAiService.setTransportForTesting(
+                com.example.ai.GeminiAiService.GeminiTransport { _, _, _ ->
+                    // uLow has low confidence (0.40 < 0.65), uHigh has high confidence (0.91 >= 0.65)
+                    val json = """
+                        {
+                          "classifications": [
+                            {
+                              "unitId": "${uLow.unitId}",
+                              "originalText": "${uLow.verbatimText}",
+                              "proposedCategory": "EDUCATIONAL_CONTENT",
+                              "component": "READING",
+                              "stageKey": "analysis",
+                              "targetField": "content",
+                              "confidence": 0.40,
+                              "source": "GEMINI",
+                              "rationale": "ثقة منخفضة تتطلب مراجعة الأستاذ"
+                            },
+                            {
+                              "unitId": "${uHigh.unitId}",
+                              "originalText": "${uHigh.verbatimText}",
+                              "proposedCategory": "ANALYSIS_DISCUSSION",
+                              "component": "READING",
+                              "stageKey": "synthesis",
+                              "targetField": "content",
+                              "confidence": 0.91,
+                              "source": "GEMINI",
+                              "rationale": "تركيب أحداث النص"
+                            }
+                          ]
+                        }
+                    """.trimIndent()
+                    200 to json
+                }
+            )
+
+            val refined = com.example.ai.GeminiAiService.classifyAndRefineExtraction(
+                rawText = raw,
+                initialResult = initial,
+                customKey = "AIzaSyValidTestKeyForGeminiClassification12345",
+                preferLocalRulesFirst = false
+            )
+
+            // 1. High-confidence item is placed in "synthesis" -> "content"
+            assertTrue(refined.plan.stages["synthesis"]!!.content.contains(uHigh.verbatimText))
+
+            // 2. Low-confidence item is NOT deleted and NOT blindly placed; it stays in unclassifiedLines for human review with its proposed category and rationale attached
+            assertEquals(1, refined.report.unclassifiedLines.size)
+            val remainingUnclassified = refined.report.unclassifiedLines.first()
+            assertEquals(uLow.unitId, remainingUnclassified.unitId)
+            assertEquals(uLow.verbatimText, remainingUnclassified.verbatimText)
+            assertEquals(com.example.model.PedagogicalCategory.EDUCATIONAL_CONTENT, remainingUnclassified.proposedCategory)
+            assertEquals(0.40, remainingUnclassified.confidence!!, 0.001)
+
+            // 3. ContentIntegrityMonitor confirms 0 missing units
+            assertTrue(refined.report.integrityReport!!.missingUnits.isEmpty())
+
+            // 4. Official stage structure is strictly preserved (7 for READING, 4 for LANGUAGE, 16 for EXPRESSION)
+            assertEquals(7, refined.plan.stages.size)
+            assertEquals(
+                com.example.model.StageCatalog.READING_STAGES.map { it.key },
+                refined.plan.stages.keys.toList()
+            )
+            assertEquals(4, com.example.model.StageCatalog.LANGUAGE_STAGES.size)
+            assertEquals(16, com.example.model.StageCatalog.EXPRESSION_STAGES.size)
+        } finally {
+            com.example.ai.GeminiAiService.resetTransportForTesting()
+        }
+    }
+
+    @Test
+    fun `phase2_6 - classification can be modified manually and is recorded as USER_EDIT`() {
+        val raw = """
+            المكون: الدرس اللغوي
+            الموضوع: اسم الفاعل وعمله
+            [مرحلة: تشخيص المكتسبات]
+            أنشطة المدرس:
+            يطرح الأستاذ أسئلة تمهيدية حول الفعل الثلاثي.
+            [نهاية الجدول]
+            ملاحظة إضافية للمتعلمين حول صياغة اسم الفاعل من غير الثلاثي.
+        """.trimIndent()
+
+        val initial = com.example.extractor.JadhadhaParser.parseWithReport(raw, "اسم الفاعل وعمله")
+        assertEquals(1, initial.report.unclassifiedLines.size)
+        val uLine = initial.report.unclassifiedLines.first()
+
+        // 1. Assign unclassified line manually -> recorded as ClassificationSource.USER_EDIT
+        val afterManualAssign = com.example.extractor.JadhadhaParser.assignUnclassifiedLine(
+            currentResult = initial,
+            line = uLine,
+            targetStageKey = "lang_observation",
+            targetField = "content"
+        )
+        assertEquals(0, afterManualAssign.report.unclassifiedLines.size)
+        assertTrue(afterManualAssign.plan.stages["lang_observation"]!!.content.contains(uLine.verbatimText))
+        assertEquals(
+            com.example.model.ClassificationSource.USER_EDIT,
+            afterManualAssign.plan.stages["lang_observation"]!!.classificationSourceFor("content")
+        )
+        val assignedUnit = afterManualAssign.report.extractedUnits.first { it.id == uLine.unitId }
+        assertEquals(com.example.model.ClassificationSource.USER_EDIT, assignedUnit.classificationSource)
+        assertEquals(com.example.model.ContentUnitStatus.CLASSIFIED, assignedUnit.status)
+
+        // 2. Move an already classified item from lang_observation:content to lang_synthesis:eval via modifyUnitClassification
+        val afterMove = com.example.extractor.JadhadhaParser.modifyUnitClassification(
+            currentResult = afterManualAssign,
+            unitId = uLine.unitId,
+            targetStageKey = "lang_synthesis",
+            targetField = "eval",
+            newCategory = com.example.model.PedagogicalCategory.EVALUATION
+        )
+        assertTrue(!afterMove.plan.stages["lang_observation"]!!.content.contains(uLine.verbatimText))
+        assertTrue(afterMove.plan.stages["lang_synthesis"]!!.eval.contains(uLine.verbatimText))
+        assertEquals(
+            com.example.model.FieldSource.USER,
+            afterMove.plan.stages["lang_synthesis"]!!.sourceFor("eval")
+        )
+        assertEquals(
+            com.example.model.ClassificationSource.USER_EDIT,
+            afterMove.plan.stages["lang_synthesis"]!!.classificationSourceFor("eval")
+        )
+        val movedUnit = afterMove.report.extractedUnits.first { it.id == uLine.unitId }
+        assertEquals("lang_synthesis", movedUnit.assignedStageKey)
+        assertEquals("eval", movedUnit.assignedField)
+        assertEquals(com.example.model.ClassificationSource.USER_EDIT, movedUnit.classificationSource)
+        assertTrue(afterMove.report.integrityReport!!.missingUnits.isEmpty())
+    }
+
+    @Test
+    fun `phase2_7 - retry works without losing extracted data and ViewModel exits Parsing state on failure`() {
+        val application = ApplicationProvider.getApplicationContext<android.app.Application>()
+        val db = androidx.room.Room.inMemoryDatabaseBuilder(application, com.example.data.AppDatabase::class.java)
+            .allowMainThreadQueries()
+            .build()
+        val repo = com.example.data.JadhadhaRepository(db.jadhadhaDao(), application)
+        val viewModel = com.example.ui.JadhadhaViewModel(application, repo)
+
+        fun pumpUntil(condition: () -> Boolean) {
+            val deadline = System.currentTimeMillis() + 4000L
+            while (!condition() && System.currentTimeMillis() < deadline) {
+                org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+                Thread.sleep(20)
+                org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+            }
+        }
+
+        val raw = """
+            المكون: الدرس اللغوي
+            الموضوع: صيغ المبالغة
+            أوزان صيغ المبالغة القياسية الخمسة: فعّال، مفعال، فعول، فعيل، فَعِل.
+            تحويل اسم الفاعل إلى صيغ مبالغة في سياقات دلالية متنوعة.
+        """.trimIndent()
+
+        try {
+            viewModel.submitPdfApiKey("AIzaSyValidTestKeyForGeminiClassification12345")
+            viewModel.updateExtractorTopic("صيغ المبالغة")
+            viewModel.updateExtractorRawText(raw)
+
+            pumpUntil {
+                viewModel.uiState.value.extractorParseResult != null && !viewModel.uiState.value.isParsing
+            }
+            val initialParse = viewModel.uiState.value.extractorParseResult
+            assertNotNull(initialParse)
+            assertEquals(raw, viewModel.uiState.value.extractorRawText)
+            val u1 = initialParse!!.report.unclassifiedLines[0]
+            val u2 = initialParse.report.unclassifiedLines[1]
+
+            // Step 1: First attempt fails due to network timeout
+            com.example.ai.GeminiAiService.setTransportForTesting(
+                com.example.ai.GeminiAiService.GeminiTransport { _, _, _ ->
+                    throw java.io.IOException("انتهت مهلة الاتصال بالخادم")
+                }
+            )
+            viewModel.delegateExtractorToBuiltInAi()
+            pumpUntil {
+                !viewModel.uiState.value.isParsing &&
+                    viewModel.uiState.value.extractorParseResult?.report?.geminiFailed == true
+            }
+
+            // Verify UI is NOT stuck in ExtractionState.Parsing, extracted raw text & units are preserved, and fallback is marked
+            assertTrue(viewModel.uiState.value.extractionState !is com.example.ui.ExtractionState.Parsing)
+            assertTrue(!viewModel.uiState.value.isParsing)
+            assertEquals(raw, viewModel.uiState.value.extractorRawText)
+            val afterFailureResult = viewModel.uiState.value.extractorParseResult!!
+            assertTrue(afterFailureResult.report.geminiFailed)
+            assertTrue(afterFailureResult.report.isLocalFallback)
+            assertTrue(!afterFailureResult.report.isAiDelegated)
+            assertTrue(afterFailureResult.report.integrityReport!!.missingUnits.isEmpty())
+
+            // Step 2: Retry WITHOUT re-importing the file; this time Gemini succeeds
+            com.example.ai.GeminiAiService.setTransportForTesting(
+                com.example.ai.GeminiAiService.GeminiTransport { _, _, _ ->
+                    val json = """
+                        {
+                          "classifications": [
+                            {
+                              "unitId": "${u1.unitId}",
+                              "originalText": "${u1.verbatimText}",
+                              "proposedCategory": "EDUCATIONAL_CONTENT",
+                              "component": "LANGUAGE",
+                              "stageKey": "lang_synthesis",
+                              "targetField": "content",
+                              "confidence": 0.95,
+                              "source": "GEMINI",
+                              "rationale": "أوزان صيغ المبالغة في مرحلة الاستنتاج"
+                            },
+                            {
+                              "unitId": "${u2.unitId}",
+                              "originalText": "${u2.verbatimText}",
+                              "proposedCategory": "EVALUATION",
+                              "component": "LANGUAGE",
+                              "stageKey": "lang_application",
+                              "targetField": "eval",
+                              "confidence": 0.92,
+                              "source": "GEMINI",
+                              "rationale": "تحويل اسم الفاعل إلى صيغ مبالغة في مرحلة التطبيق"
+                            }
+                          ]
+                        }
+                    """.trimIndent()
+                    200 to json
+                }
+            )
+
+            viewModel.retryAiClassification()
+            pumpUntil {
+                !viewModel.uiState.value.isParsing &&
+                    viewModel.uiState.value.extractorParseResult?.report?.isAiDelegated == true
+            }
+
+            assertTrue(viewModel.uiState.value.extractionState is com.example.ui.ExtractionState.Done)
+            val afterRetryResult = viewModel.uiState.value.extractorParseResult!!
+            assertTrue("Retry must succeed with Gemini delegation", afterRetryResult.report.isAiDelegated)
+            assertTrue(!afterRetryResult.report.geminiFailed)
+            assertTrue(!afterRetryResult.report.isLocalFallback)
+            assertEquals(raw, viewModel.uiState.value.extractorRawText)
+            assertTrue(afterRetryResult.plan.stages["lang_synthesis"]!!.content.contains(u1.verbatimText))
+            assertTrue(afterRetryResult.plan.stages["lang_application"]!!.eval.contains(u2.verbatimText))
+            assertEquals(com.example.model.FieldSource.AI, afterRetryResult.plan.stages["lang_synthesis"]!!.sourceFor("content"))
+            assertEquals(com.example.model.FieldSource.AI, afterRetryResult.plan.stages["lang_application"]!!.sourceFor("eval"))
+            assertTrue(afterRetryResult.report.integrityReport!!.missingUnits.isEmpty())
+        } finally {
+            com.example.ai.GeminiAiService.resetTransportForTesting()
+            com.example.ai.GeminiAiService.clearSavedApiKey(application)
+            db.close()
+        }
+    }
+
+    @Test
+    fun `phase2_verification_1 - confidence threshold boundaries 0_64 0_65 0_66 and dynamic threshold customization`() = kotlinx.coroutines.runBlocking {
+        val raw = """
+            المكون: النصوص القرائية
+            الموضوع: المنفى
+            العنصر الأول: ملاحظة دلالة العنوان وعلاقته بمضمون النص.
+            العنصر الثاني: استخلاص الحقول الدلالية المهيمنة في النص.
+            العنصر الثالث: تركيب خلاصة تبرز أبعاد النص الوطنية والإنسانية.
+        """.trimIndent()
+
+        val initial = com.example.extractor.JadhadhaParser.parseWithReport(raw, "المنفى")
+        assertEquals(3, initial.report.unclassifiedLines.size)
+        val u64 = initial.report.unclassifiedLines[0]
+        val u65 = initial.report.unclassifiedLines[1]
+        val u66 = initial.report.unclassifiedLines[2]
+
+        val boundaryJson = """
+            {
+              "items": [
+                {
+                  "unitId": "${u64.unitId}",
+                  "originalText": "${u64.verbatimText}",
+                  "proposedCategory": "EDUCATIONAL_CONTENT",
+                  "component": "READING",
+                  "stageKey": "observation",
+                  "targetField": "content",
+                  "confidence": 0.64,
+                  "source": "GEMINI",
+                  "rationale": "ثقة حدية أقل من العتبة (0.64)"
+                },
+                {
+                  "unitId": "${u65.unitId}",
+                  "originalText": "${u65.verbatimText}",
+                  "proposedCategory": "ANALYSIS_DISCUSSION",
+                  "component": "READING",
+                  "stageKey": "analysis",
+                  "targetField": "content",
+                  "confidence": 0.65,
+                  "source": "GEMINI",
+                  "rationale": "ثقة حدية مساوية للعتبة تماماً (0.65)"
+                },
+                {
+                  "unitId": "${u66.unitId}",
+                  "originalText": "${u66.verbatimText}",
+                  "proposedCategory": "EDUCATIONAL_CONTENT",
+                  "component": "READING",
+                  "stageKey": "synthesis",
+                  "targetField": "content",
+                  "confidence": 0.66,
+                  "source": "GEMINI",
+                  "rationale": "ثقة حدية أعلى من العتبة (0.66)"
+                }
+              ]
+            }
+        """.trimIndent()
+
+        // 1. Validate with default threshold (DEFAULT_CONFIDENCE_THRESHOLD = 0.65)
+        val defaultValidation = com.example.ai.GeminiAiService.validateAndParseGeminiClassificationJson(
+            rawJson = boundaryJson,
+            originalUnits = initial.report.extractedUnits,
+            targetComponent = com.example.model.PedagogicalComponent.READING
+        )
+        assertEquals(0.65, com.example.ai.GeminiAiService.DEFAULT_CONFIDENCE_THRESHOLD, 0.0001)
+        assertEquals(listOf(u65.unitId, u66.unitId), defaultValidation.acceptedItems.map { it.unitId })
+        assertEquals(listOf(u64.unitId), defaultValidation.lowConfidenceItems.map { it.unitId })
+
+        // 2. Verify end-to-end in classifyAndRefineExtraction: 0.64 is NOT auto-inserted into stages and is NOT lost
+        try {
+            com.example.ai.GeminiAiService.setTransportForTesting { _, _, _ -> 200 to boundaryJson }
+            val refined = com.example.ai.GeminiAiService.classifyAndRefineExtraction(
+                rawText = raw,
+                initialResult = initial,
+                customKey = "AIzaSyValidTestKeyForGeminiClassification12345",
+                preferLocalRulesFirst = false
+            )
+            // 0.64 must NOT enter observation.content
+            assertTrue(!refined.plan.stages["observation"]!!.content.contains(u64.verbatimText))
+            // 0.65 and 0.66 MUST enter analysis.content and synthesis.content
+            assertTrue(refined.plan.stages["analysis"]!!.content.contains(u65.verbatimText))
+            assertTrue(refined.plan.stages["synthesis"]!!.content.contains(u66.verbatimText))
+            // 0.64 is preserved in unclassifiedLines with its metadata for human review
+            assertEquals(1, refined.report.unclassifiedLines.size)
+            assertEquals(u64.unitId, refined.report.unclassifiedLines.first().unitId)
+            assertEquals(0.64, refined.report.unclassifiedLines.first().confidence!!, 0.0001)
+            assertTrue(refined.report.integrityReport!!.missingUnits.isEmpty())
+
+            // 3. Verify threshold is configurable without refactoring (e.g. threshold = 0.67 rejects 0.65 & 0.66; threshold = 0.60 accepts all 3)
+            val strictValidation = com.example.ai.GeminiAiService.validateAndParseGeminiClassificationJson(
+                rawJson = boundaryJson,
+                originalUnits = initial.report.extractedUnits,
+                targetComponent = com.example.model.PedagogicalComponent.READING,
+                confidenceThreshold = 0.67
+            )
+            assertEquals(0, strictValidation.acceptedItems.size)
+            assertEquals(3, strictValidation.lowConfidenceItems.size)
+
+            val lenientValidation = com.example.ai.GeminiAiService.validateAndParseGeminiClassificationJson(
+                rawJson = boundaryJson,
+                originalUnits = initial.report.extractedUnits,
+                targetComponent = com.example.model.PedagogicalComponent.READING,
+                confidenceThreshold = 0.60
+            )
+            assertEquals(3, lenientValidation.acceptedItems.size)
+            assertEquals(0, lenientValidation.lowConfidenceItems.size)
+        } finally {
+            com.example.ai.GeminiAiService.resetTransportForTesting()
+        }
+    }
+
+    @Test
+    fun `phase2_verification_2 - classifyPedagogicalContextLocally distinguishes all 9 categories and similar-vocabulary sentences`() {
+        // Part A: 5 sentences sharing the exact same core vocabulary ("فرضية القراءة", "تحليل", "تقويم") but different syntactic/pedagogical functions
+        val sObjective = "القدرة على صياغة فرضية القراءة وتحليل النص وتقويم مضمونه."
+        val sTeacher = "يوجه الأستاذ المتعلمين إلى صياغة فرضية القراءة لتقويم فهمهم الأولي وتحليل العتبات."
+        val sLearner = "يصوغ المتعلمون فرضية القراءة ويناقشون مؤشرات التحليل والتقويم."
+        val sContent = "فرضية القراءة: نفترض أن النص يتناول تحليل واقع المنفى وتقويم المرحلة الاستعمارية."
+        val sEval = "تقويم مدى قدرة المتعلمين على تمحيص فرضية القراءة وتحليل النص."
+
+        val cObj = com.example.ai.GeminiAiService.classifyPedagogicalContextLocally(sObjective, com.example.model.PedagogicalComponent.READING, "u1")!!
+        val cTeacher = com.example.ai.GeminiAiService.classifyPedagogicalContextLocally(sTeacher, com.example.model.PedagogicalComponent.READING, "u2")!!
+        val cLearner = com.example.ai.GeminiAiService.classifyPedagogicalContextLocally(sLearner, com.example.model.PedagogicalComponent.READING, "u3")!!
+        val cContent = com.example.ai.GeminiAiService.classifyPedagogicalContextLocally(sContent, com.example.model.PedagogicalComponent.READING, "u4")!!
+        val cEval = com.example.ai.GeminiAiService.classifyPedagogicalContextLocally(sEval, com.example.model.PedagogicalComponent.READING, "u5")!!
+
+        assertEquals(com.example.model.PedagogicalCategory.OBJECTIVES_COMPETENCIES, cObj.proposedCategory)
+        assertEquals("abil", cObj.targetField)
+
+        assertEquals(com.example.model.PedagogicalCategory.TEACHER_ACTIVITIES, cTeacher.proposedCategory)
+        assertEquals("teacher", cTeacher.targetField)
+
+        assertEquals(com.example.model.PedagogicalCategory.LEARNER_ACTIVITIES, cLearner.proposedCategory)
+        assertEquals("content", cLearner.targetField)
+
+        assertEquals(com.example.model.PedagogicalCategory.EDUCATIONAL_CONTENT, cContent.proposedCategory)
+        assertEquals("content", cContent.targetField)
+
+        assertEquals(com.example.model.PedagogicalCategory.EVALUATION, cEval.proposedCategory)
+        assertEquals("eval", cEval.targetField)
+
+        // Part B: Verify the remaining 4 of the 9 categories (MATERIALS_METHODS, INTRODUCTION_LAUNCH, ANALYSIS_DISCUSSION, SUPPORT_REMEDIATION)
+        val cMaterials = com.example.ai.GeminiAiService.classifyPedagogicalContextLocally(
+            "الوسائل الديداكتيكية: السبورة وكتاب المتعلم والصور التوضيحية.",
+            com.example.model.PedagogicalComponent.READING,
+            "u6"
+        )!!
+        val cIntro = com.example.ai.GeminiAiService.classifyPedagogicalContextLocally(
+            "وضعية الانطلاق: استحضار المكتسبات السابقة حول شعر الغربة والحنين.",
+            com.example.model.PedagogicalComponent.READING,
+            "u7"
+        )!!
+        val cAnalysis = com.example.ai.GeminiAiService.classifyPedagogicalContextLocally(
+            "الحقول الدلالية: حقل المعاناة في الغربة وحقل التعلق بالوطن.",
+            com.example.model.PedagogicalComponent.READING,
+            "u8"
+        )!!
+        val cSupport = com.example.ai.GeminiAiService.classifyPedagogicalContextLocally(
+            "دعم فردي ومعالجة تعثرات المتعلمين في القراءة والتحليل.",
+            com.example.model.PedagogicalComponent.READING,
+            "u9"
+        )!!
+
+        assertEquals(com.example.model.PedagogicalCategory.MATERIALS_METHODS, cMaterials.proposedCategory)
+        assertEquals(com.example.model.PedagogicalCategory.INTRODUCTION_LAUNCH, cIntro.proposedCategory)
+        assertEquals(com.example.model.PedagogicalCategory.ANALYSIS_DISCUSSION, cAnalysis.proposedCategory)
+        assertEquals(com.example.model.PedagogicalCategory.SUPPORT_REMEDIATION, cSupport.proposedCategory)
+
+        // Confirm all 9 categories were produced and tagged strictly as LOCAL_RULE
+        val allNine = listOf(cObj, cTeacher, cLearner, cContent, cEval, cMaterials, cIntro, cAnalysis, cSupport)
+        assertEquals(9, allNine.map { it.proposedCategory }.toSet().size)
+        assertTrue(allNine.all { it.source == com.example.model.ClassificationSource.LOCAL_RULE })
+
+        // Part C: Sentence containing keywords in the middle without a syntactic head returns null (not keyword-bag matched)
+        val ambiguous = com.example.ai.GeminiAiService.classifyPedagogicalContextLocally(
+            "ملاحظات عامة حول فرضية القراءة والتحليل والتقويم والدعم في القسم.",
+            com.example.model.PedagogicalComponent.READING,
+            "u10"
+        )
+        assertTrue("Sentence without syntactic/pedagogical frame must return null rather than match isolated keywords", ambiguous == null)
+    }
+
+    @Test
+    fun `phase2_verification_3 - disambiguate overlapping content fields and prevent conflicting dual assignment`() = kotlinx.coroutines.runBlocking {
+        // 1. Disambiguate categories that share targetField = "content" (INTRODUCTION_LAUNCH, ANALYSIS_DISCUSSION, EDUCATIONAL_CONTENT, LEARNER_ACTIVITIES)
+        // vs TEACHER_ACTIVITIES ("teacher") using stageKey + pedagogical context
+        val introSession1 = com.example.ai.GeminiAiService.classifyPedagogicalContextLocally(
+            "تمهيد إشكالي حول مرحلة الحماية الفرنسية ونفي الملك محمد الخامس.",
+            com.example.model.PedagogicalComponent.READING,
+            "u_intro1"
+        )!!
+        val introSession2 = com.example.ai.GeminiAiService.classifyPedagogicalContextLocally(
+            "تذكير بالحصة السابقة واسترجاع المضمون العام للنص.",
+            com.example.model.PedagogicalComponent.READING,
+            "u_intro2"
+        )!!
+        // Analysis sentence that mentions "العنوان" and "تمهيد" as secondary words must STILL resolve to "analysis", NOT "observation" or "diagnostic"
+        val analysisWithTitleMention = com.example.ai.GeminiAiService.classifyPedagogicalContextLocally(
+            "الحقول الدلالية: علاقة معجم المعاناة بدلالة العنوان وتمهيد الكاتب.",
+            com.example.model.PedagogicalComponent.READING,
+            "u_analysis"
+        )!!
+        val eduContentThreshold = com.example.ai.GeminiAiService.classifyPedagogicalContextLocally(
+            "صاحب النص: روم لاندو، كاتب ومؤرخ إنجليزي.",
+            com.example.model.PedagogicalComponent.READING,
+            "u_edu_obs"
+        )!!
+        val eduContentSynthesis = com.example.ai.GeminiAiService.classifyPedagogicalContextLocally(
+            "خلاصة تركيبية تبرز صمود الأسرة الملكية والشعب المغربي من أجل الاستقلال.",
+            com.example.model.PedagogicalComponent.READING,
+            "u_edu_syn"
+        )!!
+        val learnerActivity = com.example.ai.GeminiAiService.classifyPedagogicalContextLocally(
+            "يقرأ المتعلمون النص قراءة تناوبية ويشرحون المفردات الصعبة في سياقها.",
+            com.example.model.PedagogicalComponent.READING,
+            "u_learner"
+        )!!
+        val teacherActivity = com.example.ai.GeminiAiService.classifyPedagogicalContextLocally(
+            "يقرأ الأستاذ النص قراءة نموذجية مراعياً مخارج الحروف وصفاتها.",
+            com.example.model.PedagogicalComponent.READING,
+            "u_teacher"
+        )!!
+
+        assertEquals("diagnostic" to "content", introSession1.stageKey to introSession1.targetField)
+        assertEquals("session2_intro" to "content", introSession2.stageKey to introSession2.targetField)
+        assertEquals("analysis" to "content", analysisWithTitleMention.stageKey to analysisWithTitleMention.targetField)
+        assertEquals("observation" to "content", eduContentThreshold.stageKey to eduContentThreshold.targetField)
+        assertEquals("synthesis" to "content", eduContentSynthesis.stageKey to eduContentSynthesis.targetField)
+        assertEquals("comprehension" to "content", learnerActivity.stageKey to learnerActivity.targetField)
+        assertEquals("comprehension" to "teacher", teacherActivity.stageKey to teacherActivity.targetField)
+
+        // 2. Verify a unit cannot be assigned to two conflicting classifications simultaneously
+        val raw = """
+            المكون: النصوص القرائية
+            الموضوع: المنفى
+            يطرح الأستاذ أسئلة تمهيدية لاستحضار مكتسبات الدرس السابق.
+        """.trimIndent()
+        val initial = com.example.extractor.JadhadhaParser.parseWithReport(raw, "المنفى")
+        val localClassified = com.example.ai.GeminiAiService.classifyWithLocalRulesOnly(initial)
+        val unitId = localClassified.report.extractedUnits.first { it.verbatimText.contains("يطرح الأستاذ أسئلة تمهيدية") }.id
+        assertTrue(localClassified.plan.stages["diagnostic"]!!.teacher.any { it.contains("يطرح الأستاذ أسئلة تمهيدية") })
+
+        // Reassign the same unit to observation -> eval; verify it is removed from diagnostic -> teacher
+        val reassigned = com.example.extractor.JadhadhaParser.modifyUnitClassification(
+            currentResult = localClassified,
+            unitId = unitId,
+            targetStageKey = "observation",
+            targetField = "eval",
+            newCategory = com.example.model.PedagogicalCategory.EVALUATION
+        )
+        assertTrue(!reassigned.plan.stages["diagnostic"]!!.teacher.any { it.contains("يطرح الأستاذ أسئلة تمهيدية") })
+        assertTrue(reassigned.plan.stages["observation"]!!.eval.any { it.contains("يطرح الأستاذ أسئلة تمهيدية") })
+    }
+
+    @Test
+    fun `phase2_verification_4 - Gemini response completeness with omitted units duplicate unitId and incompatible stageKey or targetField`() = kotlinx.coroutines.runBlocking {
+        val raw = """
+            المكون: النصوص القرائية
+            الموضوع: المنفى
+            البند الأول — استخلاص المغزى العام للنص السردي وأبعاده.
+            البند الثاني — إشارة سياقية عامة ذات ثقة منخفضة تحتاج إلى مراجعة الأستاذ.
+            البند الثالث — عنصر أغفله Gemini ولم يدرجه في مصفوفة JSON.
+            البند الرابع — عنصر كرر Gemini معرفه مرتين بتصنيفين متعارضين.
+            البند الخامس — عنصر أرجعه Gemini بحقل مستهدف غير متوافق مع فئته البيداغوجية.
+            البند السادس — عنصر أرجعه Gemini بمرحلة غير متوافقة تربوياً مع فئته.
+        """.trimIndent()
+
+        val initial = com.example.extractor.JadhadhaParser.parseWithReport(raw, "المنفى")
+        assertEquals(6, initial.report.unclassifiedLines.size)
+        val u1 = initial.report.unclassifiedLines[0] // Valid high confidence -> acceptedItems
+        val u2 = initial.report.unclassifiedLines[1] // Valid low confidence (0.50) -> lowConfidenceItems
+        val u3 = initial.report.unclassifiedLines[2] // Omitted from JSON -> omittedUnitIds
+        val u4 = initial.report.unclassifiedLines[3] // Duplicate unitId with conflicting classifications -> rejectedUnitIds
+        val u5 = initial.report.unclassifiedLines[4] // Incompatible targetField (TEACHER_ACTIVITIES + "eval") -> rejectedUnitIds
+        val u6 = initial.report.unclassifiedLines[5] // Incompatible stageKey (INTRODUCTION_LAUNCH + "investment") -> rejectedUnitIds
+
+        val mixedResponseJson = """
+            {
+              "items": [
+                {
+                  "unitId": "${u1.unitId}",
+                  "originalText": "${u1.verbatimText}",
+                  "proposedCategory": "EDUCATIONAL_CONTENT",
+                  "component": "READING",
+                  "stageKey": "comprehension",
+                  "targetField": "content",
+                  "confidence": 0.91,
+                  "source": "GEMINI",
+                  "rationale": "مضمون الفهم العام للنص"
+                },
+                {
+                  "unitId": "${u2.unitId}",
+                  "originalText": "${u2.verbatimText}",
+                  "proposedCategory": "EDUCATIONAL_CONTENT",
+                  "component": "READING",
+                  "stageKey": "observation",
+                  "targetField": "content",
+                  "confidence": 0.50,
+                  "source": "GEMINI",
+                  "rationale": "ثقة منخفضة تحتاج إلى مراجعة"
+                },
+                {
+                  "unitId": "${u4.unitId}",
+                  "originalText": "${u4.verbatimText}",
+                  "proposedCategory": "TEACHER_ACTIVITIES",
+                  "component": "READING",
+                  "stageKey": "observation",
+                  "targetField": "teacher",
+                  "confidence": 0.88,
+                  "source": "GEMINI",
+                  "rationale": "التصنيف الأول للوحدة المكررة"
+                },
+                {
+                  "unitId": "${u4.unitId}",
+                  "originalText": "${u4.verbatimText}",
+                  "proposedCategory": "EVALUATION",
+                  "component": "READING",
+                  "stageKey": "analysis",
+                  "targetField": "eval",
+                  "confidence": 0.89,
+                  "source": "GEMINI",
+                  "rationale": "التصنيف الثاني المتعارض لنفس المعرف"
+                },
+                {
+                  "unitId": "${u5.unitId}",
+                  "originalText": "${u5.verbatimText}",
+                  "proposedCategory": "TEACHER_ACTIVITIES",
+                  "component": "READING",
+                  "stageKey": "analysis",
+                  "targetField": "eval",
+                  "confidence": 0.92,
+                  "source": "GEMINI",
+                  "rationale": "حقل eval غير متوافق مع أنشطة الأستاذ"
+                },
+                {
+                  "unitId": "${u6.unitId}",
+                  "originalText": "${u6.verbatimText}",
+                  "proposedCategory": "INTRODUCTION_LAUNCH",
+                  "component": "READING",
+                  "stageKey": "investment",
+                  "targetField": "content",
+                  "confidence": 0.90,
+                  "source": "GEMINI",
+                  "rationale": "مرحلة الاستثمار غير متوافقة مع التمهيد والانطلاق"
+                }
+              ]
+            }
+        """.trimIndent()
+
+        val sentUnits = initial.report.unclassifiedLines.map { uLine ->
+            initial.report.extractedUnits.first { it.id == uLine.unitId }
+        }
+        val validation = com.example.ai.GeminiAiService.validateAndParseGeminiClassificationJson(
+            rawJson = mixedResponseJson,
+            originalUnits = sentUnits,
+            targetComponent = com.example.model.PedagogicalComponent.READING
+        )
+
+        // 1. Verify each of the 6 sent units is accounted for in exactly one of the 4 states:
+        //    - Accepted: u1
+        //    - Low confidence: u2
+        //    - Rejected with reason: u4 (conflicting duplicate), u5 (incompatible targetField), u6 (incompatible stageKey)
+        //    - Omitted / unclassified: u3
+        assertEquals(listOf(u1.unitId), validation.acceptedItems.map { it.unitId })
+        assertEquals(listOf(u2.unitId), validation.lowConfidenceItems.map { it.unitId })
+        assertEquals(setOf(u4.unitId, u5.unitId, u6.unitId), validation.rejectedUnitIds.toSet())
+        assertEquals(listOf(u3.unitId), validation.omittedUnitIds)
+        assertEquals(3, validation.rejectedReasons.size)
+
+        val totalAccountedSet = validation.acceptedItems.map { it.unitId }.toSet() +
+            validation.lowConfidenceItems.map { it.unitId }.toSet() +
+            validation.rejectedUnitIds.toSet() +
+            validation.omittedUnitIds.toSet()
+        assertEquals(sentUnits.map { it.id }.toSet(), totalAccountedSet)
+
+        // 2. Verify end-to-end in classifyAndRefineExtraction: only u1 enters the plan; u2..u6 remain in unclassifiedLines without loss
+        try {
+            com.example.ai.GeminiAiService.setTransportForTesting { _, _, _ -> 200 to mixedResponseJson }
+            val refined = com.example.ai.GeminiAiService.classifyAndRefineExtraction(
+                rawText = raw,
+                initialResult = initial,
+                customKey = "AIzaSyValidTestKeyForGeminiClassification12345",
+                preferLocalRulesFirst = false
+            )
+            assertTrue(refined.plan.stages["comprehension"]!!.content.contains(u1.verbatimText))
+            assertEquals(5, refined.report.unclassifiedLines.size)
+            assertEquals(
+                setOf(u2.unitId, u3.unitId, u4.unitId, u5.unitId, u6.unitId),
+                refined.report.unclassifiedLines.map { it.unitId }.toSet()
+            )
+            // Neither of u4's conflicting classifications was applied
+            assertTrue(!refined.plan.stages["observation"]!!.teacher.contains(u4.verbatimText))
+            assertTrue(!refined.plan.stages["analysis"]!!.eval.contains(u4.verbatimText))
+            // u5's incompatible targetField and u6's incompatible stageKey were NOT applied
+            assertTrue(!refined.plan.stages["analysis"]!!.eval.contains(u5.verbatimText))
+            assertTrue(!refined.plan.stages["investment"]!!.content.contains(u6.verbatimText))
+            // Zero units lost
+            assertTrue(refined.report.integrityReport!!.missingUnits.isEmpty())
+        } finally {
+            com.example.ai.GeminiAiService.resetTransportForTesting()
+        }
+    }
+
+    @Test
+    fun `phase2_verification_5 - distinguish Mock transport from Real connection and probe live environment`() = kotlinx.coroutines.runBlocking {
+        val application = ApplicationProvider.getApplicationContext<android.app.Application>()
+        com.example.ai.GeminiAiService.resetTransportForTesting()
+        com.example.ai.GeminiAiService.clearSavedApiKey(application)
+
+        val envKey = System.getenv("GEMINI_API_KEY")?.trim().orEmpty()
+        val effectiveDefaultKey = com.example.ai.GeminiAiService.getEffectiveApiKey(null)
+        val hasRealKeyInEnv = com.example.ai.GeminiAiService.hasValidApiKey(envKey.ifEmpty { null })
+
+        val sampleUnit = com.example.model.ExtractedUnit(
+            id = "unit_live_1",
+            verbatimText = "صياغة خلاصة تركيبية لمضامين النص السردي وأساليبه.",
+            location = com.example.model.UnitLocation(lineNumber = 1)
+        )
+
+        if (!hasRealKeyInEnv) {
+            // Confirm that without a real key in the test environment, hasValidApiKey is false and real call fails honestly
+            assertEquals("", effectiveDefaultKey)
+            assertTrue(!com.example.ai.GeminiAiService.hasValidApiKey(null))
+            val resultWithoutKey = com.example.ai.GeminiAiService.classifyUnitsWithGemini(
+                units = listOf(sampleUnit),
+                component = com.example.model.PedagogicalComponent.READING,
+                topic = "المنفى",
+                customKey = null
+            )
+            assertTrue(resultWithoutKey.isFailure)
+            assertEquals(
+                com.example.ai.GeminiAiService.MSG_GEMINI_KEY_MISSING,
+                resultWithoutKey.exceptionOrNull()?.message
+            )
+        } else {
+            // If a real API key is injected in the environment, execute a real OkHttp call to Gemini
+            val liveResult = com.example.ai.GeminiAiService.classifyUnitsWithGemini(
+                units = listOf(sampleUnit),
+                component = com.example.model.PedagogicalComponent.READING,
+                topic = "المنفى",
+                customKey = envKey.ifEmpty { effectiveDefaultKey }
+            )
+            assertNotNull(liveResult)
+        }
+    }
+
+    // =========================================================================
+    // PHASE 3 MANDATORY TESTS: DOCX GENERATION, TABLE STRUCTURE & TEMPLATES
+    // =========================================================================
+
+    @Test
+    fun `phase3_1 - create docx from complete JadhadhaPlan and reopen to verify all stages and fields`() {
+        val context = ApplicationProvider.getApplicationContext<android.app.Application>()
+        val completePlan = com.example.model.JadhadhaPlan(
+            topic = "قيم التضامن الإنساني في الشعر المعاصر",
+            componentType = com.example.model.PedagogicalComponent.READING,
+            info = com.example.model.JadhadhaInfo(
+                level = "السنة الثالثة من التعليم الثانوي الإعدادي",
+                unit = "الوحدة الثالثة",
+                domain = "المجال الحضاري والإنساني",
+                component = "النصوص القرائية",
+                duration = "ساعتان (حصتان)",
+                materials = "السبورة، كتاب المتعلم(ة)، الدفاتر، موارد رقمية",
+                reference = "المختار في اللغة العربية - ص: 98",
+                teacherName = "ذ. محمد العابد",
+                schoolName = "ثانوية أنوال الإعدادية",
+                communicativeComp = "قدرة المتعلم على التواصل بلغة عربية فصيحة ومناقشة القضايا الإنسانية.",
+                methodologicalComp = "تمكن المتعلم من آليات القراءة المنهجية للنص الشعري الحديث.",
+                culturalComp = "إغناء الرصيد الثقافي والمعرفي بقيم التضامن والتآزر الإنساني."
+            ),
+            stages = linkedMapOf(
+                "diagnostic" to com.example.model.StageData(
+                    abil = listOf("استحضار المكتسبات السابقة حول الشعر الوطني والإنساني."),
+                    teacher = listOf("يطرح الأستاذ أسئلة تشخيصية لربط الدرس الجديد بالسابق."),
+                    learner = listOf("يجيب المتعلمون عن الأسئلة الموجهة ويستحضرون تعلماتهم."),
+                    content = listOf("تمهيد حول مفهوم التضامن وأهميته في بناء المجتمعات."),
+                    eval = listOf("تقويم تشخيصي لرصد استعداد المتعلمين.")
+                ),
+                "observation" to com.example.model.StageData(
+                    abil = listOf("القدرة على ملاحظة العتبات وصياغة فرضية القراءة."),
+                    teacher = listOf("يوجه المتعلمين إلى قراءة العنوان والبيت الأول والأخير."),
+                    learner = listOf("يصوغ المتعلمون فرضيات القراءة انطلاقاً من المشيرات النصية."),
+                    content = listOf(
+                        "دلالة العنوان: مركب إضافي يحيل على البعد الإنساني للتضامن.",
+                        "فرضية القراءة: نفترض أن القصيدة تدعو إلى مؤازرة المحتاجين."
+                    ),
+                    eval = listOf("تمحيص الفرضيات المقترحة وتثمين الملائم منها.")
+                ),
+                "comprehension" to com.example.model.StageData(
+                    abil = listOf("التمكن من فهم المضامين الشعرية وشرح المفردات الصعبة."),
+                    teacher = listOf("يقرأ الأستاذ القصيدة قراءة نموذجية معبرة ثم يوجه القراءات الفردية."),
+                    learner = listOf("يشرح المتعلمون المفردات في سياقها ويستخلصون الفكرة العامة."),
+                    content = listOf(
+                        "الشروح اللغوية: الإيثار: تفضيل الغير على النفس.",
+                        "الفكرة العامة: دعوة الشاعر إلى ترسيخ قيم التكافل الإنساني."
+                    ),
+                    eval = listOf("تقويم النطق السليم ومخارج الحروف والفهم العام.")
+                ),
+                "session2_intro" to com.example.model.StageData(
+                    abil = listOf("تذكر مضامين الحصة الأولى والربط مع التحليل."),
+                    teacher = listOf("يستدرج المتعلمين للتذكير بالفكرة العامة للقصيدة."),
+                    content = listOf("التذكير بموضوع القصيدة ودلالاتها العامة."),
+                    eval = listOf("رصد قدرة المتعلمين على استرجاع المكتسبات.")
+                ),
+                "analysis" to com.example.model.StageData(
+                    abil = listOf("القدرة على تحليل الحقول الدلالية والخصائص الفنية للقصيدة."),
+                    teacher = listOf("يوزع المتعلمين إلى مجموعات لاستخراج الألفاظ الدالة على التضامن."),
+                    content = listOf(
+                        "الحقل الاجتماعي: الفقير، اليتيم، العون.",
+                        "الصورة الشعرية: توظيف الاستعارة المكنية لتجسيد التضامن."
+                    ),
+                    eval = listOf("تقويم تكويني لقياس قدرة المتعلمين على التحليل الفني.")
+                ),
+                "synthesis" to com.example.model.StageData(
+                    abil = listOf("القدرة على تجميع خلاصات النص في تركيب منسجم."),
+                    teacher = listOf("يطالب المتعلمين بصياغة خلاصة تركيبية جماعية وفردية."),
+                    content = listOf("تركيب يجمع بين البعد الإنساني للقصيدة ومقوماتها الجمالية."),
+                    eval = listOf("مناقشة الخلاصات التركيبية وتصويب التعثرات.")
+                ),
+                "investment" to com.example.model.StageData(
+                    abil = listOf("استثمار قيم النص في وضعيات تواصلية جديدة."),
+                    teacher = listOf("يكلف المتعلمين بكتابة فقرة حول مبادرة تضامنية محلية."),
+                    content = listOf("نشاط استثماري: إعداد بطاقة مشروع تضامني داخل المؤسسة."),
+                    eval = listOf("متابعة إنجازات المتعلمين وتقويمها.")
+                )
+            ),
+            extraParagraphs = listOf("ملاحظة بيداغوجية: يراعى الفروق الفردية أثناء توزيع المهام القرائية."),
+            unclassifiedItems = listOf("إحالة تكميلية: ديوان الشاعر - الطبعة الثانية.")
+        )
+
+        val outFile = java.io.File(context.cacheDir, "test_phase3_1_complete.docx")
+        com.example.docx.DocxGenerator.generateDocxToFile(outFile, completePlan)
+        assertTrue(outFile.exists() && outFile.length() > 1000L)
+
+        // Re-open the generated .docx and verify all content is present
+        val extracted = com.example.extractor.DocumentFileReader.extractStructuredDocx(outFile)
+        val reparsed = com.example.extractor.JadhadhaParser.parseWithReport(extracted.structuredText).plan
+
+        assertEquals("قيم التضامن الإنساني في الشعر المعاصر", reparsed.topic)
+        assertEquals("السنة الثالثة من التعليم الثانوي الإعدادي", reparsed.info.level)
+        assertEquals("الوحدة الثالثة", reparsed.info.unit)
+        assertEquals("المجال الحضاري والإنساني", reparsed.info.domain)
+        assertEquals("ساعتان (حصتان)", reparsed.info.duration)
+        assertEquals("ذ. محمد العابد", reparsed.info.teacherName)
+        assertEquals("ثانوية أنوال الإعدادية", reparsed.info.schoolName)
+        assertTrue(reparsed.info.communicativeComp.contains("التواصل بلغة عربية فصيحة"))
+        assertTrue(reparsed.info.methodologicalComp.contains("آليات القراءة المنهجية"))
+        assertTrue(reparsed.info.culturalComp.contains("قيم التضامن والتآزر"))
+
+        // Verify all 7 stages and their fields survived the .docx round-trip
+        for (stageKey in completePlan.stages.keys) {
+            val origStage = completePlan.stages[stageKey]!!
+            val reStage = reparsed.stages[stageKey]
+            assertNotNull("Stage $stageKey must exist after re-opening .docx", reStage)
+            assertTrue("Stage $stageKey abil must not be empty", reStage!!.abil.isNotEmpty())
+            assertTrue("Stage $stageKey teacher must not be empty", reStage.teacher.isNotEmpty())
+            assertTrue("Stage $stageKey content must not be empty", reStage.content.isNotEmpty())
+            assertTrue("Stage $stageKey eval must not be empty", reStage.eval.isNotEmpty())
+            origStage.learner.forEach { learnerLine ->
+                assertTrue(
+                    "Learner activity '$learnerLine' must be preserved in .docx",
+                    extracted.structuredText.contains(learnerLine)
+                )
+            }
+        }
+        assertTrue(extracted.structuredText.contains("ملاحظة بيداغوجية: يراعى الفروق الفردية"))
+        assertTrue(extracted.structuredText.contains("إحالة تكميلية: ديوان الشاعر"))
+    }
+
+    @Test
+    fun `phase3_2 - create docx with multi-row multi-column table and verify rows and columns`() {
+        val context = ApplicationProvider.getApplicationContext<android.app.Application>()
+        val multiTable = com.example.model.StructuredTable(
+            title = "جدول الظواهر الأسلوبية",
+            rows = listOf(
+                com.example.model.StructuredTableRow(
+                    isHeader = true,
+                    cells = listOf(
+                        com.example.model.StructuredTableCell("المثال النصي", isHeader = true),
+                        com.example.model.StructuredTableCell("نوع الأسلوب", isHeader = true),
+                        com.example.model.StructuredTableCell("أداته", isHeader = true),
+                        com.example.model.StructuredTableCell("دلالته السياقية", isHeader = true)
+                    )
+                ),
+                com.example.model.StructuredTableRow(
+                    cells = listOf(
+                        com.example.model.StructuredTableCell("يا أخي في كل أرض"),
+                        com.example.model.StructuredTableCell("أسلوب نداء"),
+                        com.example.model.StructuredTableCell("حرف النداء (يا)"),
+                        com.example.model.StructuredTableCell("إبراز الأخوة الإنسانية الشاملة")
+                    )
+                ),
+                com.example.model.StructuredTableRow(
+                    cells = listOf(
+                        com.example.model.StructuredTableCell("لا تترك المحتاج وحيداً"),
+                        com.example.model.StructuredTableCell("أسلوب نهي"),
+                        com.example.model.StructuredTableCell("لا الناهية"),
+                        com.example.model.StructuredTableCell("الحث على التآزر ونبذ التخلي")
+                    )
+                ),
+                com.example.model.StructuredTableRow(
+                    cells = listOf(
+                        com.example.model.StructuredTableCell("ما أجمل التضامن!"),
+                        com.example.model.StructuredTableCell("أسلوب تعجب"),
+                        com.example.model.StructuredTableCell("صيغة ما أفعله"),
+                        com.example.model.StructuredTableCell("تعظيم قيمة التكافل")
+                    )
+                )
+            ),
+            columnWidthsDxa = listOf(2200, 1800, 1800, 3200),
+            isRtl = true,
+            hasBorders = true
+        )
+
+        val basePlan = com.example.model.SamplePlans.READING_SAMPLE
+        val analysisStage = basePlan.stages["analysis"]!!
+        val updatedPlan = basePlan.copy(
+            stages = basePlan.stages.toMutableMap().apply {
+                put("analysis", analysisStage.copy(tables = listOf(multiTable)))
+            },
+            customTables = listOf(multiTable)
+        )
+
+        val outFile = java.io.File(context.cacheDir, "test_phase3_2_multirow_multicol.docx")
+        com.example.docx.DocxGenerator.generateDocxToFile(outFile, updatedPlan)
+
+        val extracted = com.example.extractor.DocumentFileReader.extractStructuredDocx(outFile)
+        // Top-level tables: Header (7x4), Main Stages (with nested multiTable inside analysis), plus customTable (4x4)
+        assertTrue(extracted.tables.size >= 3)
+        val reimportedCustomTable = extracted.tables.last()
+        assertEquals(4, reimportedCustomTable.rows.size)
+        assertTrue(reimportedCustomTable.rows[0].isHeader)
+        assertEquals(4, reimportedCustomTable.rows[0].cells.size)
+        assertEquals("المثال النصي", reimportedCustomTable.rows[0].cells[0].text)
+        assertEquals("نوع الأسلوب", reimportedCustomTable.rows[0].cells[1].text)
+        assertEquals("أداته", reimportedCustomTable.rows[0].cells[2].text)
+        assertEquals("دلالته السياقية", reimportedCustomTable.rows[0].cells[3].text)
+
+        assertEquals("يا أخي في كل أرض", reimportedCustomTable.rows[1].cells[0].text)
+        assertEquals("أسلوب نهي", reimportedCustomTable.rows[2].cells[1].text)
+        assertEquals("صيغة ما أفعله", reimportedCustomTable.rows[3].cells[2].text)
+        assertEquals("تعظيم قيمة التكافل", reimportedCustomTable.rows[3].cells[3].text)
+    }
+
+    @Test
+    fun `phase3_3 - preserve empty cells and horizontally and vertically merged cells`() {
+        val context = ApplicationProvider.getApplicationContext<android.app.Application>()
+
+        // 1. Test StructuredTable with empty cells, horizontal merge (gridSpan=2 & 3), and vertical merge (vMerge=restart/continue)
+        val complexMergedTable = com.example.model.StructuredTable(
+            rows = listOf(
+                // Row 0: 1 cell spanning all 4 columns (gridSpan=4)
+                com.example.model.StructuredTableRow(
+                    isHeader = true,
+                    cells = listOf(
+                        com.example.model.StructuredTableCell(
+                            text = "شبكة تقويم المهارات اللغوية والتركيبية",
+                            gridSpan = 4,
+                            isHeader = true
+                        )
+                    )
+                ),
+                // Row 1: col 0 starts vertical merge (vMerge="restart"), col 1 is empty (""), cols 2..3 merged horizontally (gridSpan=2)
+                com.example.model.StructuredTableRow(
+                    cells = listOf(
+                        com.example.model.StructuredTableCell(
+                            text = "المحور الصرفي",
+                            vMerge = "restart"
+                        ),
+                        com.example.model.StructuredTableCell(
+                            text = "",
+                            paragraphs = emptyList()
+                        ),
+                        com.example.model.StructuredTableCell(
+                            text = "ملاحظات تركيبية مدمجة أفقياً",
+                            gridSpan = 2
+                        )
+                    )
+                ),
+                // Row 2: col 0 continues vertical merge (vMerge="continue"), col 1 has value, col 2 is empty (""), col 3 has value
+                com.example.model.StructuredTableRow(
+                    cells = listOf(
+                        com.example.model.StructuredTableCell(
+                            text = "",
+                            paragraphs = emptyList(),
+                            vMerge = "continue"
+                        ),
+                        com.example.model.StructuredTableCell(
+                            text = "صياغة اسم الفاعل"
+                        ),
+                        com.example.model.StructuredTableCell(
+                            text = "",
+                            paragraphs = emptyList()
+                        ),
+                        com.example.model.StructuredTableCell(
+                            text = "تحقق كلي"
+                        )
+                    )
+                )
+            ),
+            columnWidthsDxa = listOf(2000, 2500, 2500, 2500),
+            isRtl = true,
+            hasBorders = true
+        )
+
+        // 2. Also test [جدول: ...] pipe syntax with empty cells in StageData.content
+        val baseLangPlan = com.example.model.SamplePlans.LANGUAGE_SAMPLE
+        val appStage = baseLangPlan.stages["lang_application"]!!
+        val pipeRowWithEmptyCells = listOf(
+            "[جدول: الجملة | المشتق |  | الإعراب]",
+            "[جدول: المؤمن شاكرٌ ربه | شاكرٌ |  | خبر مرفوع]"
+        )
+        val planWithMergesAndEmpty = baseLangPlan.copy(
+            stages = baseLangPlan.stages.toMutableMap().apply {
+                put("lang_application", appStage.copy(content = appStage.content + pipeRowWithEmptyCells))
+            },
+            customTables = listOf(complexMergedTable)
+        )
+
+        val outFile = java.io.File(context.cacheDir, "test_phase3_3_empty_and_merged.docx")
+        com.example.docx.DocxGenerator.generateDocxToFile(outFile, planWithMergesAndEmpty)
+
+        val extracted = com.example.extractor.DocumentFileReader.extractStructuredDocx(outFile)
+        val reimportedMerged = extracted.tables.last()
+
+        // Verify Row 0 horizontal merge (gridSpan=4)
+        assertEquals(3, reimportedMerged.rows.size)
+        assertEquals(1, reimportedMerged.rows[0].cells.size)
+        assertEquals(4, reimportedMerged.rows[0].cells[0].gridSpan)
+        assertEquals("شبكة تقويم المهارات اللغوية والتركيبية", reimportedMerged.rows[0].cells[0].text)
+
+        // Verify Row 1: vMerge="restart", empty cell at index 1, and gridSpan=2 at index 2
+        assertEquals(3, reimportedMerged.rows[1].cells.size)
+        assertEquals("restart", reimportedMerged.rows[1].cells[0].vMerge)
+        assertEquals("المحور الصرفي", reimportedMerged.rows[1].cells[0].text)
+        assertEquals("", reimportedMerged.rows[1].cells[1].text)
+        assertTrue(reimportedMerged.rows[1].cells[1].paragraphs.isEmpty())
+        assertEquals(2, reimportedMerged.rows[1].cells[2].gridSpan)
+        assertEquals("ملاحظات تركيبية مدمجة أفقياً", reimportedMerged.rows[1].cells[2].text)
+
+        // Verify Row 2: vMerge="continue", non-empty cell at index 1, empty cell at index 2, non-empty at index 3
+        assertEquals(4, reimportedMerged.rows[2].cells.size)
+        assertEquals("continue", reimportedMerged.rows[2].cells[0].vMerge)
+        assertEquals("صياغة اسم الفاعل", reimportedMerged.rows[2].cells[1].text)
+        assertEquals("", reimportedMerged.rows[2].cells[2].text)
+        assertEquals("تحقق كلي", reimportedMerged.rows[2].cells[3].text)
+
+        // Verify the pipe-syntax nested table inside lang_application also preserved its empty 3rd column
+        val mainStagesTable = extracted.tables[1]
+        val appRow = mainStagesTable.rows.last()
+        val appContentCell = appRow.cells[3]
+        assertTrue(appContentCell.nestedTables.isNotEmpty())
+        val nestedPipeTbl = appContentCell.nestedTables.last()
+        assertEquals(4, nestedPipeTbl.rows[0].cells.size)
+        assertEquals("الجملة", nestedPipeTbl.rows[0].cells[0].text)
+        assertEquals("المشتق", nestedPipeTbl.rows[0].cells[1].text)
+        assertEquals("", nestedPipeTbl.rows[0].cells[2].text)
+        assertEquals("الإعراب", nestedPipeTbl.rows[0].cells[3].text)
+    }
+
+    @Test
+    fun `phase3_4 - preserve nested tables inside cells across docx generation and re-import`() {
+        val context = ApplicationProvider.getApplicationContext<android.app.Application>()
+
+        val innerMostTable = com.example.model.StructuredTable(
+            rows = listOf(
+                com.example.model.StructuredTableRow(
+                    isHeader = true,
+                    cells = listOf(
+                        com.example.model.StructuredTableCell("الوزن الصرفي", isHeader = true),
+                        com.example.model.StructuredTableCell("الدلالة", isHeader = true)
+                    )
+                ),
+                com.example.model.StructuredTableRow(
+                    cells = listOf(
+                        com.example.model.StructuredTableCell("فَعَّال"),
+                        com.example.model.StructuredTableCell("الكثرة والمبالغة")
+                    )
+                )
+            )
+        )
+
+        val outerTableWithNested = com.example.model.StructuredTable(
+            rows = listOf(
+                com.example.model.StructuredTableRow(
+                    isHeader = true,
+                    cells = listOf(
+                        com.example.model.StructuredTableCell("القسم التحليلي", isHeader = true),
+                        com.example.model.StructuredTableCell("التفصيل والجدول الفرعي", isHeader = true)
+                    )
+                ),
+                com.example.model.StructuredTableRow(
+                    cells = listOf(
+                        com.example.model.StructuredTableCell("صيغ المبالغة"),
+                        com.example.model.StructuredTableCell(
+                            text = "أوزان صيغ المبالغة القياسية:",
+                            paragraphs = listOf("أوزان صيغ المبالغة القياسية:"),
+                            nestedTables = listOf(innerMostTable)
+                        )
+                    )
+                )
+            )
+        )
+
+        val basePlan = com.example.model.SamplePlans.LANGUAGE_SAMPLE
+        val planWithNested = basePlan.copy(customTables = listOf(outerTableWithNested))
+
+        val outFile = java.io.File(context.cacheDir, "test_phase3_4_nested_tables.docx")
+        com.example.docx.DocxGenerator.generateDocxToFile(outFile, planWithNested)
+
+        val extracted = com.example.extractor.DocumentFileReader.extractStructuredDocx(outFile)
+        // 1. Check the built-in nested analytical tables inside lang_observation of LANGUAGE_SAMPLE (9 rows + 6 rows = 15 rows)
+        val stagesTable = extracted.tables[1]
+        val obsContentCell = stagesTable.rows[2].cells[3]
+        assertEquals(2, obsContentCell.nestedTables.size)
+        assertEquals(15, obsContentCell.nestedTables.sumOf { it.rows.size })
+        assertEquals(9, obsContentCell.nestedTables[0].rows.size)
+        assertEquals(9, obsContentCell.nestedTables[0].rows[0].cells.size)
+        assertEquals(6, obsContentCell.nestedTables[1].rows.size)
+        assertEquals(6, obsContentCell.nestedTables[1].rows[0].cells.size)
+
+        // 2. Check the custom outer table and its nested innerMostTable (2x2)
+        val reimportedOuter = extracted.tables.last()
+        assertEquals(2, reimportedOuter.rows.size)
+        val parentCell = reimportedOuter.rows[1].cells[1]
+        assertEquals(listOf("أوزان صيغ المبالغة القياسية:"), parentCell.paragraphs)
+        assertEquals(1, parentCell.nestedTables.size)
+        val reimportedInner = parentCell.nestedTables[0]
+        assertEquals(2, reimportedInner.rows.size)
+        assertEquals(2, reimportedInner.rows[0].cells.size)
+        assertEquals("الوزن الصرفي", reimportedInner.rows[0].cells[0].text)
+        assertEquals("فَعَّال", reimportedInner.rows[1].cells[0].text)
+        assertEquals("الكثرة والمبالغة", reimportedInner.rows[1].cells[1].text)
+    }
+
+    @Test
+    fun `phase3_5 - import docx template and fill it without destroying styles headers footers media or sectPr`() {
+        val context = ApplicationProvider.getApplicationContext<android.app.Application>()
+        val templateFile = java.io.File(context.cacheDir, "test_phase3_5_template_source.docx")
+
+        val customStylesXml = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:docDefaults>
+    <w:rPrDefault>
+      <w:rPr>
+        <w:rFonts w:ascii="Traditional Arabic" w:hAnsi="Traditional Arabic" w:cs="Traditional Arabic"/>
+        <w:sz w:val="22"/>
+      </w:rPr>
+    </w:rPrDefault>
+  </w:docDefaults>
+  <w:style w:type="paragraph" w:styleId="CustomMinistryStyle">
+    <w:name w:val="Custom Ministry Style"/>
+  </w:style>
+</w:styles>"""
+
+        val customFontTableXml = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:fonts xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:font w:name="Traditional Arabic"><w:charset w:val="B2"/></w:font>
+</w:fonts>"""
+
+        val customNumberingXml = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:numFmt w:val="bullet"/></w:lvl></w:abstractNum>
+  <w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>
+</w:numbering>"""
+
+        val customSettingsXml = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:view w:val="print"/>
+  <w:zoom w:percent="100"/>
+</w:settings>"""
+
+        val header1Xml = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <w:p>
+    <w:r><w:t>المملكة المغربية - وزارة التربية الوطنية - {{المؤسسة}} - الأستاذ: {{الأستاذ}} - الدرس: {{الموضوع}}</w:t></w:r>
+  </w:p>
+</w:hdr>"""
+
+        val footer1Xml = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:p>
+    <w:r><w:t>المرجع المعتمد: {{المرجع}} | الصفحة </w:t></w:r>
+    <w:fldSimple w:instr="PAGE"/>
+  </w:p>
+</w:ftr>"""
+
+        val fakePngLogoBytes = byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x01, 0x02, 0x03, 0x04)
+
+        val documentRelsXml = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+  <Relationship Id="rIdHeader1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/>
+  <Relationship Id="rIdFooter1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="footer1.xml"/>
+  <Relationship Id="rIdLogo1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/ministry_logo.png"/>
+</Relationships>"""
+
+        val templateDocumentXml = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing">
+  <w:body>
+    <w:p><w:r><w:drawing><wp:inline><a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:graphicData><pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:blipFill><a:blip r:embed="rIdLogo1"/></pic:blipFill></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>
+    <w:tbl>
+      <w:tr>
+        <w:tc><w:p><w:r><w:t>المكون : النصوص القرائية</w:t></w:r></w:p></w:tc>
+        <w:tc><w:p><w:r><w:t>الموضوع : المنفى</w:t></w:r></w:p></w:tc>
+      </w:tr>
+    </w:tbl>
+    <w:sectPr>
+      <w:headerReference w:type="default" r:id="rIdHeader1"/>
+      <w:footerReference w:type="default" r:id="rIdFooter1"/>
+      <w:pgSz w:w="16838" w:h="11906" w:orient="landscape"/>
+      <w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720" w:header="360" w:footer="360" w:gutter="0"/>
+      <w:pgNumType w:start="1"/>
+      <w:bidi/>
+    </w:sectPr>
+  </w:body>
+</w:document>"""
+
+        java.util.zip.ZipOutputStream(java.io.FileOutputStream(templateFile)).use { zos ->
+            fun putStr(name: String, content: String) {
+                zos.putNextEntry(java.util.zip.ZipEntry(name))
+                zos.write(content.toByteArray(java.nio.charset.StandardCharsets.UTF_8))
+                zos.closeEntry()
+            }
+            putStr("[Content_Types].xml", """<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/></Types>""")
+            putStr("_rels/.rels", """<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>""")
+            putStr("word/_rels/document.xml.rels", documentRelsXml)
+            putStr("word/styles.xml", customStylesXml)
+            putStr("word/fontTable.xml", customFontTableXml)
+            putStr("word/numbering.xml", customNumberingXml)
+            putStr("word/settings.xml", customSettingsXml)
+            putStr("word/header1.xml", header1Xml)
+            putStr("word/footer1.xml", footer1Xml)
+            putStr("word/document.xml", templateDocumentXml)
+            zos.putNextEntry(java.util.zip.ZipEntry("word/media/ministry_logo.png"))
+            zos.write(fakePngLogoBytes)
+            zos.closeEntry()
+        }
+
+        // 1. Import the template via DocumentFileReader -> parse -> populate with full READING_SAMPLE data
+        val importedTemplate = com.example.extractor.DocumentFileReader.extractStructuredDocx(templateFile)
+        assertNotNull(importedTemplate.templateArchive)
+        val parsedFromTemplate = com.example.extractor.JadhadhaParser.parseWithReport(importedTemplate.structuredText).plan
+        assertNotNull(parsedFromTemplate.templateArchive)
+
+        val filledPlan = com.example.model.SamplePlans.READING_SAMPLE.copy(
+            templateArchive = parsedFromTemplate.templateArchive
+        )
+
+        // 2. Export the filled plan to a new .docx file
+        val filledFile = java.io.File(context.cacheDir, "test_phase3_5_template_filled.docx")
+        com.example.docx.DocxGenerator.generateDocxToFile(filledFile, filledPlan)
+
+        // 3. Inspect the ZIP entries of filledFile
+        val outEntries = mutableMapOf<String, ByteArray>()
+        java.util.zip.ZipInputStream(java.io.FileInputStream(filledFile)).use { zis ->
+            var e = zis.nextEntry
+            while (e != null) {
+                if (!e.isDirectory) outEntries[e.name] = zis.readBytes()
+                zis.closeEntry()
+                e = zis.nextEntry
+            }
+        }
+
+        // Verify styles, fontTable, numbering, settings, rels, and binary media logo are preserved intact
+        assertTrue(outEntries.containsKey("word/styles.xml"))
+        assertTrue(String(outEntries["word/styles.xml"]!!).contains("CustomMinistryStyle"))
+        assertEquals(customFontTableXml, String(outEntries["word/fontTable.xml"]!!))
+        assertEquals(customNumberingXml, String(outEntries["word/numbering.xml"]!!))
+        assertEquals(customSettingsXml, String(outEntries["word/settings.xml"]!!))
+        assertEquals(documentRelsXml, String(outEntries["word/_rels/document.xml.rels"]!!))
+        org.junit.Assert.assertArrayEquals(fakePngLogoBytes, outEntries["word/media/ministry_logo.png"])
+
+        // Verify header1.xml and footer1.xml placeholders were filled and page numbering was preserved
+        val filledHeaderXml = String(outEntries["word/header1.xml"]!!)
+        assertTrue(filledHeaderXml.contains("مدرسة أنوال (السلك الإعدادي)"))
+        assertTrue(filledHeaderXml.contains("محمد العابد"))
+        assertTrue(filledHeaderXml.contains("المنفى – ص: 44"))
+
+        val filledFooterXml = String(outEntries["word/footer1.xml"]!!)
+        assertTrue(filledFooterXml.contains("المختار في اللغة العربية"))
+        assertTrue(filledFooterXml.contains("""<w:fldSimple w:instr="PAGE"/>"""))
+
+        // Verify document.xml preserved the leading logo drawing, custom font "Traditional Arabic", and landscape sectPr
+        val filledDocXml = String(outEntries["word/document.xml"]!!)
+        assertTrue(filledDocXml.contains("""r:embed="rIdLogo1""""))
+        assertTrue(filledDocXml.contains("""w:orient="landscape""""))
+        assertTrue(filledDocXml.contains("""<w:headerReference w:type="default" r:id="rIdHeader1"/>"""))
+        assertTrue(filledDocXml.contains("""<w:footerReference w:type="default" r:id="rIdFooter1"/>"""))
+        assertTrue(filledDocXml.contains("""<w:pgNumType w:start="1"/>"""))
+        assertTrue(filledDocXml.contains("""w:ascii="Traditional Arabic""""))
+
+        // Verify the filled .docx opens cleanly in DocumentFileReader with all namespace prefixes valid
+        val reopenedFilled = com.example.extractor.DocumentFileReader.extractStructuredDocx(filledFile)
+        assertTrue(reopenedFilled.structuredText.contains("المنفى – ص: 44"))
+        assertTrue(reopenedFilled.structuredText.contains("مدرسة أنوال (السلك الإعدادي)"))
+    }
+
+    @Test
+    fun `phase3_6 - preserve Arabic text diacritics punctuation and RTL table and paragraph direction`() {
+        val context = ApplicationProvider.getApplicationContext<android.app.Application>()
+        val vocalizedLine1 = "قَالَ الشَّاعِرُ: «إِنَّ الْوَطَنَ هُوَ الْحِضْنُ الدَّافِئُ؛ فَلَا تَبْخَلُوا عَلَيْهِ بِالْعَطَاءِ!»."
+        val vocalizedLine2 = "تَـأْمِـيـنُ التَّـوَاصُـلِ اللُّغَوِيِّ السَّلِيمِ (سنة 1953م - ص: 44 - نسبة 100%)."
+        val vocalizedLine3 = "أَمِنَ الْمُؤْمِنُ مَكْرَ اللَّهِ؟ حَاشَا وَكَلَّا، فَالْمُؤْمِنُ صَبَّارٌ شَكُورٌ."
+
+        val basePlan = com.example.model.SamplePlans.READING_SAMPLE
+        val obsStage = basePlan.stages["observation"]!!
+        val arabicPlan = basePlan.copy(
+            stages = basePlan.stages.toMutableMap().apply {
+                put(
+                    "observation",
+                    obsStage.copy(
+                        content = listOf(vocalizedLine1, vocalizedLine2, vocalizedLine3)
+                    )
+                )
+            }
+        )
+
+        val outFile = java.io.File(context.cacheDir, "test_phase3_6_arabic_rtl.docx")
+        com.example.docx.DocxGenerator.generateDocxToFile(outFile, arabicPlan)
+
+        // 1. Inspect raw XML to verify RTL markers (<w:bidiVisual/>, <w:bidi/>, <w:rtl/>)
+        var docXml = ""
+        java.util.zip.ZipInputStream(java.io.FileInputStream(outFile)).use { zis ->
+            var e = zis.nextEntry
+            while (e != null) {
+                if (e.name == "word/document.xml") {
+                    docXml = String(zis.readBytes(), java.nio.charset.StandardCharsets.UTF_8)
+                }
+                zis.closeEntry()
+                e = zis.nextEntry
+            }
+        }
+        assertTrue("Every table must declare <w:bidiVisual/> for RTL column order", docXml.contains("<w:bidiVisual/>"))
+        assertTrue("Paragraphs and runs must declare <w:bidi/>", docXml.contains("<w:bidi/>"))
+        assertTrue("Runs must declare <w:rtl/>", docXml.contains("<w:rtl/>"))
+
+        // 2. Re-open with DocumentFileReader & JadhadhaParser and verify exact Arabic strings and column alignment
+        val extracted = com.example.extractor.DocumentFileReader.extractStructuredDocx(outFile)
+        assertTrue(extracted.structuredText.contains(vocalizedLine1))
+        assertTrue(extracted.structuredText.contains(vocalizedLine2))
+        assertTrue(extracted.structuredText.contains(vocalizedLine3))
+
+        // Verify the 5-column stages table column order is NOT inverted:
+        // Col 0 = المقاطع, Col 1 = القدرات والمهارات, Col 2 = الأنشطة التعليمية التعلمية, Col 3 = المحتوى, Col 4 = التقويم والدعم
+        val stagesTbl = extracted.tables[1]
+        val headerCells = stagesTbl.rows[1].cells.map { it.text }
+        assertEquals(
+            listOf("المقاطع", "القدرات والمهارات", "الأنشطة التعليمية التعلمية", "المحتوى", "التقويم والدعم"),
+            headerCells
+        )
+
+        val reparsed = com.example.extractor.JadhadhaParser.parseWithReport(extracted.structuredText).plan
+        val reparsedObs = reparsed.stages["observation"]!!
+        assertTrue(reparsedObs.content.contains(vocalizedLine1))
+        assertTrue(reparsedObs.content.contains(vocalizedLine2))
+        assertTrue(reparsedObs.content.contains(vocalizedLine3))
+    }
+
+    @Test
+    fun `phase3_7 - ensure zero extracted units are lost upon docx export and re-import`() {
+        val context = ApplicationProvider.getApplicationContext<android.app.Application>()
+
+        // 1. Create a rich source .docx with headers, stages, nested tables, custom table, short titles, and unclassified notes
+        val sourcePlan = com.example.model.SamplePlans.LANGUAGE_SAMPLE.copy(
+            extraParagraphs = listOf(
+                "ملحوظة منهجية: يخصص الأستاذ خمس دقائق في نهاية الحصة لتصحيح التمارين على السبورة."
+            ),
+            unclassifiedItems = listOf(
+                "مرجع إضافي: كتاب النحو الوافي - عباس حسن.",
+                "تمهيد"
+            ),
+            customTables = listOf(
+                com.example.model.StructuredTable(
+                    rows = listOf(
+                        com.example.model.StructuredTableRow(
+                            isHeader = true,
+                            cells = listOf(
+                                com.example.model.StructuredTableCell("النشاط التكميلي", isHeader = true),
+                                com.example.model.StructuredTableCell("الزمن المخصص", isHeader = true)
+                            )
+                        ),
+                        com.example.model.StructuredTableRow(
+                            cells = listOf(
+                                com.example.model.StructuredTableCell("تطبيقات كتابية في الدفاتر"),
+                                com.example.model.StructuredTableCell("10 دقائق")
+                            )
+                        )
+                    )
+                )
+            )
+        )
+
+        val sourceDocx = java.io.File(context.cacheDir, "test_phase3_7_source.docx")
+        com.example.docx.DocxGenerator.generateDocxToFile(sourceDocx, sourcePlan)
+
+        // 2. Extract units from sourceDocx -> parse into JadhadhaPlan -> verify integrity
+        val sourceExtraction = com.example.extractor.DocumentFileReader.extractStructuredDocx(sourceDocx)
+        val parsedResult = com.example.extractor.JadhadhaParser.parseWithReport(sourceExtraction.structuredText)
+        val integrity = parsedResult.report.integrityReport!!
+        assertTrue(
+            "Zero extracted units should be missing after parsing sourceDocx, but found: ${integrity.missingUnits.map { it.verbatimText }}",
+            integrity.missingUnits.isEmpty()
+        )
+        assertEquals(100, parsedResult.report.verificationCompletionPercentage)
+
+        // 3. Export the parsed plan back to a second .docx and re-extract
+        val reExportedDocx = java.io.File(context.cacheDir, "test_phase3_7_reexported.docx")
+        com.example.docx.DocxGenerator.generateDocxToFile(reExportedDocx, parsedResult.plan)
+        val reExtraction = com.example.extractor.DocumentFileReader.extractStructuredDocx(reExportedDocx)
+
+        // Verify every single unit from sourceExtraction exists in reExtraction
+        val reIntegrity = com.example.extractor.JadhadhaParser.verifyContentIntegrity(
+            originalRawText = sourceExtraction.rawOriginalText,
+            extractedUnits = sourceExtraction.units,
+            plan = parsedResult.plan,
+            unclassifiedLines = parsedResult.report.unclassifiedLines
+        )
+        assertTrue(reIntegrity.missingUnits.isEmpty())
+        assertTrue(reExtraction.structuredText.contains("تمهيد"))
+        assertTrue(reExtraction.structuredText.contains("ملحوظة منهجية: يخصص الأستاذ خمس دقائق"))
+        assertTrue(reExtraction.structuredText.contains("مرجع إضافي: كتاب النحو الوافي - عباس حسن."))
+        assertTrue(reExtraction.structuredText.contains("تطبيقات كتابية في الدفاتر"))
+    }
+
+    @Test
+    fun `phase3_8 - reopen generated docx files for all components and verify XML tables cells and paragraphs`() {
+        val context = ApplicationProvider.getApplicationContext<android.app.Application>()
+
+        val samples = listOf(
+            "reading" to com.example.model.SamplePlans.READING_SAMPLE,
+            "language" to com.example.model.SamplePlans.LANGUAGE_SAMPLE,
+            "expression" to com.example.model.SamplePlans.EXPRESSION_SAMPLE
+        )
+
+        for ((label, samplePlan) in samples) {
+            val docxFile = java.io.File(context.cacheDir, "test_phase3_8_${label}.docx")
+            com.example.docx.DocxGenerator.generateDocxToFile(docxFile, samplePlan)
+            assertTrue("Generated .docx for $label must exist", docxFile.exists() && docxFile.length() > 1000L)
+
+            // 1. Parse raw XML with namespace-aware XmlPullParser to verify strict OpenXML validity
+            //    and confirm that every <w:tc> ends with <w:p> (mandatory Word rule when nested <w:tbl> is present)
+            var rawDocXml = ""
+            java.util.zip.ZipInputStream(java.io.FileInputStream(docxFile)).use { zis ->
+                var entry = zis.nextEntry
+                while (entry != null) {
+                    if (entry.name == "word/document.xml") {
+                        rawDocXml = String(zis.readBytes(), java.nio.charset.StandardCharsets.UTF_8)
+                    }
+                    zis.closeEntry()
+                    entry = zis.nextEntry
+                }
+            }
+            assertTrue(rawDocXml.isNotEmpty())
+            org.junit.Assert.assertFalse(
+                "No <w:tc> may end directly with </w:tbl></w:tc> without a trailing <w:p>",
+                Regex("""</w:tbl>\s*</w:tc>""").containsMatchIn(rawDocXml)
+            )
+
+            // 2. Extract structured tables and paragraphs via DocumentFileReader
+            val extracted = com.example.extractor.DocumentFileReader.extractStructuredDocx(docxFile)
+            when (samplePlan.componentType) {
+                com.example.model.PedagogicalComponent.READING -> {
+                    assertEquals(2, extracted.tables.size) // Header table + 2-session Reading stages table
+                    assertEquals(7, extracted.tables[0].rows.size)
+                }
+                com.example.model.PedagogicalComponent.LANGUAGE -> {
+                    assertEquals(2, extracted.tables.size) // Header table + Language stages table
+                    assertEquals(7, extracted.tables[0].rows.size)
+                    val obsCell = extracted.tables[1].rows[2].cells[3]
+                    assertEquals(2, obsCell.nestedTables.size)
+                    assertEquals(15, obsCell.nestedTables.sumOf { it.rows.size })
+                }
+                com.example.model.PedagogicalComponent.EXPRESSION -> {
+                    assertEquals(8, extracted.tables.size) // 4 sessions x (Header table + Stages table)
+                    val session4StagesTbl = extracted.tables[7]
+                    val diagnosisCell = session4StagesTbl.rows[2].cells[3]
+                    assertEquals(1, diagnosisCell.nestedTables.size)
+                    assertEquals(5, diagnosisCell.nestedTables[0].rows.size)
+                }
+            }
+
+            // 3. Also verify PythonToolkit JSON export contains structured tables and full metadata
+            val exportedJson = com.example.python.PythonToolkit.planToJsonString(samplePlan)
+            val jsonObj = org.json.JSONObject(exportedJson)
+            assertEquals(samplePlan.topic, jsonObj.getString("topic"))
+            assertEquals(samplePlan.info.teacherName, jsonObj.getJSONObject("info").getString("teacherName"))
+            assertEquals(samplePlan.info.schoolName, jsonObj.getJSONObject("info").getString("schoolName"))
+        }
+    }
 }
+
+
 
 

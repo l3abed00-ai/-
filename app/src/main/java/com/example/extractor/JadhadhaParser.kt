@@ -1,5 +1,6 @@
 package com.example.extractor
 
+import com.example.model.ClassificationSource
 import com.example.model.ContentIntegrityReport
 import com.example.model.ContentUnitStatus
 import com.example.model.DocumentElementType
@@ -10,6 +11,8 @@ import com.example.model.JadhadhaInfo
 import com.example.model.JadhadhaPlan
 import com.example.model.ParseReport
 import com.example.model.ParseResult
+import com.example.model.PedagogicalCategory
+import com.example.model.PedagogicalClassificationItem
 import com.example.model.PedagogicalComponent
 import com.example.model.StageCatalog
 import com.example.model.StageData
@@ -66,7 +69,9 @@ object JadhadhaParser {
             newStatus: ContentUnitStatus,
             stageKey: String? = null,
             fieldKey: String? = null,
-            finalText: String? = null
+            finalText: String? = null,
+            classificationSource: ClassificationSource = ClassificationSource.IMPORTED,
+            pedagogicalCategory: PedagogicalCategory? = null
         ): ExtractedUnit {
             val cleanTarget = DocumentFileReader.stripFormattingTags(text).trim()
             // First try exact verbatim match among unconsumed units by unique unit ID
@@ -110,7 +115,9 @@ object JadhadhaParser {
                     status = newStatus,
                     assignedStageKey = stageKey ?: existing.assignedStageKey,
                     assignedField = fieldKey ?: existing.assignedField,
-                    finalClassifiedText = finalText ?: existing.finalClassifiedText
+                    finalClassifiedText = finalText ?: existing.finalClassifiedText,
+                    classificationSource = classificationSource,
+                    pedagogicalCategory = pedagogicalCategory ?: existing.pedagogicalCategory
                 )
                 mutableUnits[matchIdx] = updated
                 return updated
@@ -131,7 +138,9 @@ object JadhadhaParser {
                 status = newStatus,
                 assignedStageKey = stageKey,
                 assignedField = fieldKey,
-                finalClassifiedText = finalText
+                finalClassifiedText = finalText,
+                classificationSource = classificationSource,
+                pedagogicalCategory = pedagogicalCategory
             )
             mutableUnits.add(created)
             return created
@@ -190,6 +199,7 @@ object JadhadhaParser {
         val stageMap = mutableMapOf<String, MutableMap<String, MutableList<String>>>()
         val stageUnitMap = mutableMapOf<String, MutableMap<String, MutableList<ExtractedUnit>>>()
         val stageSources = mutableMapOf<String, MutableMap<String, FieldSource>>()
+        val stageClassificationSources = mutableMapOf<String, MutableMap<String, ClassificationSource>>()
         stageMetaList.forEach { sm ->
             stageMap[sm.key] = mutableMapOf(
                 "eval" to mutableListOf(),
@@ -204,6 +214,7 @@ object JadhadhaParser {
                 "abil" to mutableListOf()
             )
             stageSources[sm.key] = mutableMapOf()
+            stageClassificationSources[sm.key] = mutableMapOf()
         }
 
         var currentStageKey: String? = null
@@ -224,22 +235,32 @@ object JadhadhaParser {
 
         fun flushPendingNaturalStageHeaderIfEmpty() {
             val pending = pendingNaturalStageHeader
-            if (pending != null && pendingNaturalStageItemCount == 0) {
+            if (pending != null) {
                 val (pLineNum, pText) = pending
-                val uUnit = claimMatchingUnit(
-                    text = pText,
-                    fallbackLineNumber = pLineNum,
-                    newStatus = ContentUnitStatus.NEEDS_REVIEW
-                )
-                unclassifiedLines.add(
-                    UnclassifiedLine(
-                        lineNumber = uUnit.location.lineNumber.takeIf { it > 0 } ?: pLineNum,
-                        text = uUnit.verbatimText,
-                        unitId = uUnit.id,
-                        verbatimText = uUnit.verbatimText,
-                        location = uUnit.location
+                if (pendingNaturalStageItemCount == 0) {
+                    val uUnit = claimMatchingUnit(
+                        text = pText,
+                        fallbackLineNumber = pLineNum,
+                        newStatus = ContentUnitStatus.NEEDS_REVIEW
                     )
-                )
+                    unclassifiedLines.add(
+                        UnclassifiedLine(
+                            lineNumber = uUnit.location.lineNumber.takeIf { it > 0 } ?: pLineNum,
+                            text = uUnit.verbatimText,
+                            unitId = uUnit.id,
+                            verbatimText = uUnit.verbatimText,
+                            location = uUnit.location
+                        )
+                    )
+                } else {
+                    claimMatchingUnit(
+                        text = pText,
+                        fallbackLineNumber = pLineNum,
+                        newStatus = ContentUnitStatus.CLASSIFIED,
+                        stageKey = pendingNaturalStageKey,
+                        fieldKey = "stage_header"
+                    )
+                }
             }
             pendingNaturalStageHeader = null
             pendingNaturalStageKey = null
@@ -286,6 +307,13 @@ object JadhadhaParser {
                 inferFieldFromUnstructuredLine(strippedForCheck, currentFieldName)
             }
 
+            val isLocalRuleRedirect = !hasExplicitFields || targetField != currentFieldName
+            val unitClassSource = if (isLocalRuleRedirect) {
+                ClassificationSource.LOCAL_RULE
+            } else {
+                ClassificationSource.IMPORTED
+            }
+
             // Preserve original text without unjustified modification
             val formattedItem = if (targetField == "content") {
                 formatContentSubLabel(verbatimClean)
@@ -299,7 +327,8 @@ object JadhadhaParser {
                 newStatus = ContentUnitStatus.CLASSIFIED,
                 stageKey = stageKey,
                 fieldKey = targetField,
-                finalText = formattedItem
+                finalText = formattedItem,
+                classificationSource = unitClassSource
             )
 
             if (claimedUnit.verbatimText != formattedItem && originalFullLine.trim() == rawItem.trim()) {
@@ -333,6 +362,7 @@ object JadhadhaParser {
                 }
             }
             stageSources[stageKey]?.put(targetField, FieldSource.FILE)
+            stageClassificationSources[stageKey]?.put(targetField, unitClassSource)
 
             if (pendingNaturalStageKey == stageKey) {
                 pendingNaturalStageItemCount++
@@ -446,19 +476,19 @@ object JadhadhaParser {
                 val matchedHeader = extractHeaderMetadataInto(
                     strippedHeaderLine = strippedHeaderLine,
                     hasEnteredStages = hasEnteredStages,
-                    onTopic = { topic = it },
-                    onLevel = { level = it },
-                    onUnit = { unit = it },
-                    onDomain = { domain = it },
-                    onComponent = { component = it },
-                    onDuration = { duration = it },
-                    onMaterials = { materials = it },
-                    onReference = { reference = it },
-                    onTeacherName = { teacherName = it },
-                    onSchoolName = { schoolName = it },
-                    onCommunicative = { communicative = it },
-                    onMethodological = { methodological = it },
-                    onCultural = { cultural = it }
+                    onTopic = { if (!hasEnteredStages) topic = it },
+                    onLevel = { if (!hasEnteredStages) level = it },
+                    onUnit = { if (!hasEnteredStages) unit = it },
+                    onDomain = { if (!hasEnteredStages) domain = it },
+                    onComponent = { if (!hasEnteredStages) component = it },
+                    onDuration = { if (!hasEnteredStages) duration = it },
+                    onMaterials = { if (!hasEnteredStages) materials = it },
+                    onReference = { if (!hasEnteredStages) reference = it },
+                    onTeacherName = { if (!hasEnteredStages) teacherName = it },
+                    onSchoolName = { if (!hasEnteredStages) schoolName = it },
+                    onCommunicative = { if (!hasEnteredStages) communicative = it },
+                    onMethodological = { if (!hasEnteredStages) methodological = it },
+                    onCultural = { if (!hasEnteredStages) cultural = it }
                 )
                 if (matchedHeader || (!hasEnteredStages && isStandaloneHeaderLabelOnly(strippedHeaderLine))) {
                     claimMatchingUnit(cleanLine, lineNumber, ContentUnitStatus.CLASSIFIED, fieldKey = "header_metadata")
@@ -525,7 +555,7 @@ object JadhadhaParser {
                         if (!wasExplicit) {
                             pendingNaturalStageHeader = lineNumber to cleanLine
                             pendingNaturalStageKey = intraStageKey
-                            pendingNaturalStageItemCount = stageMap[intraStageKey]?.values?.sumOf { it.size } ?: 0
+                            pendingNaturalStageItemCount = 0
                         } else {
                             claimMatchingUnit(cleanLine, lineNumber, ContentUnitStatus.CLASSIFIED, stageKey = intraStageKey, fieldKey = "stage_header")
                         }
@@ -555,7 +585,7 @@ object JadhadhaParser {
                     } else {
                         pendingNaturalStageHeader = lineNumber to cleanLine
                         pendingNaturalStageKey = stageMatch.first
-                        pendingNaturalStageItemCount = stageMap[stageMatch.first]?.values?.sumOf { it.size } ?: 0
+                        pendingNaturalStageItemCount = 0
                     }
                     continue
                 }
@@ -622,18 +652,39 @@ object JadhadhaParser {
             }
         }
 
+        // Resolve nested StructuredTables from DOCX extraction to their canonical stage keys
+        val resolvedStageTables = LinkedHashMap<String, MutableList<com.example.model.StructuredTable>>()
+        val extractedStageNested = recordedExtraction?.stageNestedTables.orEmpty()
+        for ((rawStageTitle, tblList) in extractedStageNested) {
+            val matchedKey = stageMetaList.firstOrNull { it.title == rawStageTitle.trim() }?.key
+                ?: matchStageName(rawStageTitle, detectedComponent, 1, true)
+                ?: matchStageName(rawStageTitle, detectedComponent, 2, true)
+                ?: matchStageName(rawStageTitle, detectedComponent, 3, true)
+                ?: matchStageName(rawStageTitle, detectedComponent, 4, true)
+                ?: stageMetaList.firstOrNull()?.key
+            if (matchedKey != null) {
+                resolvedStageTables.getOrPut(matchedKey) { mutableListOf() }.addAll(
+                    tblList.map { it.copy(sourceStageKey = matchedKey) }
+                )
+            }
+        }
+
         // Fill any missing fields across all stages with DEFAULT items and tag their source as DEFAULT
         ensureDefaults(stageMap, stageSources, detectedComponent, topic)
 
         val builtStages = stageMetaList.associate { sm ->
             val fieldMap = stageMap[sm.key] ?: emptyMap()
             val sourcesForStage = stageSources[sm.key]?.toMap() ?: emptyMap()
+            val classSourcesForStage = stageClassificationSources[sm.key]?.toMap() ?: emptyMap()
+            val nestedForStage = resolvedStageTables[sm.key]?.toList() ?: emptyList()
             sm.key to StageData(
                 eval = fieldMap["eval"]?.toList() ?: emptyList(),
                 content = fieldMap["content"]?.toList() ?: emptyList(),
                 teacher = fieldMap["teacher"]?.toList() ?: emptyList(),
                 abil = fieldMap["abil"]?.toList() ?: emptyList(),
-                sources = sourcesForStage
+                sources = sourcesForStage,
+                classificationSources = classSourcesForStage,
+                tables = nestedForStage
             )
         }.toMutableMap()
 
@@ -649,6 +700,7 @@ object JadhadhaParser {
                 val contents = keys.flatMap { builtStages[it]?.content.orEmpty() }.distinct()
                 val teachers = keys.flatMap { builtStages[it]?.teacher.orEmpty() }.distinct()
                 val abils = keys.flatMap { builtStages[it]?.abil.orEmpty() }.distinct()
+                val tables = keys.flatMap { builtStages[it]?.tables.orEmpty() }
                 val hasFile = keys.any { k -> builtStages[k]?.sources?.values?.contains(FieldSource.FILE) == true }
                 val src = if (hasFile) FieldSource.FILE else FieldSource.DEFAULT
                 return StageData(
@@ -656,7 +708,8 @@ object JadhadhaParser {
                     content = contents,
                     teacher = teachers,
                     abil = abils,
-                    sources = mapOf("eval" to src, "content" to src, "teacher" to src, "abil" to src)
+                    sources = mapOf("eval" to src, "content" to src, "teacher" to src, "abil" to src),
+                    tables = tables
                 )
             }
             builtStages.putIfAbsent("insha_acquisition", mergeSessionStages(1))
@@ -683,7 +736,10 @@ object JadhadhaParser {
                 methodologicalComp = methodological,
                 culturalComp = cultural
             ),
-            stages = builtStages
+            stages = builtStages,
+            customTables = recordedExtraction?.customTables.orEmpty(),
+            unclassifiedItems = unclassifiedLines.map { it.verbatimText.ifBlank { it.text } },
+            templateArchive = recordedExtraction?.templateArchive
         )
 
         val report = buildReport(
@@ -904,6 +960,68 @@ object JadhadhaParser {
                         )
                     }
                 }
+            }
+            for (tbl in stData.tables) {
+                for (row in tbl.rows) {
+                    for (cell in row.cells) {
+                        for (p in cell.paragraphs) {
+                            val trimmed = p.trim()
+                            if (trimmed.isNotEmpty()) {
+                                finalUsedItems.add(trimmed)
+                                finalPlanEntries.add(
+                                    FinalPlanEntry(stageKey = sm.key, fieldKey = "content", text = trimmed)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        val officialStageKeys = stageMetaList.map { it.key }.toSet() + setOf(
+            "lang_analysis", "insha_acquisition", "insha_application", "insha_production", "insha_correction"
+        )
+        for ((customKey, customStageData) in plan.stages) {
+            if (customKey in officialStageKeys) continue
+            for (f in fields) {
+                val items = when (f) {
+                    "abil" -> customStageData.abil
+                    "teacher" -> customStageData.teacher
+                    "content" -> customStageData.content
+                    "eval" -> customStageData.eval
+                    else -> emptyList()
+                }
+                items.filter { it.isNotBlank() }.forEach { item ->
+                    val trimmed = item.trim()
+                    finalUsedItems.add(trimmed)
+                    finalPlanEntries.add(FinalPlanEntry(stageKey = customKey, fieldKey = f, text = trimmed))
+                }
+            }
+        }
+
+        for (tbl in plan.customTables) {
+            for (row in tbl.rows) {
+                for (cell in row.cells) {
+                    for (p in cell.paragraphs) {
+                        val trimmed = p.trim()
+                        if (trimmed.isNotEmpty()) {
+                            finalUsedItems.add(trimmed)
+                            finalPlanEntries.add(
+                                FinalPlanEntry(stageKey = "custom_table", fieldKey = "content", text = trimmed)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        for (extraPara in plan.extraParagraphs) {
+            val trimmed = extraPara.trim()
+            if (trimmed.isNotEmpty()) {
+                finalUsedItems.add(trimmed)
+                finalPlanEntries.add(
+                    FinalPlanEntry(stageKey = "extra_paragraph", fieldKey = "content", text = trimmed)
+                )
             }
         }
 
@@ -1155,7 +1273,12 @@ object JadhadhaParser {
         unclassifiedLines: List<UnclassifiedLine>,
         aiClassifiedLinesCount: Int = 0,
         aiRefinedFieldsCount: Int = 0,
+        localRuleClassifiedLinesCount: Int = 0,
         isAiDelegated: Boolean = false,
+        geminiFailed: Boolean = false,
+        geminiErrorMessage: String? = null,
+        isLocalFallback: Boolean = false,
+        classificationItems: List<PedagogicalClassificationItem> = emptyList(),
         originalRawText: String = "",
         extractedUnits: List<ExtractedUnit> = emptyList(),
         unextractableItems: List<String> = emptyList(),
@@ -1167,17 +1290,28 @@ object JadhadhaParser {
         val stageCounts = stageMetaList.associate { sm ->
             val stData = plan.stages[sm.key] ?: StageData()
             val fields = listOf("abil", "teacher", "content", "eval")
-            val fileCount = fields.count { f -> stData.sourceFor(f) == FieldSource.FILE }
+            val fileCount = fields.count { f ->
+                val s = stData.sourceFor(f)
+                s == FieldSource.FILE || s == FieldSource.IMPORTED
+            }
             val defaultCount = fields.count { f -> stData.sourceFor(f) == FieldSource.DEFAULT }
-            val aiCount = fields.count { f -> stData.sourceFor(f) == FieldSource.AI }
-            val userCount = fields.count { f -> stData.sourceFor(f) == FieldSource.USER }
+            val aiCount = fields.count { f ->
+                val s = stData.sourceFor(f)
+                s == FieldSource.AI || s == FieldSource.GEMINI
+            }
+            val userCount = fields.count { f ->
+                val s = stData.sourceFor(f)
+                s == FieldSource.USER || s == FieldSource.USER_EDIT
+            }
+            val localRuleCount = fields.count { f -> stData.sourceFor(f) == FieldSource.LOCAL_RULE }
             sm.key to StageSourceCount(
                 stageKey = sm.key,
                 stageTitle = sm.title,
                 fileCount = fileCount,
                 defaultCount = defaultCount,
                 aiCount = aiCount,
-                userCount = userCount
+                userCount = userCount,
+                localRuleCount = localRuleCount
             )
         }
 
@@ -1200,7 +1334,12 @@ object JadhadhaParser {
             unclassifiedLines = unclassifiedLines,
             aiClassifiedLinesCount = aiClassifiedLinesCount,
             aiRefinedFieldsCount = aiRefinedFieldsCount,
+            localRuleClassifiedLinesCount = localRuleClassifiedLinesCount,
             isAiDelegated = isAiDelegated,
+            geminiFailed = geminiFailed,
+            geminiErrorMessage = geminiErrorMessage,
+            isLocalFallback = isLocalFallback,
+            classificationItems = classificationItems,
             originalRawText = originalRawText,
             extractedUnits = extractedUnits,
             unextractableItems = unextractableItems,
@@ -1210,15 +1349,18 @@ object JadhadhaParser {
 
     /**
      * Assigns an [UnclassifiedLine] to a specific [targetStageKey] and [targetField] ("abil", "teacher", "content", "eval").
-     * Preserves the verbatim text of the unit without unjustified modification, updates that field's source
-     * to [FieldSource.FILE], removes any DEFAULT placeholder in that cell, removes the line from
+     * Preserves the verbatim text of the unit without unjustified modification, records [ClassificationSource.USER_EDIT]
+     * on the unit and stage classification sources, removes any DEFAULT placeholder in that cell, removes the line from
      * [ParseReport.unclassifiedLines], and updates the integrity report.
      */
     fun assignUnclassifiedLine(
         currentResult: ParseResult,
         line: UnclassifiedLine,
         targetStageKey: String,
-        targetField: String = "content"
+        targetField: String = "content",
+        fieldSource: FieldSource = FieldSource.FILE,
+        classificationSource: ClassificationSource = ClassificationSource.USER_EDIT,
+        pedagogicalCategory: PedagogicalCategory? = null
     ): ParseResult {
         val plan = currentResult.plan
         val currentStage = plan.stages[targetStageKey] ?: StageData()
@@ -1232,22 +1374,27 @@ object JadhadhaParser {
         }
 
         val wasDefault = currentStage.sourceFor(targetField) == FieldSource.DEFAULT
+        val updatedClassSources = currentStage.classificationSources + (targetField to classificationSource)
         val updatedStage = when (targetField) {
             "abil" -> currentStage.copy(
                 abil = if (wasDefault) listOf(formattedItem) else (currentStage.abil + formattedItem),
-                sources = currentStage.sources + ("abil" to FieldSource.FILE)
+                sources = currentStage.sources + ("abil" to fieldSource),
+                classificationSources = updatedClassSources
             )
             "teacher" -> currentStage.copy(
                 teacher = if (wasDefault) listOf(formattedItem) else (currentStage.teacher + formattedItem),
-                sources = currentStage.sources + ("teacher" to FieldSource.FILE)
+                sources = currentStage.sources + ("teacher" to fieldSource),
+                classificationSources = updatedClassSources
             )
             "eval" -> currentStage.copy(
                 eval = if (wasDefault) listOf(formattedItem) else (currentStage.eval + formattedItem),
-                sources = currentStage.sources + ("eval" to FieldSource.FILE)
+                sources = currentStage.sources + ("eval" to fieldSource),
+                classificationSources = updatedClassSources
             )
             else -> currentStage.copy(
                 content = if (wasDefault) listOf(formattedItem) else (currentStage.content + formattedItem),
-                sources = currentStage.sources + ("content" to FieldSource.FILE)
+                sources = currentStage.sources + ("content" to fieldSource),
+                classificationSources = updatedClassSources
             )
         }
 
@@ -1267,7 +1414,9 @@ object JadhadhaParser {
                     status = ContentUnitStatus.CLASSIFIED,
                     assignedStageKey = targetStageKey,
                     assignedField = targetField,
-                    finalClassifiedText = formattedItem
+                    finalClassifiedText = formattedItem,
+                    classificationSource = classificationSource,
+                    pedagogicalCategory = pedagogicalCategory ?: line.proposedCategory ?: u.pedagogicalCategory
                 )
             } else {
                 u
@@ -1279,7 +1428,144 @@ object JadhadhaParser {
             unclassifiedLines = remainingUnclassified,
             aiClassifiedLinesCount = currentResult.report.aiClassifiedLinesCount,
             aiRefinedFieldsCount = currentResult.report.aiRefinedFieldsCount,
+            localRuleClassifiedLinesCount = currentResult.report.localRuleClassifiedLinesCount,
             isAiDelegated = currentResult.report.isAiDelegated,
+            geminiFailed = currentResult.report.geminiFailed,
+            geminiErrorMessage = currentResult.report.geminiErrorMessage,
+            isLocalFallback = currentResult.report.isLocalFallback,
+            classificationItems = currentResult.report.classificationItems,
+            originalRawText = currentResult.report.originalRawText,
+            extractedUnits = updatedUnits,
+            unextractableItems = currentResult.report.unextractableItems,
+            recordedModifications = currentResult.report.integrityReport?.modifiedUnits.orEmpty(),
+            recordedDuplicateUnits = currentResult.report.integrityReport?.duplicateUnits.orEmpty(),
+            recordedDuplicateItems = currentResult.report.integrityReport?.duplicateItems.orEmpty()
+        )
+        return ParseResult(plan = updatedPlan, report = updatedReport)
+    }
+
+    /**
+     * Allows manual modification of any unit's classification (whether currently unclassified or already classified
+     * in a stage/field), moving it to [targetStageKey] and [targetField] and recording [ClassificationSource.USER_EDIT]
+     * and [FieldSource.USER].
+     */
+    fun modifyUnitClassification(
+        currentResult: ParseResult,
+        unitId: String,
+        targetStageKey: String,
+        targetField: String,
+        newCategory: PedagogicalCategory? = null
+    ): ParseResult {
+        val unclassifiedMatch = currentResult.report.unclassifiedLines.firstOrNull { it.unitId == unitId }
+        if (unclassifiedMatch != null) {
+            return assignUnclassifiedLine(
+                currentResult = currentResult,
+                line = unclassifiedMatch,
+                targetStageKey = targetStageKey,
+                targetField = targetField,
+                fieldSource = FieldSource.USER,
+                classificationSource = ClassificationSource.USER_EDIT,
+                pedagogicalCategory = newCategory
+            )
+        }
+
+        val targetUnit = currentResult.report.extractedUnits.firstOrNull { it.id == unitId } ?: return currentResult
+        val oldStageKey = targetUnit.assignedStageKey
+        val oldField = targetUnit.assignedField
+        val itemText = targetUnit.finalClassifiedText ?: targetUnit.verbatimText
+
+        val updatedStages = currentResult.plan.stages.toMutableMap()
+
+        // Remove from old stage/field if it was previously placed there
+        if (oldStageKey != null && oldField != null && (oldStageKey != targetStageKey || oldField != targetField)) {
+            val oldStage = updatedStages[oldStageKey]
+            if (oldStage != null) {
+                val updatedOldStage = when (oldField) {
+                    "abil" -> oldStage.copy(abil = oldStage.abil.filterNot { it == itemText || it == targetUnit.verbatimText })
+                    "teacher" -> oldStage.copy(teacher = oldStage.teacher.filterNot { it == itemText || it == targetUnit.verbatimText })
+                    "eval" -> oldStage.copy(eval = oldStage.eval.filterNot { it == itemText || it == targetUnit.verbatimText })
+                    else -> oldStage.copy(content = oldStage.content.filterNot { it == itemText || it == targetUnit.verbatimText })
+                }
+                updatedStages[oldStageKey] = updatedOldStage
+            }
+        }
+
+        val destStage = updatedStages[targetStageKey] ?: StageData()
+        val wasDefault = destStage.sourceFor(targetField) == FieldSource.DEFAULT
+        val formattedItem = if (targetField == "content") {
+            formatContentSubLabel(targetUnit.verbatimText)
+        } else {
+            targetUnit.verbatimText
+        }
+        val destClassSources = destStage.classificationSources + (targetField to ClassificationSource.USER_EDIT)
+        val destFieldSources = destStage.sources + (targetField to FieldSource.USER)
+
+        val updatedDestStage = when (targetField) {
+            "abil" -> destStage.copy(
+                abil = if (wasDefault) listOf(formattedItem) else (destStage.abil.filterNot { it == formattedItem } + formattedItem),
+                sources = destFieldSources,
+                classificationSources = destClassSources
+            )
+            "teacher" -> destStage.copy(
+                teacher = if (wasDefault) listOf(formattedItem) else (destStage.teacher.filterNot { it == formattedItem } + formattedItem),
+                sources = destFieldSources,
+                classificationSources = destClassSources
+            )
+            "eval" -> destStage.copy(
+                eval = if (wasDefault) listOf(formattedItem) else (destStage.eval.filterNot { it == formattedItem } + formattedItem),
+                sources = destFieldSources,
+                classificationSources = destClassSources
+            )
+            else -> destStage.copy(
+                content = if (wasDefault) listOf(formattedItem) else (destStage.content.filterNot { it == formattedItem } + formattedItem),
+                sources = destFieldSources,
+                classificationSources = destClassSources
+            )
+        }
+        updatedStages[targetStageKey] = updatedDestStage
+
+        val updatedPlan = currentResult.plan.copy(stages = updatedStages)
+        val updatedUnits = currentResult.report.extractedUnits.map { u ->
+            if (u.id == unitId) {
+                u.copy(
+                    status = ContentUnitStatus.CLASSIFIED,
+                    assignedStageKey = targetStageKey,
+                    assignedField = targetField,
+                    finalClassifiedText = formattedItem,
+                    classificationSource = ClassificationSource.USER_EDIT,
+                    pedagogicalCategory = newCategory ?: u.pedagogicalCategory
+                )
+            } else {
+                u
+            }
+        }
+        val updatedClassificationItems = currentResult.report.classificationItems.map { item ->
+            if (item.unitId == unitId) {
+                item.copy(
+                    proposedCategory = newCategory ?: item.proposedCategory,
+                    targetField = targetField,
+                    stageKey = targetStageKey,
+                    source = ClassificationSource.USER_EDIT,
+                    confidence = 1.0,
+                    rationale = "تعديل يدوي من المستخدم"
+                )
+            } else {
+                item
+            }
+        }
+
+        val updatedReport = buildReport(
+            plan = updatedPlan,
+            isComponentDefaulted = currentResult.report.isComponentDefaulted,
+            unclassifiedLines = currentResult.report.unclassifiedLines,
+            aiClassifiedLinesCount = currentResult.report.aiClassifiedLinesCount,
+            aiRefinedFieldsCount = currentResult.report.aiRefinedFieldsCount,
+            localRuleClassifiedLinesCount = currentResult.report.localRuleClassifiedLinesCount,
+            isAiDelegated = currentResult.report.isAiDelegated,
+            geminiFailed = currentResult.report.geminiFailed,
+            geminiErrorMessage = currentResult.report.geminiErrorMessage,
+            isLocalFallback = currentResult.report.isLocalFallback,
+            classificationItems = updatedClassificationItems,
             originalRawText = currentResult.report.originalRawText,
             extractedUnits = updatedUnits,
             unextractableItems = currentResult.report.unextractableItems,
@@ -2156,7 +2442,9 @@ object JadhadhaParser {
             if (directMatch != null) return directMatch
         }
 
+        val normHeaderPrefix = normalizeHeaderToken(headerPrefix)
         val stageNumber = when {
+            normHeaderPrefix.startsWith("استنتاججزئي") -> 4
             lineStartsWithStageKeyword(headerPrefix, STAGE_6_KEYWORDS) -> 6
             lineStartsWithStageKeyword(headerPrefix, STAGE_5_KEYWORDS) -> 5
             lineStartsWithStageKeyword(headerPrefix, STAGE_4_KEYWORDS) -> 4
