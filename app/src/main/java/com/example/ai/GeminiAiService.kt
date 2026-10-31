@@ -95,43 +95,34 @@ object GeminiAiService {
     const val PREF_KEY_GEMINI_API_KEY = "gemini_api_key"
 
     @Volatile
-    private var cachedSavedApiKey: String = ""
+    private var applicationContextRef: Context? = null
+
+    fun initContext(context: Context) {
+        applicationContextRef = context.applicationContext
+    }
 
     fun saveApiKey(context: Context, apiKey: String) {
-        val trimmed = apiKey.trim()
-        cachedSavedApiKey = trimmed
-        context.applicationContext
-            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            .edit()
-            .putString(PREF_KEY_GEMINI_API_KEY, trimmed)
-            .apply()
+        initContext(context)
+        com.example.security.SecretManager.saveApiKey(context, apiKey)
     }
 
     fun getSavedApiKey(context: Context): String {
-        val saved = context.applicationContext
-            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            .getString(PREF_KEY_GEMINI_API_KEY, "")
-            ?.trim()
-            .orEmpty()
-        cachedSavedApiKey = saved
-        return saved
+        initContext(context)
+        return com.example.security.SecretManager.getApiKey(context)
     }
 
     fun clearSavedApiKey(context: Context) {
-        cachedSavedApiKey = ""
-        context.applicationContext
-            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            .edit()
-            .remove(PREF_KEY_GEMINI_API_KEY)
-            .apply()
+        initContext(context)
+        com.example.security.SecretManager.clearApiKey(context)
     }
 
-    fun getEffectiveApiKey(customKey: String?): String {
+    fun getEffectiveApiKey(customKey: String?, context: Context? = null): String {
+        if (context != null) initContext(context)
         val trimmedCustom = customKey?.trim().orEmpty()
         if (trimmedCustom.isNotBlank() && !trimmedCustom.equals("MY_GEMINI_API_KEY", ignoreCase = true)) {
             return trimmedCustom
         }
-        val saved = cachedSavedApiKey.trim()
+        val saved = applicationContextRef?.let { com.example.security.SecretManager.getApiKey(it) }.orEmpty().trim()
         if (saved.isNotBlank() && !saved.equals("MY_GEMINI_API_KEY", ignoreCase = true)) {
             return saved
         }

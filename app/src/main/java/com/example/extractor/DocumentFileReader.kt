@@ -244,6 +244,14 @@ object DocumentFileReader {
             }
         }
 
+        fileName = File(fileName).name
+            .replace("..", "")
+            .replace("/", "")
+            .replace("\\", "")
+            .replace("\u0000", "")
+            .trim()
+            .ifBlank { "ملف_جذاذة" }
+
         if (fileSize > MAX_FILE_SIZE_BYTES) {
             throw DocumentReadException(MSG_FILE_TOO_LARGE)
         }

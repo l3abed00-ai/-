@@ -14,6 +14,8 @@ import com.example.model.StructuredTableRow
 import org.json.JSONArray
 import org.json.JSONObject
 
+import com.example.model.AttachmentInfo
+
 @Entity(tableName = "jadhadha_table")
 data class JadhadhaEntity(
     @PrimaryKey
@@ -36,7 +38,9 @@ data class JadhadhaEntity(
     val stagesJson: String,
     val createdAt: Long = System.currentTimeMillis(),
     val updatedAt: Long = System.currentTimeMillis(),
-    val isCustom: Boolean = true
+    val isCustom: Boolean = true,
+    val isReviewed: Boolean = false,
+    val attachmentsJson: String = "[]"
 ) {
     fun toPlan(): JadhadhaPlan {
         val comp = when (componentType) {
@@ -84,6 +88,8 @@ data class JadhadhaEntity(
             }
         }
 
+        val attachmentsList = jsonArrayToAttachments(attachmentsJson)
+
         return JadhadhaPlan(
             id = id,
             topic = topic,
@@ -105,9 +111,12 @@ data class JadhadhaEntity(
             ),
             stages = stagesMap,
             createdAt = createdAt,
+            updatedAt = updatedAt,
             customTables = customTables,
             extraParagraphs = extraParagraphs,
-            unclassifiedItems = unclassifiedItems
+            unclassifiedItems = unclassifiedItems,
+            attachments = attachmentsList,
+            isReviewed = isReviewed
         )
     }
 
@@ -168,8 +177,10 @@ data class JadhadhaEntity(
                 culturalComp = plan.info.culturalComp,
                 stagesJson = stagesObj.toString(),
                 createdAt = plan.createdAt,
-                updatedAt = System.currentTimeMillis(),
-                isCustom = isCustom
+                updatedAt = plan.updatedAt,
+                isCustom = isCustom,
+                isReviewed = plan.isReviewed,
+                attachmentsJson = attachmentsToJsonArray(plan.attachments).toString()
             )
         }
 
@@ -307,6 +318,47 @@ data class JadhadhaEntity(
                 if (str.isNotBlank()) list.add(str)
             }
             return list
+        }
+
+        fun attachmentsToJsonArray(attachments: List<AttachmentInfo>): JSONArray {
+            val arr = JSONArray()
+            for (att in attachments) {
+                arr.put(
+                    JSONObject().apply {
+                        put("id", att.id)
+                        put("planId", att.planId)
+                        put("fileName", att.fileName)
+                        put("relativePath", att.relativePath)
+                        put("mimeType", att.mimeType)
+                        put("fileSize", att.fileSize)
+                        put("createdAt", att.createdAt)
+                    }
+                )
+            }
+            return arr
+        }
+
+        fun jsonArrayToAttachments(jsonStr: String?): List<AttachmentInfo> {
+            if (jsonStr.isNullOrBlank()) return emptyList()
+            return runCatching {
+                val arr = JSONArray(jsonStr)
+                val list = mutableListOf<AttachmentInfo>()
+                for (i in 0 until arr.length()) {
+                    val obj = arr.optJSONObject(i) ?: continue
+                    list.add(
+                        AttachmentInfo(
+                            id = obj.optString("id", java.util.UUID.randomUUID().toString()),
+                            planId = obj.optString("planId", ""),
+                            fileName = obj.optString("fileName", ""),
+                            relativePath = obj.optString("relativePath", ""),
+                            mimeType = obj.optString("mimeType", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+                            fileSize = obj.optLong("fileSize", 0L),
+                            createdAt = obj.optLong("createdAt", System.currentTimeMillis())
+                        )
+                    )
+                }
+                list
+            }.getOrDefault(emptyList())
         }
     }
 }

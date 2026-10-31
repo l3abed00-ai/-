@@ -159,7 +159,9 @@ class JadhadhaViewModel(
 
     constructor(application: Application) : this(
         application,
-        JadhadhaRepository(AppDatabase.getDatabase(application).jadhadhaDao(), application)
+        AppDatabase.getDatabase(application).let { db ->
+            JadhadhaRepository(db.jadhadhaDao(), application, db.attachmentDao())
+        }
     )
 
     private val _uiState = MutableStateFlow(JadhadhaUiState())

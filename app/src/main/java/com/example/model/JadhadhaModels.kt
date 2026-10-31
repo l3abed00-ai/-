@@ -708,6 +708,16 @@ object JadhadhaCategories {
     }
 }
 
+data class AttachmentInfo(
+    val id: String = UUID.randomUUID().toString(),
+    val planId: String,
+    val fileName: String,
+    val relativePath: String,
+    val mimeType: String = "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    val fileSize: Long = 0L,
+    val createdAt: Long = System.currentTimeMillis()
+)
+
 data class JadhadhaPlan(
     val id: String = UUID.randomUUID().toString(),
     val topic: String,
@@ -716,9 +726,12 @@ data class JadhadhaPlan(
     val info: JadhadhaInfo = JadhadhaInfo(),
     val stages: Map<String, StageData> = emptyMap(),
     val createdAt: Long = System.currentTimeMillis(),
+    val updatedAt: Long = System.currentTimeMillis(),
     val customTables: List<StructuredTable> = emptyList(),
     val extraParagraphs: List<String> = emptyList(),
     val unclassifiedItems: List<String> = emptyList(),
+    val attachments: List<AttachmentInfo> = emptyList(),
+    val isReviewed: Boolean = false,
     val templateArchive: DocxTemplateArchive? = null
 )
 

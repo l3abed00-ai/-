@@ -33,6 +33,9 @@ interface JadhadhaDao {
     @Query("SELECT COUNT(*) FROM jadhadha_table")
     suspend fun getCount(): Int
 
+    @Query("SELECT id FROM jadhadha_table")
+    suspend fun getAllPlanIds(): List<String>
+
     @Query("DELETE FROM jadhadha_table")
     suspend fun deleteAllJadhadhat()
 

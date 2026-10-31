@@ -101,7 +101,7 @@ class MainActivity : ComponentActivity() {
             @Suppress("UNCHECKED_CAST")
             override fun <T : ViewModel> create(modelClass: Class<T>): T {
                 val db = AppDatabase.getDatabase(applicationContext)
-                val repository = JadhadhaRepository(db.jadhadhaDao(), applicationContext)
+                val repository = JadhadhaRepository(db.jadhadhaDao(), applicationContext, db.attachmentDao())
                 return JadhadhaViewModel(application, repository) as T
             }
         }
