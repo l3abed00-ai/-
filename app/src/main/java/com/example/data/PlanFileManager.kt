@@ -62,20 +62,29 @@ class PlanFileManager(private val context: Context) {
         val attachmentsDir = getPlanAttachmentsDir(planId, createIfMissing = true)
         val targetFile = File(attachmentsDir, safeName)
 
-        // Write atomically using a temporary file
+        // Write atomically using a temporary file in the same directory
         val tempFile = File(attachmentsDir, "${safeName}_${UUID.randomUUID()}.tmp")
-        FileOutputStream(tempFile).use { fos ->
-            fos.write(bytes)
-            fos.flush()
-        }
+        try {
+            FileOutputStream(tempFile).use { fos ->
+                fos.write(bytes)
+                fos.flush()
+                runCatching { fos.fd.sync() }
+            }
+            require(tempFile.exists() && tempFile.length() == bytes.size.toLong()) {
+                "فشل التحقق من اكتمال كتابة الملف المؤقت"
+            }
 
-        if (targetFile.exists()) {
-            targetFile.delete()
-        }
-        val renamed = tempFile.renameTo(targetFile)
-        if (!renamed) {
-            tempFile.copyTo(targetFile, overwrite = true)
-            tempFile.delete()
+            // Atomic POSIX rename replaces targetFile without leaving a window where targetFile is missing
+            val renamed = tempFile.renameTo(targetFile)
+            if (!renamed) {
+                tempFile.copyTo(targetFile, overwrite = true)
+                tempFile.delete()
+            }
+        } catch (t: Throwable) {
+            if (tempFile.exists()) {
+                tempFile.delete()
+            }
+            throw t
         }
 
         val relativePath = "plans/${sanitizeFileName(planId)}/attachments/$safeName"
@@ -101,26 +110,37 @@ class PlanFileManager(private val context: Context) {
         val targetFile = File(attachmentsDir, safeName)
 
         val tempFile = File(attachmentsDir, "${safeName}_${UUID.randomUUID()}.tmp")
-        tempFile.outputStream().use { output ->
-            inputStream.copyTo(output)
-            output.flush()
-        }
+        try {
+            FileOutputStream(tempFile).use { output ->
+                val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                var totalRead = 0L
+                while (true) {
+                    val read = inputStream.read(buffer)
+                    if (read < 0) break
+                    totalRead += read
+                    if (totalRead > MAX_ATTACHMENT_BYTES) {
+                        throw IllegalArgumentException("حجم الملف يتجاوز الحد الأقصى المسموح به (25 ميغابايت)")
+                    }
+                    output.write(buffer, 0, read)
+                }
+                output.flush()
+                runCatching { output.fd.sync() }
+            }
 
-        require(tempFile.length() > 0) {
-            tempFile.delete()
-            "الملف المرفق فارغ"
-        }
-        require(tempFile.length() <= MAX_ATTACHMENT_BYTES) {
-            tempFile.delete()
-            "حجم الملف يتجاوز الحد الأقصى المسموح به (25 ميغابايت)"
-        }
+            require(tempFile.length() > 0) {
+                "الملف المرفق فارغ"
+            }
 
-        if (targetFile.exists()) {
-            targetFile.delete()
-        }
-        if (!tempFile.renameTo(targetFile)) {
-            tempFile.copyTo(targetFile, overwrite = true)
-            tempFile.delete()
+            val renamed = tempFile.renameTo(targetFile)
+            if (!renamed) {
+                tempFile.copyTo(targetFile, overwrite = true)
+                tempFile.delete()
+            }
+        } catch (t: Throwable) {
+            if (tempFile.exists()) {
+                tempFile.delete()
+            }
+            throw t
         }
 
         val relativePath = "plans/${sanitizeFileName(planId)}/attachments/$safeName"
@@ -161,6 +181,11 @@ class PlanFileManager(private val context: Context) {
         return file.delete()
     }
 
+    /**
+     * Deletes a plan directory and all its contents bottom-up so that if a single attachment file
+     * fails to delete, all other attachments and files in the directory are still deleted.
+     * Returns true only if the entire directory was completely removed.
+     */
     fun deletePlanDirectory(planId: String): Boolean {
         val sanitizedId = sanitizeFileName(planId)
         val planDir = File(basePlansDir, sanitizedId)
@@ -173,7 +198,30 @@ class PlanFileManager(private val context: Context) {
             return false
         }
 
-        return planDir.deleteRecursively()
+        var allDeleted = true
+        planDir.walkBottomUp().forEach { child ->
+            if (child.exists() && !child.delete()) {
+                allDeleted = false
+            }
+        }
+        return allDeleted && !planDir.exists()
+    }
+
+    /**
+     * Cleans up any leftover temporary (`*.tmp`) files from interrupted atomic writes
+     * across all plan directories without touching valid attachment files.
+     */
+    fun cleanupTempFiles(): Int {
+        var deletedCount = 0
+        if (!basePlansDir.exists()) return 0
+        basePlansDir.walkTopDown().forEach { file ->
+            if (file.isFile && file.name.endsWith(".tmp")) {
+                if (file.delete()) {
+                    deletedCount++
+                }
+            }
+        }
+        return deletedCount
     }
 
     fun cleanupOrphanFiles(validPlanIds: Set<String>): Int {
@@ -181,7 +229,7 @@ class PlanFileManager(private val context: Context) {
         var cleanedCount = 0
         basePlansDir.listFiles()?.forEach { dir ->
             if (dir.isDirectory && dir.name !in sanitizedValidIds) {
-                if (dir.deleteRecursively()) {
+                if (deletePlanDirectory(dir.name)) {
                     cleanedCount++
                 }
             }
@@ -190,7 +238,7 @@ class PlanFileManager(private val context: Context) {
     }
 
     fun verifyFileIntegrity(file: File?): Boolean {
-        return file != null && file.exists() && file.isFile && file.canRead() && file.length() > 0
+        return file != null && file.exists() && file.isFile && file.canRead() && file.length() > 0 && !file.name.endsWith(".tmp")
     }
 
     companion object {

@@ -147,8 +147,8 @@ object PythonToolkit {
             duration = infoObj.optString("duration", compType.defaultDuration),
             materials = infoObj.optString("materials", compType.defaultMaterials),
             reference = infoObj.optString("reference", "المختار في اللغة العربية"),
-            teacherName = infoObj.optString("teacherName", "محمد العابد"),
-            schoolName = infoObj.optString("schoolName", "مدرسة أنوال (السلك الإعدادي)"),
+            teacherName = infoObj.optString("teacherName", ""),
+            schoolName = infoObj.optString("schoolName", ""),
             communicativeComp = compsObj.optString("communicative", ""),
             methodologicalComp = compsObj.optString("methodological", ""),
             culturalComp = compsObj.optString("cultural", "")
@@ -431,10 +431,15 @@ object PythonToolkit {
     fun GET_PYTHON_SCRIPT(): String = GET_READING_PYTHON_SCRIPT()
 
     /**
-     * Executes a generated Python script with a given JSON file using python3.
-     * Returns a pair of (exitCode, outputOrGeneratedDocxFile).
+     * Executes a generated Python script with a given JSON file using python3 with a strict timeout.
+     * Used by local unit/verification tests; enforces a 30-second process timeout.
      */
-    fun runPythonScript(scriptFile: File, jsonFile: File, outputDir: File): Pair<Int, String> {
+    fun runPythonScript(
+        scriptFile: File,
+        jsonFile: File,
+        outputDir: File,
+        timeoutSeconds: Long = 30L
+    ): Pair<Int, String> {
         outputDir.mkdirs()
         val cmd = listOf("python3", scriptFile.absolutePath, "--from-json", jsonFile.absolutePath, "--out", outputDir.absolutePath)
         val process = ProcessBuilder(cmd)
@@ -442,15 +447,36 @@ object PythonToolkit {
             .start()
 
         val output = StringBuilder()
-        BufferedReader(InputStreamReader(process.inputStream, StandardCharsets.UTF_8)).use { reader ->
-            var line: String? = reader.readLine()
-            while (line != null) {
-                output.append(line).append("\n")
-                line = reader.readLine()
+        val readerThread = Thread {
+            runCatching {
+                BufferedReader(InputStreamReader(process.inputStream, StandardCharsets.UTF_8)).use { reader ->
+                    var line: String? = reader.readLine()
+                    while (line != null) {
+                        output.append(line).append("\n")
+                        line = reader.readLine()
+                    }
+                }
             }
         }
-        val exitCode = process.waitFor()
-        return exitCode to output.toString()
+        readerThread.start()
+
+        var exitCode: Int? = null
+        val waiterThread = Thread {
+            runCatching {
+                exitCode = process.waitFor()
+            }
+        }
+        waiterThread.start()
+        waiterThread.join(timeoutSeconds * 1000L)
+
+        if (waiterThread.isAlive) {
+            process.destroy()
+            waiterThread.interrupt()
+            readerThread.join(1000)
+            return -1 to "خطأ: انتهت مهلة تنفيذ السكريبت (${timeoutSeconds}s).\n$output"
+        }
+        readerThread.join(2000)
+        return (exitCode ?: -1) to output.toString()
     }
 
     // ────────────────────── Common Python python-docx Builder Engine ──────────────────────
@@ -555,7 +581,7 @@ def append_header_table(doc, data, component_title=None):
         ("الموضوع :", topic, "- كفاية تواصلية: " + comps.get("communicative", ""), ""),
         ("مدة الإنجاز :", info.get("duration", "ساعتان"), "- كفاية منهجية: " + comps.get("methodological", ""), ""),
         ("المرجع :", info.get("reference", "المختار في اللغة العربية"), "- كفاية معرفية/ثقافية: " + comps.get("cultural", ""), ""),
-        ("الأستاذ :", info.get("teacherName", "محمد العابد"), "المؤسسة :", info.get("schoolName", "ثانوية أنوال الإعدادية"))
+        ("الأستاذ :", info.get("teacherName", ""), "المؤسسة :", info.get("schoolName", ""))
     ]
     for r_idx, (c0, c1, c2, c3) in enumerate(rows_spec):
         row_cells = tbl.rows[r_idx].cells

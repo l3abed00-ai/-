@@ -1,0 +1,53 @@
+name: Android CI & Security Verification
+
+on:
+  push:
+    branches: [ "main", "master", "phase-6a" ]
+  pull_request:
+    branches: [ "main", "master", "phase-6a" ]
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: gradle
+
+      - name: Set up Python 3.11 & python-docx
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install python-docx for PythonToolkit unit tests
+        run: pip install python-docx
+
+      - name: Scan source files for leaked keys
+        run: |
+          if grep -rInE --exclude-dir=build --exclude-dir=.gradle "AIza|AQ\." app/src/ docs/; then
+            echo "::error::Leaked API key pattern detected!"
+            exit 1
+          fi
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew scripts/verify.sh
+
+      - name: Run verify.sh (assembleDebug, testDebugUnitTest, lintDebug, APK scan)
+        run: ./scripts/verify.sh
+
+      - name: Upload Lint and Test Reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verification-reports
+          path: |
+            app/build/reports/tests/testDebugUnitTest/
+            app/build/reports/lint-results-debug.html
+            app/build/reports/lint-results-debug.xml

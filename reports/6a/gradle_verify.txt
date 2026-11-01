@@ -1,0 +1,5 @@
+============================================================
+ 1. Secret Leak Scan (Source & Docs)
+============================================================
+ERROR: Potential hardcoded API key detected in repository!
+VERIFY_EXIT=1

@@ -177,6 +177,7 @@ class JadhadhaViewModel(
         }
         viewModelScope.launch {
             repository.prepopulateSamplesIfEmpty()
+            repository.reconcileStorage()
             repository.allPlans.collect { plans ->
                 _uiState.value = _uiState.value.copy(savedPlans = plans)
             }
@@ -528,15 +529,21 @@ class JadhadhaViewModel(
 
     fun submitPdfApiKey(key: String) {
         val trimmed = key.trim()
-        GeminiAiService.saveApiKey(getApplication(), trimmed)
+        val persistedToDisk = GeminiAiService.saveApiKey(getApplication(), trimmed)
         val hasPendingPdf = _uiState.value.pendingPdfBytes != null
         val isValid = GeminiAiService.hasValidApiKey(trimmed)
+        val storageNotice = com.example.security.SecretManager.getLastStorageNotice()
+        val msg = when {
+            trimmed.isBlank() -> null
+            !persistedToDisk && storageNotice != null -> storageNotice
+            else -> "تم حفظ مفتاح ${ltr("Gemini")} بنجاح."
+        }
         _uiState.value = _uiState.value.copy(
             customApiKey = trimmed,
             showPdfApiKeyDialog = false,
             showPdfConfirmationDialog = hasPendingPdf && isValid,
             extraction = if (isValid) ExtractionState.Idle else ExtractionState.Error(GeminiAiService.MSG_PDF_NEEDS_KEY),
-            successMessage = if (trimmed.isNotBlank()) "تم حفظ مفتاح ${ltr("Gemini")} بنجاح." else null
+            successMessage = msg
         )
     }
 
@@ -1108,10 +1115,16 @@ class JadhadhaViewModel(
 
     fun setApiKey(key: String) {
         val trimmed = key.trim()
-        GeminiAiService.saveApiKey(getApplication(), trimmed)
+        val persistedToDisk = GeminiAiService.saveApiKey(getApplication(), trimmed)
+        val storageNotice = com.example.security.SecretManager.getLastStorageNotice()
+        val msg = if (!persistedToDisk && storageNotice != null) {
+            storageNotice
+        } else {
+            "تم حفظ مفتاح ${ltr("Gemini")} بنجاح."
+        }
         _uiState.value = _uiState.value.copy(
             customApiKey = trimmed,
-            successMessage = "تم حفظ مفتاح ${ltr("Gemini")} بنجاح."
+            successMessage = msg
         )
     }
 

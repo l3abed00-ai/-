@@ -1,0 +1,48 @@
+=== java -version ===
+openjdk version "21.0.13" 2026-10-20 LTS
+OpenJDK Runtime Environment Temurin-21.0.13+9 (build 21.0.13+9-LTS)
+OpenJDK 64-Bit Server VM Temurin-21.0.13+9 (build 21.0.13+9-LTS, mixed mode, sharing)
+
+=== gradle --version ===
+
+------------------------------------------------------------
+Gradle 9.3.1
+------------------------------------------------------------
+
+Build time:    2026-01-29 14:15:01 UTC
+Revision:      44f4e8d3122ee6e7cbf5a248d7e20b4ca666bda3
+
+Kotlin:        2.2.21
+Groovy:        4.0.29
+Ant:           Apache Ant(TM) version 1.10.15 compiled on August 25 2024
+Launcher JVM:  21.0.13 (Eclipse Adoptium 21.0.13+9-LTS)
+Daemon JVM:    /usr/lib/jvm/temurin-21-jdk-amd64 (no Daemon JVM specified, using current Java home)
+OS:            Linux 4.19.0-gvisor amd64
+
+
+=== Environment Variables ===
+ANDROID_HOME=<unset>
+ANDROID_SDK_ROOT=/opt/android/sdk
+
+=== Repository Connectivity ===
+HTTP/2 404 
+content-length: 1449
+content-type: text/html; charset=utf-8
+server: downloads
+x-content-type-options: nosniff
+HTTP/2 200 
+date: Sun, 01 Nov 2026 08:08:26 GMT
+content-type: text/html
+cf-ray: a539695b48e29466-LHR
+cf-cache-status: HIT
+
+=== Python & Tools ===
+Python 3.11.2
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+ModuleNotFoundError: No module named 'docx'
+soffice: not installed
+* daemon not running; starting now at tcp:5037
+* daemon started successfully
+List of devices attached
+

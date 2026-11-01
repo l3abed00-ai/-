@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <paths>
-    <cache-path name="cache_files" path="." />
-    <files-path name="internal_files" path="." />
-    <external-files-path name="external_files" path="." />
-    <external-cache-path name="external_cache" path="." />
+    <cache-path name="generated_plans" path="generated_plans/" />
+    <cache-path name="python_exports" path="python_exports/" />
+    <files-path name="plans" path="plans/" />
+    <external-files-path name="external_jadhadhat" path="Documents/Jadhadhat/" />
 </paths>

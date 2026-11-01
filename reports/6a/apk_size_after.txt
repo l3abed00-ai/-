@@ -1,0 +1,3 @@
+FILE: app/build/outputs/apk/debug/app-debug.apk
+SIZE_BYTES: 24021761
+SECRETS: ['classes4.dex:AQ.', 'classes5.dex:AIza']

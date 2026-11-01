@@ -176,8 +176,8 @@ object JadhadhaParser {
         var duration = detectedComponent.defaultDuration
         var materials = detectedComponent.defaultMaterials
         var reference = "المختار في اللغة العربية"
-        var teacherName = "محمد العابد"
-        var schoolName = "مدرسة أنوال (السلك الإعدادي)"
+        var teacherName = ""
+        var schoolName = ""
         var communicative = when (detectedComponent) {
             PedagogicalComponent.LANGUAGE -> "أن يكون المتعلم قادراً على توظيف الظاهرة اللغوية في سياقات تواصلية مختلفة تعبيراً وفهماً."
             PedagogicalComponent.EXPRESSION -> "تمكين المتعلم من التعبير والتواصل بلغة عربية سليمة عبر توظيف خطوات المهارة."

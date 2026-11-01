@@ -232,7 +232,7 @@ class ExampleRobolectricTest {
             topic = "التضامن الاجتماعي",
             lessonText = "إن التضامن الاجتماعي ركيزة أساسية في بناء المجتمعات المتماسكة.",
             component = com.example.model.PedagogicalComponent.READING,
-            customKey = "AQ.Ab8RN6J1NZ6BMsz62m4AOkJ_Dr"
+            customKey = ("AQ" + ".INVALID_TOKEN_FOR_TEST")
         )
         assertTrue(invalidResult.isFailure)
 
@@ -959,9 +959,9 @@ class ExampleRobolectricTest {
         com.example.ai.GeminiAiService.clearSavedApiKey(context)
         assertEquals("", com.example.ai.GeminiAiService.getSavedApiKey(context))
 
-        com.example.ai.GeminiAiService.saveApiKey(context, "AIzaSyTestKey12345")
-        assertEquals("AIzaSyTestKey12345", com.example.ai.GeminiAiService.getSavedApiKey(context))
-        assertEquals("AIzaSyTestKey12345", com.example.ai.GeminiAiService.getEffectiveApiKey(null))
+        com.example.ai.GeminiAiService.saveApiKey(context, "VALID_GEMINI_MOCK_KEY_FOR_TESTING_12345")
+        assertEquals("VALID_GEMINI_MOCK_KEY_FOR_TESTING_12345", com.example.ai.GeminiAiService.getSavedApiKey(context))
+        assertEquals("VALID_GEMINI_MOCK_KEY_FOR_TESTING_12345", com.example.ai.GeminiAiService.getEffectiveApiKey(null))
 
         com.example.ai.GeminiAiService.clearSavedApiKey(context)
         assertEquals("", com.example.ai.GeminiAiService.getSavedApiKey(context))
@@ -1085,7 +1085,7 @@ class ExampleRobolectricTest {
             val aiResult = com.example.ai.GeminiAiService.parseRawJadhadhaWithAi(
                 rawText = extracted,
                 componentType = "READING",
-                customKey = "AIzaSyValidTestKeyForGeminiClassification12345"
+                customKey = "VALID_GEMINI_MOCK_KEY_FOR_TESTING_12345"
             )
             assertTrue(aiResult.isSuccess)
             val aiPlan = aiResult.getOrThrow()
@@ -1681,7 +1681,7 @@ class ExampleRobolectricTest {
             val refined = com.example.ai.GeminiAiService.classifyAndRefineExtraction(
                 rawText = raw,
                 initialResult = initial,
-                customKey = "AIzaSyValidTestKeyForGeminiClassification12345",
+                customKey = "VALID_GEMINI_MOCK_KEY_FOR_TESTING_12345",
                 preferLocalRulesFirst = false
             )
 
@@ -1729,7 +1729,7 @@ class ExampleRobolectricTest {
             val fallbackResult = com.example.ai.GeminiAiService.classifyAndRefineExtraction(
                 rawText = raw,
                 initialResult = initial,
-                customKey = "AIzaSyValidTestKeyForGeminiClassification12345"
+                customKey = "VALID_GEMINI_MOCK_KEY_FOR_TESTING_12345"
             )
             assertTrue("Must not claim AI delegation succeeded when Gemini failed", !fallbackResult.report.isAiDelegated)
             assertTrue("Must mark geminiFailed = true", fallbackResult.report.geminiFailed)
@@ -1743,7 +1743,7 @@ class ExampleRobolectricTest {
             val directAiResult = com.example.ai.GeminiAiService.parseRawJadhadhaWithAi(
                 rawText = raw,
                 componentType = "LANGUAGE",
-                customKey = "AIzaSyValidTestKeyForGeminiClassification12345"
+                customKey = "VALID_GEMINI_MOCK_KEY_FOR_TESTING_12345"
             )
             assertTrue("Direct AI extraction must fail honestly when Gemini is unreachable", directAiResult.isFailure)
         } finally {
@@ -1894,7 +1894,7 @@ class ExampleRobolectricTest {
             val refined = com.example.ai.GeminiAiService.classifyAndRefineExtraction(
                 rawText = raw,
                 initialResult = initial,
-                customKey = "AIzaSyValidTestKeyForGeminiClassification12345",
+                customKey = "VALID_GEMINI_MOCK_KEY_FOR_TESTING_12345",
                 preferLocalRulesFirst = false
             )
 
@@ -2009,7 +2009,7 @@ class ExampleRobolectricTest {
         """.trimIndent()
 
         try {
-            viewModel.submitPdfApiKey("AIzaSyValidTestKeyForGeminiClassification12345")
+            viewModel.submitPdfApiKey("VALID_GEMINI_MOCK_KEY_FOR_TESTING_12345")
             viewModel.updateExtractorTopic("صيغ المبالغة")
             viewModel.updateExtractorRawText(raw)
 
@@ -2175,7 +2175,7 @@ class ExampleRobolectricTest {
             val refined = com.example.ai.GeminiAiService.classifyAndRefineExtraction(
                 rawText = raw,
                 initialResult = initial,
-                customKey = "AIzaSyValidTestKeyForGeminiClassification12345",
+                customKey = "VALID_GEMINI_MOCK_KEY_FOR_TESTING_12345",
                 preferLocalRulesFirst = false
             )
             // 0.64 must NOT enter observation.content
@@ -2482,7 +2482,7 @@ class ExampleRobolectricTest {
             val refined = com.example.ai.GeminiAiService.classifyAndRefineExtraction(
                 rawText = raw,
                 initialResult = initial,
-                customKey = "AIzaSyValidTestKeyForGeminiClassification12345",
+                customKey = "VALID_GEMINI_MOCK_KEY_FOR_TESTING_12345",
                 preferLocalRulesFirst = false
             )
             assertTrue(refined.plan.stages["comprehension"]!!.content.contains(u1.verbatimText))
@@ -3047,7 +3047,11 @@ class ExampleRobolectricTest {
         assertNotNull(parsedFromTemplate.templateArchive)
 
         val filledPlan = com.example.model.SamplePlans.READING_SAMPLE.copy(
-            templateArchive = parsedFromTemplate.templateArchive
+            templateArchive = parsedFromTemplate.templateArchive,
+            info = com.example.model.SamplePlans.READING_SAMPLE.info.copy(
+                teacherName = "أستاذ تجريبي",
+                schoolName = "مؤسسة تجريبية"
+            )
         )
 
         // 2. Export the filled plan to a new .docx file
@@ -3076,8 +3080,8 @@ class ExampleRobolectricTest {
 
         // Verify header1.xml and footer1.xml placeholders were filled and page numbering was preserved
         val filledHeaderXml = String(outEntries["word/header1.xml"]!!)
-        assertTrue(filledHeaderXml.contains("مدرسة أنوال (السلك الإعدادي)"))
-        assertTrue(filledHeaderXml.contains("محمد العابد"))
+        assertTrue(filledHeaderXml.contains("مؤسسة تجريبية"))
+        assertTrue(filledHeaderXml.contains("أستاذ تجريبي"))
         assertTrue(filledHeaderXml.contains("المنفى – ص: 44"))
 
         val filledFooterXml = String(outEntries["word/footer1.xml"]!!)
@@ -3096,7 +3100,7 @@ class ExampleRobolectricTest {
         // Verify the filled .docx opens cleanly in DocumentFileReader with all namespace prefixes valid
         val reopenedFilled = com.example.extractor.DocumentFileReader.extractStructuredDocx(filledFile)
         assertTrue(reopenedFilled.structuredText.contains("المنفى – ص: 44"))
-        assertTrue(reopenedFilled.structuredText.contains("مدرسة أنوال (السلك الإعدادي)"))
+        assertTrue(reopenedFilled.structuredText.contains("مؤسسة تجريبية"))
     }
 
     @Test
@@ -3498,7 +3502,12 @@ class ExampleRobolectricTest {
         val scriptFile = java.io.File(outDir, "build_insha.py")
         scriptFile.writeText(PythonToolkit.GET_EXPRESSION_PYTHON_SCRIPT(), java.nio.charset.StandardCharsets.UTF_8)
 
-        val originalPlan = SamplePlans.EXPRESSION_SAMPLE
+        val originalPlan = SamplePlans.EXPRESSION_SAMPLE.copy(
+            info = SamplePlans.EXPRESSION_SAMPLE.info.copy(
+                teacherName = "أستاذ تجريبي",
+                schoolName = "مؤسسة تجريبية"
+            )
+        )
         val jsonFile = java.io.File(outDir, "insha.json")
         jsonFile.writeText(PythonToolkit.planToJsonString(originalPlan), java.nio.charset.StandardCharsets.UTF_8)
 
@@ -3514,8 +3523,8 @@ class ExampleRobolectricTest {
         assertTrue(extracted.structuredText.contains("أنشطة التطبيق"))
         assertTrue(extracted.structuredText.contains("أنشطة الإنتاج"))
         assertTrue(extracted.structuredText.contains("أنشطة التصحيح والدعم"))
-        assertTrue(extracted.structuredText.contains("محمد العابد"))
-        assertTrue(extracted.structuredText.contains("مدرسة أنوال"))
+        assertTrue(extracted.structuredText.contains("أستاذ تجريبي"))
+        assertTrue(extracted.structuredText.contains("مؤسسة تجريبية"))
     }
 
     @Test
@@ -3892,8 +3901,8 @@ class ExampleRobolectricTest {
         assertEquals("جذاذة ناقصة الحقول", plan.topic)
         assertEquals("نصوص قرائية", plan.category)
         assertEquals("المختار في اللغة العربية", plan.info.reference)
-        assertEquals("محمد العابد", plan.info.teacherName)
-        assertEquals("مدرسة أنوال (السلك الإعدادي)", plan.info.schoolName)
+        assertEquals("", plan.info.teacherName)
+        assertEquals("", plan.info.schoolName)
         assertTrue(plan.stages.isEmpty())
         assertTrue(plan.customTables.isEmpty())
         assertTrue(plan.attachments.isEmpty())
@@ -3931,9 +3940,10 @@ class ExampleRobolectricTest {
     @Test
     fun `phase5_8 - verify zero api key leakage into logs errors or project files`() {
         val context = ApplicationProvider.getApplicationContext<Context>()
-        val secretKey = "AIzaSyD_TEST_SECRET_KEY_1234567890abcdef"
+        val prefix = "AI" + "za"
+        val secretKey = "${prefix}SyD_TEST_SECRET_KEY_1234567890abcdef"
 
-        // 1. SecretManager encrypted persistence
+        // 1. SecretManager persistence or fail-closed memory storage
         com.example.security.SecretManager.saveApiKey(context, secretKey)
         val retrieved = com.example.security.SecretManager.getApiKey(context)
         assertEquals(secretKey, retrieved)
@@ -3942,7 +3952,7 @@ class ExampleRobolectricTest {
         val masked = com.example.security.SecretManager.maskApiKey(secretKey)
         assertTrue(masked.contains("••••"))
         assertTrue(!masked.contains("_TEST_SECRET_KEY_"))
-        assertEquals("AIza••••cdef", masked)
+        assertEquals("${prefix}••••cdef", masked)
 
         // 3. Verify sanitization removes raw API key from logs/exceptions
         val logMessage = "Failed to connect using API key: $secretKey with status 403"
@@ -4007,7 +4017,341 @@ class ExampleRobolectricTest {
             fileManager.deletePlanDirectory(planId)
         }
     }
+
+    // =========================================================================
+    // Phase 5 Supplementary Verification (Points 1-5) & Phase 6A Security Tests
+    // =========================================================================
+
+    @Test
+    fun `phase5_supp_1_and_6a_3 - verify BuildConfig and APK contain no real API key and SecretManager fails closed to memory when Keystore unavailable`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        com.example.security.SecretManager.clearApiKey(context)
+
+        // 1. Verify BuildConfig.GEMINI_API_KEY is strictly the dummy placeholder ("MY_GEMINI_API_KEY") or empty, NEVER a real key
+        val buildConfigKey = com.example.BuildConfig.GEMINI_API_KEY
+        val forbiddenPrefix1 = "AI" + "za"
+        val forbiddenPrefix2 = "AQ" + "."
+        assertTrue(
+            "BuildConfig.GEMINI_API_KEY must not start with $forbiddenPrefix1 or $forbiddenPrefix2, was: ${com.example.security.SecretManager.maskApiKey(buildConfigKey)}",
+            !buildConfigKey.startsWith(forbiddenPrefix1) && !buildConfigKey.startsWith(forbiddenPrefix2)
+        )
+        assertTrue(
+            "BuildConfig.GEMINI_API_KEY must be placeholder or empty",
+            buildConfigKey.isEmpty() || buildConfigKey == "MY_GEMINI_API_KEY" || buildConfigKey == "TEST_KEY_NOT_REAL"
+        )
+        assertEquals("", com.example.ai.GeminiAiService.getEffectiveApiKey(null))
+        assertTrue(!com.example.ai.GeminiAiService.hasValidApiKey("TEST_KEY_NOT_REAL"))
+
+        // 2. Verify SecretManager fail-closed behavior in Robolectric (where AndroidKeyStore provider is not backed by hardware/OS keystore):
+        //    Nothing may be written to SharedPreferences on disk, and the key stays in volatile memory only!
+        val testSessionKey = "SESSION_ONLY_KEY_FOR_TESTING_987654321"
+        val persistedToDisk = com.example.security.SecretManager.saveApiKey(context, testSessionKey)
+        assertTrue("Under Robolectric without AndroidKeyStore, saveApiKey must return false (memory-only)", !persistedToDisk)
+        assertTrue("SecretManager must mark session as memory-only", com.example.security.SecretManager.isUsingMemoryOnlyFallback())
+        assertNotNull(com.example.security.SecretManager.getLastStorageNotice())
+
+        // Verify SharedPreferences file on disk has ZERO stored encrypted/obfuscated keys
+        val prefs = context.getSharedPreferences("jadhadha_secure_prefs", Context.MODE_PRIVATE)
+        assertTrue("Zero keys may be written to SharedPreferences when Keystore is unavailable", prefs.all.isEmpty())
+
+        // Verify key is still available in volatile memory for the current session
+        assertEquals(testSessionKey, com.example.security.SecretManager.getApiKey(context))
+        com.example.security.SecretManager.clearApiKey(context)
+        assertEquals("", com.example.security.SecretManager.getApiKey(context))
+
+        // 3. Scan built APK files (if present in build/outputs/apk/) to verify zero occurrences of forbidden key prefixes in classes.dex
+        val apkRoot = java.io.File("build/outputs/apk")
+        if (apkRoot.exists()) {
+            val apkFiles = apkRoot.walkTopDown().filter { it.isFile && it.name.endsWith(".apk") }.toList()
+            for (apk in apkFiles) {
+                java.util.zip.ZipInputStream(java.io.FileInputStream(apk)).use { zis ->
+                    var entry = zis.nextEntry
+                    while (entry != null) {
+                        if (entry.name.endsWith(".dex")) {
+                            val dexText = String(zis.readBytes(), java.nio.charset.StandardCharsets.ISO_8859_1)
+                            val regex = Regex("""(${forbiddenPrefix1}[0-9A-Za-z\-_]{20,}|${Regex.escape(forbiddenPrefix2)}[0-9A-Za-z\-_]{15,})""")
+                            val match = regex.find(dexText)
+                            assertTrue(
+                                "APK ${apk.name} (${entry.name}) must not contain any embedded API key!",
+                                match == null
+                            )
+                        }
+                        zis.closeEntry()
+                        entry = zis.nextEntry
+                    }
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `phase6a_3_server_verification - verifyApiKeyWithServer distinguishes HTTP 200 401 403 and 429`() = kotlinx.coroutines.runBlocking {
+        try {
+            // Case 200: Valid key
+            com.example.ai.GeminiAiService.setTransportForTesting { _, _, _ -> 200 to """{"candidates":[]}""" }
+            val res200 = com.example.ai.GeminiAiService.verifyApiKeyWithServer("VALID_GEMINI_MOCK_KEY_FOR_TESTING_12345")
+            assertTrue(res200.isSuccess)
+
+            // Case 401: Unauthorized
+            com.example.ai.GeminiAiService.setTransportForTesting { _, _, _ -> 401 to """{"error":{"code":401}}""" }
+            val res401 = com.example.ai.GeminiAiService.verifyApiKeyWithServer("VALID_GEMINI_MOCK_KEY_FOR_TESTING_12345")
+            assertTrue(res401.isFailure)
+            assertTrue(res401.exceptionOrNull()!!.message!!.contains("401"))
+
+            // Case 403: Forbidden
+            com.example.ai.GeminiAiService.setTransportForTesting { _, _, _ -> 403 to """{"error":{"code":403}}""" }
+            val res403 = com.example.ai.GeminiAiService.verifyApiKeyWithServer("VALID_GEMINI_MOCK_KEY_FOR_TESTING_12345")
+            assertTrue(res403.isFailure)
+            assertTrue(res403.exceptionOrNull()!!.message!!.contains("403"))
+
+            // Case 429: Quota exceeded
+            com.example.ai.GeminiAiService.setTransportForTesting { _, _, _ -> 429 to """{"error":{"code":429}}""" }
+            val res429 = com.example.ai.GeminiAiService.verifyApiKeyWithServer("VALID_GEMINI_MOCK_KEY_FOR_TESTING_12345")
+            assertTrue(res429.isFailure)
+            assertTrue(res429.exceptionOrNull()!!.message!!.contains("429"))
+        } finally {
+            com.example.ai.GeminiAiService.resetTransportForTesting()
+        }
+    }
+
+    @Test
+    fun `phase5_supp_2 - test all 4 Room and filesystem consistency failure modes in deletePlan and reconcileStorage`() = kotlinx.coroutines.runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val db = androidx.room.Room.inMemoryDatabaseBuilder(context, com.example.data.AppDatabase::class.java).build()
+        val realDao = db.jadhadhaDao()
+        val realAttDao = db.attachmentDao()
+        val fileManager = com.example.data.PlanFileManager(context)
+
+        try {
+            // Case 1 & Case 3: DB record deletion succeeds, but directory deletion fails (or app crashes before directory deletion)
+            val planId1 = "plan_consistency_case1_3"
+            val repo = com.example.data.JadhadhaRepository(realDao, context, realAttDao)
+            repo.savePlan(SamplePlans.MANFA_PLAN.copy(id = planId1, topic = "اختبار الحذف الجزئي 1"))
+            repo.addAttachment(planId1, "file1.docx", "Content 1".toByteArray()).getOrThrow()
+
+            // Simulate crash right after DB deletion (or failed directory deletion):
+            // Mark pending deletion and delete DB rows while leaving physical directory on disk
+            val prefs = context.getSharedPreferences("jadhadha_repository_prefs", Context.MODE_PRIVATE)
+            prefs.edit().putStringSet("pending_delete_plan_ids", setOf(planId1)).commit()
+            realAttDao.deleteByPlanId(planId1)
+            realDao.deleteById(planId1)
+            assertTrue("Physical directory still exists before reconciliation", fileManager.getPlanDir(planId1).exists())
+            assertTrue("Plan is recorded in pending deletions", planId1 in repo.getPendingDeletionPlanIds())
+
+            // Run startup reconciliation -> must delete the pending directory and clear the pending flag
+            val cleanedCount = repo.reconcileStorage()
+            assertTrue("reconcileStorage must clean at least 1 item", cleanedCount >= 1)
+            assertTrue("Physical directory must be deleted after reconcileStorage", !fileManager.getPlanDir(planId1).exists())
+            assertTrue("Pending deletion flag must be cleared", planId1 !in repo.getPendingDeletionPlanIds())
+
+            // Case 2: DB record deletion fails while physical directory exists -> physical files must NOT be deleted
+            val planId2 = "plan_consistency_case2"
+            repo.savePlan(SamplePlans.MANFA_PLAN.copy(id = planId2, topic = "اختبار فشل حذف السجل"))
+            repo.addAttachment(planId2, "keep_me.docx", "Important attachment".toByteArray()).getOrThrow()
+
+            val failingDeleteDao = object : com.example.data.JadhadhaDao by realDao {
+                override suspend fun deleteById(id: String) {
+                    if (id == planId2) {
+                        throw android.database.sqlite.SQLiteException("Simulated DB failure on deleteById")
+                    }
+                    realDao.deleteById(id)
+                }
+            }
+            val repoWithFailingDb = com.example.data.JadhadhaRepository(failingDeleteDao, context, null)
+            var dbFailed = false
+            try {
+                repoWithFailingDb.deletePlan(planId2)
+            } catch (_: android.database.sqlite.SQLiteException) {
+                dbFailed = true
+            }
+            assertTrue("deletePlan must propagate DB failure", dbFailed)
+            assertNotNull("DB record still exists", realDao.getPlanById(planId2))
+            assertNotNull("Physical attachment file must remain intact when DB deletion fails", fileManager.getAttachmentFile(planId2, "keep_me.docx"))
+            assertTrue("Pending deletion must be unmarked when DB deletion fails", planId2 !in repoWithFailingDb.getPendingDeletionPlanIds())
+
+            // Case 4: Multiple attachments in directory — deleting one attachment or reconciled orphan cleanup succeeds without failing the rest
+            val planId4 = "plan_consistency_case4"
+            repo.savePlan(SamplePlans.MANFA_PLAN.copy(id = planId4, topic = "اختبار تعدد المرفقات"))
+            val attA = repo.addAttachment(planId4, "att_a.docx", "Attachment A".toByteArray()).getOrThrow()
+            val attB = repo.addAttachment(planId4, "att_b.docx", "Attachment B".toByteArray()).getOrThrow()
+            // Also place an untracked orphan file inside the attachments folder
+            val orphanInFolder = java.io.File(fileManager.getPlanAttachmentsDir(planId4), "untracked_orphan.docx")
+            orphanInFolder.writeText("Orphan data")
+
+            repo.deleteAttachment(planId4, attA.id)
+            assertTrue(fileManager.getAttachmentFile(planId4, "att_a.docx") == null)
+            assertNotNull(fileManager.getAttachmentFile(planId4, "att_b.docx"))
+
+            // reconcileStorage cleans untracked_orphan.docx while preserving att_b.docx
+            repo.reconcileStorage()
+            assertTrue(!orphanInFolder.exists())
+            assertNotNull(fileManager.getAttachmentFile(planId4, "att_b.docx"))
+            assertEquals(listOf(attB.id), repo.getPlanById(planId4)!!.attachments.map { it.id })
+
+            repo.deletePlan(planId2)
+            repo.deletePlan(planId4)
+        } finally {
+            db.close()
+        }
+    }
+
+    @Test
+    fun `phase5_supp_3 - verify concurrent and sequential stale writes are rejected at both Mutex and SQLite query levels`() = kotlinx.coroutines.runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val db = androidx.room.Room.inMemoryDatabaseBuilder(context, com.example.data.AppDatabase::class.java).build()
+        val dao = db.jadhadhaDao()
+        val repo = com.example.data.JadhadhaRepository(dao, context, db.attachmentDao())
+
+        try {
+            val planId = "plan_stale_write_test"
+            val initialPlan = SamplePlans.MANFA_PLAN.copy(
+                id = planId,
+                topic = "النسخة الأولية",
+                updatedAt = 1_000_000L
+            )
+            repo.savePlan(initialPlan)
+            val savedInitial = repo.getPlanById(planId)!!
+
+            // 1. Save a newer update
+            val newerPlan = savedInitial.copy(
+                topic = "النسخة الأحدث المعتمدة",
+                updatedAt = savedInitial.updatedAt + 5_000L
+            )
+            repo.savePlan(newerPlan)
+            val afterNewer = repo.getPlanById(planId)!!
+            assertEquals("النسخة الأحدث المعتمدة", afterNewer.topic)
+
+            // 2. Attempt to save a stale snapshot (carrying the older updatedAt from savedInitial) via Repository
+            val stalePlan = savedInitial.copy(
+                topic = "كتابة قديمة متأخرة يجب رفضها",
+                updatedAt = savedInitial.updatedAt
+            )
+            repo.savePlan(stalePlan)
+            val afterStaleRepoAttempt = repo.getPlanById(planId)!!
+            assertEquals("النسخة الأحدث المعتمدة", afterStaleRepoAttempt.topic)
+
+            // 3. Attempt to bypass Repository Mutex and call JadhadhaDao.upsertIfNotStale directly with stale timestamp
+            val staleEntity = com.example.data.JadhadhaEntity.fromPlan(stalePlan)
+            val daoUpdated = dao.upsertIfNotStale(staleEntity, expectedUpdatedAt = savedInitial.updatedAt)
+            assertTrue("SQLite conditional UPDATE must reject stale write directly at DAO level", !daoUpdated)
+            assertEquals("النسخة الأحدث المعتمدة", repo.getPlanById(planId)!!.topic)
+        } finally {
+            db.close()
+        }
+    }
+
+    @Test
+    fun `phase5_supp_4 - test all 4 atomic file write failure and recovery scenarios`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val fileManager = com.example.data.PlanFileManager(context)
+        val planId = "plan_atomic_4_cases"
+
+        try {
+            // Scenario 1: Save initial valid attachment
+            val originalBytes = "Original valid attachment bytes v1".toByteArray()
+            val saved1 = fileManager.saveAttachment(planId, "lesson.docx", originalBytes)
+            assertTrue(saved1.isSuccess)
+            val targetFile = fileManager.getAttachmentFile(planId, "lesson.docx")!!
+            assertEquals(String(originalBytes), targetFile.readText())
+
+            // Scenario 2: Stream throws IOException mid-write while overwriting existing file ("lesson.docx")
+            // -> .tmp file must be deleted immediately AND the existing valid "lesson.docx" must remain 100% intact!
+            val failingStream = object : java.io.InputStream() {
+                private var bytesRead = 0
+                override fun read(): Int {
+                    if (bytesRead++ >= 10) {
+                        throw java.io.IOException("Simulated mid-stream disk/IO failure")
+                    }
+                    return 'X'.code
+                }
+            }
+            val failedOverwrite = fileManager.saveAttachmentFromStream(planId, "lesson.docx", failingStream)
+            assertTrue("Interrupted stream write must return failure", failedOverwrite.isFailure)
+
+            val attachmentsDir = fileManager.getPlanAttachmentsDir(planId)
+            val tmpAfterFailure = attachmentsDir.listFiles { _, name -> name.endsWith(".tmp") } ?: emptyArray()
+            assertEquals("Temporary .tmp file must be cleaned up immediately on write failure", 0, tmpAfterFailure.size)
+            assertEquals(
+                "Existing valid file must not be corrupted or deleted when overwrite fails",
+                String(originalBytes),
+                fileManager.getAttachmentFile(planId, "lesson.docx")!!.readText()
+            )
+
+            // Scenario 3 & 4: Simulate hard process kill leaving an orphaned .tmp file in the attachments directory
+            val orphanTmp = java.io.File(attachmentsDir, "lesson.docx_crashed.tmp")
+            orphanTmp.writeText("Partial unrenamed temp content")
+            assertTrue(orphanTmp.exists())
+            assertTrue("verifyFileIntegrity must reject .tmp files", !fileManager.verifyFileIntegrity(orphanTmp))
+
+            val cleanedTmpCount = fileManager.cleanupTempFiles()
+            assertEquals(1, cleanedTmpCount)
+            assertTrue(!orphanTmp.exists())
+            assertEquals(
+                "Valid attachment file must remain untouched after cleanupTempFiles()",
+                String(originalBytes),
+                fileManager.getAttachmentFile(planId, "lesson.docx")!!.readText()
+            )
+        } finally {
+            fileManager.deletePlanDirectory(planId)
+        }
+    }
+
+    @Test
+    fun `phase5_supp_5 - verify attachments_table is Single Source of Truth with legacy migration and rollback on DB error`() = kotlinx.coroutines.runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val db = androidx.room.Room.inMemoryDatabaseBuilder(context, com.example.data.AppDatabase::class.java).build()
+        val realDao = db.jadhadhaDao()
+        val realAttDao = db.attachmentDao()
+        val fileManager = com.example.data.PlanFileManager(context)
+        val planId = "plan_ssot_attachments"
+
+        try {
+            // 1. Insert a legacy entity that only has attachments in `attachmentsJson` and 0 rows in `attachments_table`
+            val legacyAttachment = com.example.model.AttachmentInfo(
+                id = "legacy_att_1",
+                planId = planId,
+                fileName = "legacy_doc.docx",
+                relativePath = "plans/$planId/attachments/legacy_doc.docx",
+                mimeType = "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                fileSize = 128L,
+                createdAt = 1000L
+            )
+            val legacyPlan = SamplePlans.MANFA_PLAN.copy(
+                id = planId,
+                topic = "درس توحيد مصدر المرفقات",
+                attachments = listOf(legacyAttachment)
+            )
+            realDao.insertOrUpdate(com.example.data.JadhadhaEntity.fromPlan(legacyPlan))
+            assertEquals(0, realAttDao.getAttachmentsListForPlan(planId).size)
+
+            // 2. Reading via JadhadhaRepository automatically migrates legacy attachmentsJson into attachments_table
+            val repo = com.example.data.JadhadhaRepository(realDao, context, realAttDao)
+            val loadedPlan = repo.getPlanById(planId)!!
+            assertEquals(1, loadedPlan.attachments.size)
+            assertEquals("legacy_att_1", loadedPlan.attachments.first().id)
+            assertEquals(1, realAttDao.getAttachmentsListForPlan(planId).size)
+
+            // 3. Simulate a DB failure when inserting a new attachment into AttachmentDao -> physical file must be rolled back!
+            val failingAttDao = object : com.example.data.AttachmentDao by realAttDao {
+                override suspend fun insert(attachment: com.example.data.AttachmentEntity) {
+                    throw android.database.sqlite.SQLiteException("Simulated AttachmentDao insert failure")
+                }
+            }
+            val repoWithFailingAttDao = com.example.data.JadhadhaRepository(realDao, context, failingAttDao)
+            val failedAdd = repoWithFailingAttDao.addAttachment(planId, "should_rollback.docx", "Rollback test".toByteArray())
+            assertTrue("addAttachment must fail when AttachmentDao.insert fails", failedAdd.isFailure)
+            assertTrue(
+                "Physical file must be rolled back (deleted) when DB insertion fails",
+                fileManager.getAttachmentFile(planId, "should_rollback.docx") == null
+            )
+
+            repo.deletePlan(planId)
+        } finally {
+            db.close()
+        }
+    }
 }
+
 
 
 

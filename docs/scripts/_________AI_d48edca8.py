@@ -97,7 +97,7 @@ class Settings:
     nested_proto_index: int = 1        # أي جدول متداخل في النموذج يُؤخذ منه تنسيق الجداول
     use_ai: bool = True
     ai_model: str = DEFAULT_AI_MODEL
-    api_key: str = "AQ.Ab8RN6J1NZ6BMsz62m4AOkJ_DnB5pUN_eoOHCl8Lmqo8fovZUA"
+    api_key: str = field(default_factory=lambda: os.environ.get("GEMINI_API_KEY", "").strip())
     ai_retries: int = 4
     ai_timeout: int = 120
     out_dir: Path = Path(OUT_DIR)
@@ -1674,16 +1674,11 @@ def main(argv=None) -> int:
         print("تنبيه: --out-name يُتجاهل مع أكثر من مصدر.")
         cfg.out_name = ""
     if cfg.use_ai:
-    	cfg.api_key = "AQ.Ab8RN6J1NZ6BMsz62m4AOkJ_DnB5pUN_eoOHCl8Lmqo8fovZUA"
-
-
-    if cfg.use_ai:
-        cfg.api_key = "AQ.Ab8RN6J1NZ6BMsz62m4AOkJ_DnB5pUN_eoOHCl8Lmqo8fovZUA"
-        if cfg.api_key:
-            say(f"الذكاء الاصطناعي: مفعّل ({cfg.ai_model})")
-        else:
-            say("الذكاء الاصطناعي: غير مفعّل — لا يوجد مفتاح GEMINI_API_KEY (راجع أعلى الملف).")
-            cfg.use_ai = False
+        cfg.api_key = (cfg.api_key or os.environ.get("GEMINI_API_KEY", "")).strip()
+        if not cfg.api_key:
+            print("✖ خطأ: متغير البيئة GEMINI_API_KEY غير محدد. عيّن GEMINI_API_KEY أو استعمل --no-ai.", file=sys.stderr)
+            return 1
+        say(f"الذكاء الاصطناعي: مفعّل ({cfg.ai_model})")
 
     failures = 0
     for src in sources:

@@ -1,6 +1,0 @@
-{
-  "summary":  "خطة التنفيذ الشاملة لإعادة بناء محرك تفريغ الجذاذات (DocumentFileReader و JadhadhaParser و GeminiAiService)، ومولّد الوورد الرسمي بـ 5 أعمدة RTL (DocxGenerator)، وتحديث النماذج الثلاثة (SamplePlans) وتصفير قاعدة البيانات (AppDatabase).",
-  "updatedAt":  "2026-10-30T22:07:51.340836681Z",
-  "requestFeedback":  true,
-  "userFacing":  true
-}

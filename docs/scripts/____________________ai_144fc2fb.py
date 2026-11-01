@@ -58,7 +58,7 @@ class Settings:
     # --- إعدادات الذكاء الاصطناعي ---
     use_ai: bool = True
     ai_model: str = "gemini-3.5-flash"
-    api_key: str = "AQ.Ab8RN6J1NZ6BMsz62m4AOkJ_DnB5pUN_eoOHCl8Lmqo8fovZUA"
+    api_key: str = field(default_factory=lambda: os.environ.get("GEMINI_API_KEY", "").strip())
     ai_retries: int = 4
     ai_timeout: int = 120
 
@@ -1157,10 +1157,10 @@ def build(model_path: Path, source_path: Path, cfg: Settings, report: Report) ->
 
     rows = read_source_rows(src, numbering, report)
     
-    if cfg.use_ai and cfg.api_key:
+    if cfg.use_ai:
+        if not cfg.api_key:
+            raise FatalError("متغير البيئة GEMINI_API_KEY غير محدد؛ يرجى تعيين GEMINI_API_KEY في البيئة قبل التشغيل.")
         ai_refine_insha(rows, hdr, cfg, report)
-    elif cfg.use_ai:
-        say("تنبيه: الذكاء الاصطناعي معطّل لعدم توفر المفتاح.")
         
     sessions = assign_sessions(rows)
     ctx = Ctx(cfg, report, numbering, src.part, doc, model.nested_proto)

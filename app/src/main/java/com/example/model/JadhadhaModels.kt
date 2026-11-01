@@ -55,8 +55,8 @@ data class JadhadhaInfo(
     val duration: String = "ساعتان (حصتان)",
     val materials: String = "السبورة - كتاب المتعلم (ة) – دفتر المتعلم (ة).",
     val reference: String = "المختار في اللغة العربية",
-    val teacherName: String = "محمد العابد",
-    val schoolName: String = "مدرسة أنوال (السلك الإعدادي)",
+    val teacherName: String = "",
+    val schoolName: String = "",
     val communicativeComp: String = "يتمكن المتعلم من التواصل بلغة عربية سليمة، مستثمرا تعلماته الفصلية ومطالعاته الحرة.",
     val methodologicalComp: String = "تمكن المتعلم من استعمال أدوات القراءة المنهجية لفهم النص السردي وتحليله، وتركيب عناصره، واستثماره.",
     val culturalComp: String = "يغني المتعلم رصيده الثقافي بمعطيات تاريخية ووطنية تتصل بمرحلة الاستعمار والكفاح من أجل الاستقلال."

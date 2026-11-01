@@ -417,9 +417,10 @@ fun ExtractorScreen(
                     OutlinedTextField(
                         value = keyDraft,
                         onValueChange = { keyDraft = it },
-                        label = { Text("مفتاح ${ltr("Gemini API")} (${ltr("AIza...")})") },
+                        label = { Text("مفتاح ${ltr("Gemini API")}") },
                         placeholder = { Text("الصق مفتاح ${ltr("Gemini")} هنا...") },
                         singleLine = true,
+                        visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
                         modifier = Modifier
                             .fillMaxWidth()
                             .testTag("pdf_api_key_input")

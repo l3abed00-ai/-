@@ -20,36 +20,141 @@ class JadhadhaRepository(
     private val planFileManager: PlanFileManager? = context?.let { PlanFileManager(it) }
 
     val allPlans: Flow<List<JadhadhaPlan>> = jadhadhaDao.getAllPlans().map { entities ->
-        entities.map { it.toPlan() }
+        entities.map { entity -> resolvePlanAttachments(entity) }
     }
 
     fun getPlansByCategory(category: String): Flow<List<JadhadhaPlan>> =
         jadhadhaDao.getPlansByCategory(category).map { entities ->
-            entities.map { it.toPlan() }
+            entities.map { entity -> resolvePlanAttachments(entity) }
         }
 
     val allCategories: Flow<List<String>> = jadhadhaDao.getAllCategories()
 
+    /**
+     * Resolves a plan's attachments using [AttachmentDao] (`attachments_table`) as the canonical
+     * Single Source of Truth when available. If a legacy record still has attachments only in
+     * `attachmentsJson`, migrates them transparently into `attachments_table` so zero data is lost.
+     */
+    private suspend fun resolvePlanAttachments(entity: JadhadhaEntity): JadhadhaPlan {
+        val basePlan = entity.toPlan()
+        val dao = attachmentDao ?: return basePlan
+
+        var dbAttachments = dao.getAttachmentsListForPlan(entity.id)
+        if (dbAttachments.isEmpty() && basePlan.attachments.isNotEmpty()) {
+            // Transparent one-way migration from legacy attachmentsJson to attachments_table
+            val migrated = basePlan.attachments.map { att ->
+                AttachmentEntity(
+                    id = att.id,
+                    planId = entity.id,
+                    fileName = att.fileName,
+                    relativePath = att.relativePath,
+                    mimeType = att.mimeType,
+                    fileSize = att.fileSize,
+                    createdAt = att.createdAt
+                )
+            }
+            runCatching { dao.insertAll(migrated) }
+            dbAttachments = dao.getAttachmentsListForPlan(entity.id)
+        }
+
+        val canonicalAttachments = dbAttachments.map {
+            AttachmentInfo(
+                id = it.id,
+                planId = it.planId,
+                fileName = it.fileName,
+                relativePath = it.relativePath,
+                mimeType = it.mimeType,
+                fileSize = it.fileSize,
+                createdAt = it.createdAt
+            )
+        }
+        return basePlan.copy(attachments = canonicalAttachments)
+    }
+
     suspend fun savePlan(plan: JadhadhaPlan, isCustom: Boolean = true): Unit = writeMutex.withLock {
         val existing = jadhadhaDao.getPlanById(plan.id)
-        // Prevent stale write: if existing entity in DB was updated after this plan's timestamp, do not blindly overwrite
+        // Prevent stale write: if existing entity in DB was updated after this plan's timestamp, reject write
         if (existing != null && existing.updatedAt > plan.updatedAt) {
             return@withLock
         }
-        val planToSave = plan.copy(updatedAt = System.currentTimeMillis())
+
+        val canonicalAttachments = if (attachmentDao != null) {
+            val existingDbAtts = attachmentDao.getAttachmentsListForPlan(plan.id)
+            if (plan.attachments.isNotEmpty() && existingDbAtts.isEmpty()) {
+                attachmentDao.insertAll(
+                    plan.attachments.map { att ->
+                        AttachmentEntity(
+                            id = att.id,
+                            planId = plan.id,
+                            fileName = att.fileName,
+                            relativePath = att.relativePath,
+                            mimeType = att.mimeType,
+                            fileSize = att.fileSize,
+                            createdAt = att.createdAt
+                        )
+                    }
+                )
+                plan.attachments
+            } else {
+                existingDbAtts.map {
+                    AttachmentInfo(
+                        id = it.id,
+                        planId = it.planId,
+                        fileName = it.fileName,
+                        relativePath = it.relativePath,
+                        mimeType = it.mimeType,
+                        fileSize = it.fileSize,
+                        createdAt = it.createdAt
+                    )
+                }
+            }
+        } else {
+            plan.attachments
+        }
+
+        val nextTimestamp = if (existing != null) {
+            maxOf(System.currentTimeMillis(), existing.updatedAt + 1L)
+        } else {
+            System.currentTimeMillis()
+        }
+
+        val planToSave = plan.copy(
+            updatedAt = nextTimestamp,
+            attachments = canonicalAttachments
+        )
         val entity = JadhadhaEntity.fromPlan(planToSave, isCustom = isCustom)
-        jadhadhaDao.insertOrUpdate(entity)
+        jadhadhaDao.upsertIfNotStale(entity, expectedUpdatedAt = plan.updatedAt)
     }
 
+    /**
+     * Deletes a plan with crash-resilient consistency between Room and the filesystem:
+     * 1. Records [id] in the persistent pending-deletion log (`KEY_PENDING_DELETE_IDS`).
+     * 2. Deletes the database rows first (`attachments_table` + `jadhadha_table`).
+     *    - If the DB deletion throws an exception, removes [id] from pending-deletions and rethrows
+     *      so the physical directory remains untouched and consistent with the surviving DB record.
+     * 3. Deletes the physical plan directory (`deletePlanDirectory(id)`).
+     *    - Only removes [id] from `KEY_PENDING_DELETE_IDS` if the directory is completely deleted.
+     *    - If directory deletion fails (or the process crashes between step 2 and step 3),
+     *      [reconcileStorage] / [cleanupOrphanFiles] will complete the cleanup on next run.
+     */
     suspend fun deletePlan(id: String): Unit = writeMutex.withLock {
-        // 1. Physically delete all files and directory belonging to this plan
-        planFileManager?.deletePlanDirectory(id)
+        markPlanPendingDeletion(id)
+        try {
+            attachmentDao?.deleteByPlanId(id)
+            jadhadhaDao.deleteById(id)
+        } catch (t: Throwable) {
+            // DB deletion failed: unmark pending deletion so physical files are preserved for the surviving DB row
+            unmarkPlanPendingDeletion(id)
+            throw t
+        }
 
-        // 2. Delete database attachment rows for this plan
-        attachmentDao?.deleteByPlanId(id)
+        val dirDeleted = runCatching {
+            planFileManager?.deletePlanDirectory(id) ?: true
+        }.getOrDefault(false)
 
-        // 3. Delete the plan entity from the database
-        jadhadhaDao.deleteById(id)
+        if (dirDeleted) {
+            unmarkPlanPendingDeletion(id)
+        }
     }
 
     suspend fun addAttachment(
@@ -62,74 +167,192 @@ class JadhadhaRepository(
             ?: return Result.failure(IllegalStateException("Context is required for attachment storage"))
 
         val saveResult = manager.saveAttachment(planId, fileName, bytes, mimeType)
-        val attInfo = saveResult.getOrThrow()
+        val attInfo = saveResult.getOrElse { return Result.failure(it) }
 
-        // Insert into attachment table
-        attachmentDao?.insert(
-            AttachmentEntity(
-                id = attInfo.id,
-                planId = planId,
-                fileName = attInfo.fileName,
-                relativePath = attInfo.relativePath,
-                mimeType = attInfo.mimeType,
-                fileSize = attInfo.fileSize,
-                createdAt = attInfo.createdAt
+        try {
+            // 1. Insert into canonical attachments_table (Single Source of Truth)
+            attachmentDao?.insert(
+                AttachmentEntity(
+                    id = attInfo.id,
+                    planId = planId,
+                    fileName = attInfo.fileName,
+                    relativePath = attInfo.relativePath,
+                    mimeType = attInfo.mimeType,
+                    fileSize = attInfo.fileSize,
+                    createdAt = attInfo.createdAt
+                )
             )
-        )
 
-        // Update plan entity with attachment
-        val existing = jadhadhaDao.getPlanById(planId)?.toPlan()
-        if (existing != null) {
-            val updatedAttachments = existing.attachments.filterNot { it.id == attInfo.id } + attInfo
-            val updatedPlan = existing.copy(
-                attachments = updatedAttachments,
-                updatedAt = System.currentTimeMillis()
-            )
-            jadhadhaDao.insertOrUpdate(JadhadhaEntity.fromPlan(updatedPlan))
+            // 2. Keep plan entity metadata synchronized
+            val existingEntity = jadhadhaDao.getPlanById(planId)
+            if (existingEntity != null) {
+                val existingPlan = resolvePlanAttachments(existingEntity)
+                val updatedAttachments = if (attachmentDao != null) {
+                    existingPlan.attachments
+                } else {
+                    existingPlan.attachments.filterNot { it.id == attInfo.id } + attInfo
+                }
+                val nextTimestamp = maxOf(System.currentTimeMillis(), existingEntity.updatedAt + 1L)
+                val updatedPlan = existingPlan.copy(
+                    attachments = updatedAttachments,
+                    updatedAt = nextTimestamp
+                )
+                jadhadhaDao.insertOrUpdate(JadhadhaEntity.fromPlan(updatedPlan, isCustom = existingEntity.isCustom))
+            }
+
+            Result.success(attInfo)
+        } catch (t: Throwable) {
+            // Roll back physical file if DB insertion failed so no orphan file remains on disk
+            runCatching { manager.deleteAttachmentFile(planId, attInfo.fileName) }
+            Result.failure(t)
         }
-
-        Result.success(attInfo)
     }
 
     suspend fun deleteAttachment(planId: String, attachmentId: String): Boolean = writeMutex.withLock {
-        val existing = jadhadhaDao.getPlanById(planId)?.toPlan()
+        val existingEntity = jadhadhaDao.getPlanById(planId)
+        val existingPlan = existingEntity?.toPlan()
         val att = attachmentDao?.getAttachmentById(attachmentId)
         val fileName = att?.fileName
-            ?: existing?.attachments?.firstOrNull { it.id == attachmentId || it.fileName == attachmentId }?.fileName
+            ?: existingPlan?.attachments?.firstOrNull { it.id == attachmentId || it.fileName == attachmentId }?.fileName
             ?: attachmentId
 
-        planFileManager?.deleteAttachmentFile(planId, fileName)
-        attachmentDao?.deleteById(attachmentId)
-
-        if (existing != null) {
-            val updatedAttachments = existing.attachments.filterNot { it.id == attachmentId || it.fileName == attachmentId }
-            val updatedPlan = existing.copy(
-                attachments = updatedAttachments,
-                updatedAt = System.currentTimeMillis()
-            )
-            jadhadhaDao.insertOrUpdate(JadhadhaEntity.fromPlan(updatedPlan))
+        // 1. Delete from canonical attachments_table first
+        if (att != null) {
+            attachmentDao?.deleteById(att.id)
+        } else {
+            attachmentDao?.deleteById(attachmentId)
         }
-        true
+
+        // 2. Synchronize jadhadha_table metadata
+        if (existingEntity != null && existingPlan != null) {
+            val remainingAttachments = if (attachmentDao != null) {
+                attachmentDao.getAttachmentsListForPlan(planId).map {
+                    AttachmentInfo(
+                        id = it.id,
+                        planId = it.planId,
+                        fileName = it.fileName,
+                        relativePath = it.relativePath,
+                        mimeType = it.mimeType,
+                        fileSize = it.fileSize,
+                        createdAt = it.createdAt
+                    )
+                }
+            } else {
+                existingPlan.attachments.filterNot { it.id == attachmentId || it.fileName == attachmentId }
+            }
+            val nextTimestamp = maxOf(System.currentTimeMillis(), existingEntity.updatedAt + 1L)
+            val updatedPlan = existingPlan.copy(
+                attachments = remainingAttachments,
+                updatedAt = nextTimestamp
+            )
+            jadhadhaDao.insertOrUpdate(JadhadhaEntity.fromPlan(updatedPlan, isCustom = existingEntity.isCustom))
+        }
+
+        // 3. Delete physical file (even if physical delete fails, DB is consistent and reconcileStorage can clean orphans)
+        val fileDeleted = runCatching {
+            planFileManager?.deleteAttachmentFile(planId, fileName) ?: true
+        }.getOrDefault(false)
+
+        fileDeleted
     }
 
-    suspend fun cleanupOrphanFiles(): Int = writeMutex.withLock {
+    /**
+     * Performs full startup/on-demand storage reconciliation between Room and the filesystem:
+     * 1. Retries pending directory deletions recorded in `KEY_PENDING_DELETE_IDS`.
+     * 2. Deletes any leftover `*.tmp` files from interrupted atomic writes.
+     * 3. Removes orphan plan directories on disk that have no matching row in `jadhadha_table`.
+     * 4. Migrates any legacy `attachmentsJson` entries to `attachments_table` and removes orphan files
+     *    inside existing plan attachment folders that are not registered in `attachments_table`.
+     */
+    suspend fun reconcileStorage(): Int = writeMutex.withLock {
         val manager = planFileManager ?: return 0
-        val allIds = jadhadhaDao.getAllPlanIds().toSet()
-        manager.cleanupOrphanFiles(allIds)
+        var totalCleaned = 0
+
+        // 1. Complete any pending plan directory deletions
+        val pendingIds = getPendingDeletionPlanIds().toSet()
+        for (pendingId in pendingIds) {
+            val stillInDb = jadhadhaDao.getPlanById(pendingId) != null
+            if (stillInDb) {
+                unmarkPlanPendingDeletion(pendingId)
+            } else if (manager.deletePlanDirectory(pendingId)) {
+                unmarkPlanPendingDeletion(pendingId)
+                totalCleaned++
+            }
+        }
+
+        // 2. Clean up leftover .tmp files from interrupted writes
+        totalCleaned += manager.cleanupTempFiles()
+
+        // 3. Clean up orphan plan directories not in jadhadha_table
+        val validPlanIds = jadhadhaDao.getAllPlanIds().toSet()
+        totalCleaned += manager.cleanupOrphanFiles(validPlanIds)
+
+        // 4. Reconcile attachments_table with legacy attachmentsJson and physical attachment files
+        if (attachmentDao != null) {
+            val allEntities = runCatching { jadhadhaDao.getAllPlansSnapshot() }.getOrDefault(emptyList())
+            for (entity in allEntities) {
+                val resolved = resolvePlanAttachments(entity)
+                val validFileNames = resolved.attachments.map { manager.sanitizeFileName(it.fileName) }.toSet()
+                val attDir = manager.getPlanAttachmentsDir(entity.id, createIfMissing = false)
+                if (attDir.exists() && attDir.isDirectory) {
+                    attDir.listFiles()?.forEach { file ->
+                        if (file.isFile && !file.name.endsWith(".tmp") && file.name !in validFileNames) {
+                            if (file.delete()) {
+                                totalCleaned++
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        totalCleaned
+    }
+
+    suspend fun cleanupOrphanFiles(): Int {
+        return reconcileStorage()
+    }
+
+    fun getPendingDeletionPlanIds(): Set<String> {
+        val prefs = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE) ?: return emptySet()
+        return prefs.getStringSet(KEY_PENDING_DELETE_IDS, emptySet())?.toSet().orEmpty()
+    }
+
+    private fun markPlanPendingDeletion(planId: String) {
+        val prefs = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE) ?: return
+        val updated = getPendingDeletionPlanIds().toMutableSet().apply { add(planId) }
+        prefs.edit().putStringSet(KEY_PENDING_DELETE_IDS, updated).commit()
+    }
+
+    private fun unmarkPlanPendingDeletion(planId: String) {
+        val prefs = context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE) ?: return
+        val current = getPendingDeletionPlanIds()
+        if (planId in current) {
+            val updated = current.toMutableSet().apply { remove(planId) }
+            prefs.edit().putStringSet(KEY_PENDING_DELETE_IDS, updated).commit()
+        }
     }
 
     suspend fun clearAllStoredData(): Unit = writeMutex.withLock {
+        val allPlanIds = jadhadhaDao.getAllPlanIds()
+        allPlanIds.forEach { id ->
+            markPlanPendingDeletion(id)
+        }
+
         // Delete all attachment rows
         attachmentDao?.getAllAttachments()?.forEach { att ->
             attachmentDao.deleteById(att.id)
         }
 
         // Delete all plan rows
-        val allPlanIds = jadhadhaDao.getAllPlanIds()
-        allPlanIds.forEach { id ->
-            planFileManager?.deletePlanDirectory(id)
-        }
         jadhadhaDao.deleteAllJadhadhat()
+
+        // Delete physical plan directories
+        allPlanIds.forEach { id ->
+            if (planFileManager?.deletePlanDirectory(id) != false) {
+                unmarkPlanPendingDeletion(id)
+            }
+        }
 
         context?.let { ctx ->
             runCatching {
@@ -149,25 +372,8 @@ class JadhadhaRepository(
     }
 
     suspend fun getPlanById(id: String): JadhadhaPlan? {
-        val plan = jadhadhaDao.getPlanById(id)?.toPlan() ?: return null
-        val dbAttachments = attachmentDao?.getAttachmentsListForPlan(id)?.map {
-            AttachmentInfo(
-                id = it.id,
-                planId = it.planId,
-                fileName = it.fileName,
-                relativePath = it.relativePath,
-                mimeType = it.mimeType,
-                fileSize = it.fileSize,
-                createdAt = it.createdAt
-            )
-        }.orEmpty()
-
-        return if (dbAttachments.isNotEmpty()) {
-            val combined = (plan.attachments + dbAttachments).distinctBy { it.id }
-            plan.copy(attachments = combined)
-        } else {
-            plan
-        }
+        val entity = jadhadhaDao.getPlanById(id) ?: return null
+        return resolvePlanAttachments(entity)
     }
 
     /**
@@ -207,5 +413,6 @@ class JadhadhaRepository(
     companion object {
         private const val PREFS_NAME = "jadhadha_repository_prefs"
         private const val KEY_SAMPLE_DATA_SEEDED = "has_seeded_sample_data"
+        private const val KEY_PENDING_DELETE_IDS = "pending_delete_plan_ids"
     }
 }

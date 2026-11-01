@@ -501,8 +501,8 @@ private fun IdentificationTable(plan: JadhadhaPlan, fontFamily: FontFamily) {
                 .fillMaxWidth()
                 .border(0.5.dp, Color(0xFFCBD5E1))
         ) {
-            TableCell(title = "الأستاذ", value = plan.info.teacherName.ifBlank { "محمد العابد" }, weight = 1.2f, fontFamily = fontFamily)
-            TableCell(title = "المؤسسة", value = plan.info.schoolName.ifBlank { "مدرسة أنوال (السلك الإعدادي)" }, weight = 2f, fontFamily = fontFamily)
+            TableCell(title = "الأستاذ", value = plan.info.teacherName.ifBlank { "—" }, weight = 1.2f, fontFamily = fontFamily)
+            TableCell(title = "المؤسسة", value = plan.info.schoolName.ifBlank { "—" }, weight = 2f, fontFamily = fontFamily)
         }
     }
 }

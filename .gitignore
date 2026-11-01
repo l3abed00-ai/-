@@ -10,9 +10,22 @@
 /.idea/assetWizardSettings.xml
 .DS_Store
 /build
+/app/build
 /captures
 .externalNativeBuild
 .cxx
 local.properties
+
+# Secrets & Environment
 .env
-debug.keystore
+.env*
+!.env.example
+google-services.json
+.aistudio/
+
+# Signing & Release Artifacts
+*.jks
+*.keystore
+keystore.properties
+*.apk
+*.aab

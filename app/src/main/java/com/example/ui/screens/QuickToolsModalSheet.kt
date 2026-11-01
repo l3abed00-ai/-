@@ -239,7 +239,7 @@ fun QuickToolsModalSheet(
                     },
                     placeholder = {
                         Text(
-                            text = ltr("AIzaSy..."),
+                            text = ltr("GEMINI_API_KEY..."),
                             style = MaterialTheme.typography.bodySmall,
                             maxLines = 1,
                             softWrap = false,

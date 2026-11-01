@@ -20,12 +20,15 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Psychology
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.SuggestionChip
@@ -39,6 +42,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.model.PedagogicalComponent
@@ -63,6 +68,7 @@ fun AiGeneratorScreen(
     var lessonText by remember { mutableStateOf("") }
     var apiKeyInput by remember { mutableStateOf(customApiKey) }
     var showApiKeySettings by remember { mutableStateOf(false) }
+    var isApiKeyVisible by remember { mutableStateOf(false) }
 
     val scrollState = rememberScrollState()
 
@@ -270,8 +276,26 @@ fun AiGeneratorScreen(
                         OutlinedTextField(
                             value = apiKeyInput,
                             onValueChange = { apiKeyInput = it },
-                            placeholder = { Text(ltr("AIzaSy...")) },
-                            modifier = Modifier.weight(1f),
+                            placeholder = { Text("أدخل مفتاح Gemini API") },
+                            visualTransformation = if (isApiKeyVisible) {
+                                VisualTransformation.None
+                            } else {
+                                PasswordVisualTransformation()
+                            },
+                            trailingIcon = {
+                                IconButton(
+                                    onClick = { isApiKeyVisible = !isApiKeyVisible },
+                                    modifier = Modifier.testTag("toggle_api_key_visibility")
+                                ) {
+                                    Icon(
+                                        imageVector = if (isApiKeyVisible) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                                        contentDescription = if (isApiKeyVisible) "إخفاء المفتاح" else "إظهار المفتاح"
+                                    )
+                                }
+                            },
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("api_key_input"),
                             singleLine = true
                         )
                         AppButton(
