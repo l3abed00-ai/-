@@ -29,3 +29,4 @@ google-services.json
 keystore.properties
 *.apk
 *.aab
+!public/*.apk
