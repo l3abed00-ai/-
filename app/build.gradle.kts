@@ -142,7 +142,17 @@ dependencies {
   androidTestImplementation(libs.androidx.junit)
   androidTestImplementation(libs.androidx.runner)
   debugImplementation(libs.androidx.compose.ui.test.manifest)
-  debugImplementation(libs.androidx.compose.ui.tooling)
   "ksp"(libs.androidx.room.compiler)
   // "ksp"(libs.moshi.kotlin.codegen)
+}
+
+afterEvaluate {
+  val copyTask = tasks.register<Copy>("copyReleaseApkToReleasesDir") {
+    from(layout.buildDirectory.dir("outputs/apk/release"))
+    include("app-release.apk")
+    into(rootProject.layout.projectDirectory.dir("releases"))
+  }
+  tasks.matching { it.name == "assembleRelease" }.configureEach {
+    finalizedBy(copyTask)
+  }
 }

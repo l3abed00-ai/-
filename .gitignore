@@ -30,3 +30,4 @@ keystore.properties
 *.apk
 *.aab
 !public/*.apk
+!releases/*.apk
