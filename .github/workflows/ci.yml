@@ -1,13 +1,14 @@
-name: Android CI & Security Verification
+name: Android CI & Build APKs
 
 on:
   push:
-    branches: [ "main", "master", "phase-6a" ]
+    branches: [ "main", "master" ]
   pull_request:
-    branches: [ "main", "master", "phase-6a" ]
+    branches: [ "main", "master" ]
+  workflow_dispatch:
 
 jobs:
-  verify:
+  build:
     runs-on: ubuntu-latest
 
     steps:
@@ -36,13 +37,32 @@ jobs:
             exit 1
           fi
 
-      - name: Grant execute permission for gradlew
+      - name: Grant execute permission for gradlew and verify.sh
         run: chmod +x gradlew scripts/verify.sh
 
-      - name: Run verify.sh (assembleDebug, testDebugUnitTest, lintDebug, APK scan)
+      - name: Run verification (tests, lint, and assembleDebug)
         run: ./scripts/verify.sh
 
-      - name: Upload Lint and Test Reports
+      - name: Generate upload keystore for release build
+        run: |
+          keytool -genkeypair -v -keystore my-upload-key.jks -alias upload -keyalg RSA -keysize 2048 -validity 10000 -storepass "android" -keypass "android" -dname "CN=Jadhadha, OU=Education, O=L3abed, L=Rabat, C=MA"
+
+      - name: Build Release APK
+        env:
+          KEYSTORE_PATH: ${{ github.workspace }}/my-upload-key.jks
+          STORE_PASSWORD: "android"
+          KEY_PASSWORD: "android"
+        run: ./gradlew assembleRelease
+
+      - name: Upload APKs as Workflow Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: jadhadha-apks
+          path: |
+            app/build/outputs/apk/debug/app-debug.apk
+            app/build/outputs/apk/release/app-release.apk
+
+      - name: Upload Verification & Lint Reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
